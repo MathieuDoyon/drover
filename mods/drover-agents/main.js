@@ -306,8 +306,8 @@ export default class Agents extends View {
       .child(h_flex().h(28).items_center().child(div().flex_1().text_size(12).font_medium().text_color(t.muted).child(title)).child(add))
       .children(rows);
     // ▶ starts the agent or squad with no task, in a new tab of this space (Drover, a free helper),
-    // in the "Opens in" project's repo, else the space's folder.
-    const projects = loadProjects();
+    // in the "Opens in" project's repo, else the space's folder. A project on another machine is not offered (its paths are there).
+    const projects = loadProjects().filter((p) => !p.remote);
     const startIn = projects.some((p) => p.id === shared(START_IN_KEY)) ? shared(START_IN_KEY) : null; // a removed project: the space
     const startNow = (kind, id) => (_e, cx) => {
       cx.stop_propagation();

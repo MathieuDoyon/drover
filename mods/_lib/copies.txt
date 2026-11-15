@@ -12,3 +12,4 @@ config-schema.js
 config.js
 keys.js
 workfolder.js
+remote.js

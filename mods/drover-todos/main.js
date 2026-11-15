@@ -13,7 +13,8 @@ import { routeSend, liveAgent, subIssues, foldNotes, ago, initialOf, mix, noteRe
 import { age } from "./sources.js";
 import { bind, cfg, isEnabled, whenLoaded, load as loadCfg, ready as cfgReady } from "./config.js";
 import { gated } from "./ui.js";
-import { load, save, edit, loadProjects, loadConfig, launch, sendToAgent, loadRuns, loadWakes, loadContext, jiraSite, mergeContext, openUrl, HEARTBEAT_MS, startOptions, beatCreateGuard, clearCreateGuard, modSettings } from "./io.js";
+import { load, save, edit, loadProjects, loadConfig, launch, sendToAgent, loadRuns, loadWakes, loadContext, jiraSite, mergeContext, openUrl, HEARTBEAT_MS, startOptions, beatCreateGuard, clearCreateGuard, modSettings, loadMerged, watchRemote, retryRemote } from "./io.js";
+import { READONLY_TIP, remoteCardRows } from "./remote.js";
 
 const I = (name) => `mods/drover-todos/icons/${name}.svg`;
 const pad = (n) => String(n).padStart(2, "0");
@@ -743,7 +744,7 @@ export class Editor {
   render(cx) {
     const t = theme();
     const field = (el) => el.px(10).rounded(8).border_1().border_color(t.input).bg(t.background).text_size(13).text_color(t.foreground);
-    const projects = loadProjects();
+    const projects = loadProjects().filter((p) => !p.remote); // a project on another machine takes no local card
     const prio = PRIORITY_COLOR(t);
     const items = {
       status: COLUMNS.map(([id, name]) => ({ key: id, glyph: STATUS_ICON[id].icon, color: t[STATUS_ICON[id].tone], text: name, current: id === this.column, on: (cx) => this.setProp("status", id, cx) })),
@@ -1155,8 +1156,36 @@ export class Editor {
   }
 }
 
+// A card of a project on another machine: plain text, no control that writes, no image or file resolved on this machine (T-MWHVWQNL2HA).
+export class RemoteCardView {
+  render(_cx) {
+    const t = theme();
+    const v = remoteCardRows(props().remoteCard);
+    const row = (label, value) => h_flex().gap(10).text_size(12.5).child(div().w(70).flex_none().text_color(t.dim).child(label)).child(div().flex_1().min_w(0).child(value));
+    return v_flex().id("remote-card").w_full().p(18).gap(10).bg(t.popover).text_color(t.foreground)
+      .on_key_down((e, cx) => { if (e.key === "escape") { closeOverlay(props().overlay); cx.stop_propagation(); } })
+      .child(h_flex().gap(8).items_center()
+        .child(div().text_size(11).text_color(t.dim).child(v.id))
+        .child(chip(t, v.machine, t.accent))
+        .child(div().flex_1())
+        .child(div().text_size(11).text_color(t.dim).child("Esc")))
+      .child(div().id("remote-title").text_size(15).font_semibold().child(v.title))
+      .child(div().id("remote-ro").text_size(12).text_color(t.muted).tooltip(READONLY_TIP).child(READONLY_TIP))
+      .child(row("Status", COLUMN_NAME[v.column] ?? v.column))
+      .child(row("Priority", v.priority))
+      .when(v.tags.length > 0, (el) => el.child(row("Labels", v.tags.map((g) => `#${g}`).join(" "))))
+      .when(Boolean(v.agentText), (el) => el.child(row("Agent", v.agentText)))
+      .when(v.desc.trim() !== "", (el) => el.child(div().id("remote-desc").text_size(13).child(v.desc)))
+      .children(v.notes.map((n, i) => v_flex().id(`remote-note-${i}`).p(10).gap(4).rounded(8).border_1().border_color(t.border)
+        .child(div().text_size(11.5).text_color(t.dim).child(`${n.by}${n.kind ? ` · ${n.kind}` : ""}${n.at ? ` · ${stamp(n.at)}` : ""}`))
+        .child(div().text_size(13).child(n.text))))
+      .child(h_flex().pt(8).child(div().flex_1()).child(button(t, "remote-close", "Close", false, () => closeOverlay(props().overlay))));
+  }
+}
+
 export default class Todos extends View {
   init(_props, cx) {
+    if (props()?.overlay && props().remoteCard) { this.editor = new RemoteCardView(); return; }
     if (props()?.overlay && "edit" in props()) {
       bind({ shared, modSettings });
       this.editor = new Editor(cx);
@@ -1181,7 +1210,9 @@ export default class Todos extends View {
     if (this.editor) return this.editor.render(cx); // the task editor dialog is not the Todos screen: it opens from Board, Tasks and the CLI even when the list is off
     const t = theme();
     { const g = gated("drover-todos"); if (g) return g; }
-    const all = load();
+    if (!this.remoteOn) { this.remoteOn = true; watchRemote(cx, () => isEnabled("drover-todos")); }
+    const merged = loadMerged();
+    const all = merged.tasks;
     const scoped = all.filter((x) => x.archived === this.archived);
     const shown = sorted(scoped.filter((x) => matches(x, this.query)));
     const tab = (id, text, on) => div().id(id).px(9).h(24).flex().items_center().rounded(6).cursor_pointer().text_size(12)
@@ -1196,11 +1227,18 @@ export default class Todos extends View {
         .child(tab("f-active", `Active ${all.filter((x) => !x.archived).length}`, !this.archived))
         .child(tab("f-archived", `Archived ${all.filter((x) => x.archived).length}`, this.archived))
         .child(button(t, "new", "+ New", true, () => edit(null))))
+      .children(merged.remotes.filter((r) => r.banner).map((r) => h_flex().id(`banner-${r.localId}`).mx(8).mt(6).px(10).min_h(30).gap(8).items_center().rounded(7).bg(t.hover).text_size(12)
+        .text_color(r.state === "never" ? t.muted : t.blocked)
+        .child(div().flex_1().min_w(0).truncate().child(`${r.name}: ${r.banner}`))
+        .child(div().id(`retry-${r.localId}`).h(22).px(9).flex().items_center().rounded(6).bg(t.solid).text_color(t.solid_foreground).cursor_pointer()
+          .on_click((_e, cx) => { cx.stop_propagation(); retryRemote(r.machine, r.projectId, cx); }).child("Retry"))))
       .child(shown.length === 0
         ? div().p(16).text_color(t.dim).child(empty)
         : v_flex().id("list").flex_1().min_h(0).overflow_y_scrollbar().p(6).gap(2).children(shown.map((x) =>
           h_flex().id(`row-${x.id}`).min_h(34).px(8).gap(8).items_center().rounded(7).cursor_pointer()
-            .hover((s) => s.bg(t.hover)).on_click(() => edit(x.id))
+            .hover((s) => s.bg(t.hover)).on_click(() => edit(x.id, undefined, undefined, undefined, undefined, x.remote ? x : undefined))
+            .when(Boolean(x.remote) && merged.remotes.some((r) => r.localId === x.project && r.state !== "fresh"), (el) => el.opacity(0.55))
+            .when(Boolean(x.remote), (el) => el.child(chip(t, x.remote.machine, t.accent)))
             .child(chip(t, x.priority, PRIORITY_COLOR(t)[x.priority]))
             .child(div().flex_1().min_w(0).truncate().child(x.title))
             .children(x.tags.slice(0, 3).map((tag) => div().flex_none().text_size(11.5).text_color(t.accent).child(`#${tag}`)))

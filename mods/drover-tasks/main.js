@@ -6,7 +6,8 @@ import { agents, terminals, run, theme, shared, setShared } from "herdr";
 import { bind, isEnabled, whenLoaded, ready as cfgReady } from "./config.js";
 import { GROUPS, projectOf, add, update, matches, sorted, attention, menuChange, FILTER_FIELDS, toggleFilter, clearFilters, matchesFilter, filterValues, searchFilters, filterChips } from "./store.js";
 import { reviewLive, dotKind, liveStatuses, liveAgents } from "./runs.js";
-import { load, loadRuns, loadProjects, loadConfig, spaceProject, sidebarSpace, save, edit, pick, openBoard, watchInbox, watchWakes, modSettings } from "./io.js";
+import { load, loadRuns, loadProjects, loadConfig, spaceProject, sidebarSpace, save, edit, pick, openBoard, watchInbox, watchWakes, modSettings, loadMerged, watchRemote, retryRemote } from "./io.js";
+import { READONLY_TIP } from "./remote.js";
 
 const FOLD = "drover.tasks.fold";
 // { field: [values] } per space (each sidebar follows its own Drover's project), "drover.tasks.filters" when no space is known. Never defaults to hiding anything.
@@ -60,6 +61,7 @@ export default class Tasks extends View {
   // A live agent takes the click (focus it); such a row also gets a pencil that opens the editor.
   hasLiveAgent(task) { return Boolean(task.agent) && agents().some((a) => a.address === task.agent); }
   open(task) {
+    if (task.remote) return edit(task.id, undefined, undefined, undefined, undefined, task); // another machine's card: the read-only view, never an agent focus
     if (this.hasLiveAgent(task)) run("agent.focus", { terminal: task.agent });
     else edit(task.id);
   }
@@ -68,6 +70,8 @@ export default class Tasks extends View {
   render(cx) {
     const t = theme();
     if (!isEnabled("drover-tasks")) return div(); // off, or still loading its settings: // off draws nothing (the column stays: cmd-alt-b is bound in keys.json, see drover-tabs)
+    if (!this.remoteOn) { this.remoteOn = true; watchRemote(cx, () => isEnabled("drover-tasks")); } // reads each remote-bound project every 15 s while the panel is on
+    const merged = loadMerged();
     const live = liveAgents(agents(), terminals());
     const fold = shared(FOLD) ?? {};
     const statuses = liveStatuses(agents(), terminals());
@@ -76,7 +80,7 @@ export default class Tasks extends View {
     const filters = this.filters();
     const fctx = this.filterCtx();
     const filterCount = Object.values(filters).reduce((n, v) => n + v.length, 0);
-    const rows = sorted(load().filter((x) => matchesFilter(x, filters, fctx) && matches(x, this.query)))
+    const rows = sorted(merged.tasks.filter((x) => matchesFilter(x, filters, fctx) && matches(x, this.query)))
       .map((task) => ({ task, at: attention(task, live) }))
       .filter((r) => r.at);
     const icon = (id, text, tip, action) => div().id(id).w(22).h(22).flex_none().flex().items_center().justify_center()
@@ -88,16 +92,18 @@ export default class Tasks extends View {
       ? div().w(9).h(9).flex_none().rounded(5).bg(t.working).border_2().border_color(t.done)
       : div().w(7).h(7).flex_none().rounded(4).bg(DOT(t)[at.group]);
     const projects = loadProjects();
-    const row = ({ task, at }) => h_flex().id(`task-${task.id}`).min_h(40).px(8).py(4).gap(8).items_center().rounded(7)
+    const off = (id, text) => div().id(id).w(22).h(22).flex_none().flex().items_center().justify_center().rounded(5).text_size(12).text_color(t.dim).opacity(0.5).tooltip(READONLY_TIP).child(text);
+    const stale = (task) => Boolean(task.remote) && merged.remotes.some((r) => r.localId === task.project && r.state !== "fresh");
+    const row = ({ task, at }) => h_flex().id(`task-${task.id}`).min_h(40).px(8).py(4).gap(8).items_center().rounded(7).when(stale(task), (el) => el.opacity(0.55))
       .cursor_pointer().hover((s) => s.bg(t.hover)).on_click(() => this.open(task))
       .child(dot(task, at))
       .child(v_flex().flex_1().min_w(0)
         .child(div().truncate().text_size(12.5).child(task.title))
         .child(div().truncate().text_size(10.5).text_color(t.dim)
-          .child([task.id, task.priority, projectOf(task, projects)?.name, at.reason, ...task.tags.map((g) => `#${g}`)].filter(Boolean).join(" · "))))
+          .child([task.id, task.priority, projectOf(task, projects)?.name, task.remote?.machine, at.reason, ...task.tags.map((g) => `#${g}`)].filter(Boolean).join(" · "))))
       .when(this.hasLiveAgent(task), (el) => el.child(icon(`edit-${task.id}`, "✎", "Edit task", () => this.editTask(task.id))))
-      .when(at.group === "todo", (el) => el.child(icon(`start-${task.id}`, "▶", "Start", () => pick(task.id))))
-      .when(at.group === "review", (el) => el.child(icon(`done-${task.id}`, "✓", "Done", () => save(update(load(), task.id, { column: "done" })))));
+      .when(at.group === "todo", (el) => el.child(task.remote ? off(`ro-start-${task.id}`, "▶") : icon(`start-${task.id}`, "▶", "Start", () => pick(task.id))))
+      .when(at.group === "review", (el) => el.child(task.remote ? off(`ro-done-${task.id}`, "✓") : icon(`done-${task.id}`, "✓", "Done", () => save(update(load(), task.id, { column: "done" })))));
 
     const group = ([id, name]) => {
       const items = rows.filter((r) => r.at.group === id);
@@ -163,7 +169,12 @@ export default class Tasks extends View {
         .child(svg(I("list-filter")).size(14)).when(filterCount > 0, (el) => el.child(div().child(String(filterCount)))))
       .content(filterMenu());
 
-    const empty = load().length === 0 ? "No tasks. Type a title and press Enter." : rows.length === 0 ? (filterCount > 0 ? "Nothing matches this filter." : "Nothing to show.") : null;
+    const banners = merged.remotes.filter((r) => r.banner).map((r) => h_flex().id(`banner-${r.localId}`).mx(8).mb(6).px(8).min_h(28).gap(6).items_center().rounded(7).bg(t.hover).text_size(11.5)
+      .text_color(r.state === "never" ? t.muted : t.blocked)
+      .child(div().flex_1().min_w(0).child(`${r.name}: ${r.banner}`))
+      .child(div().id(`retry-${r.localId}`).h(22).px(8).flex().items_center().flex_none().rounded(6).bg(t.solid).text_color(t.solid_foreground).cursor_pointer()
+        .on_click((_e, cx) => { cx.stop_propagation(); retryRemote(r.machine, r.projectId, cx); }).child("Retry")));
+    const empty = merged.tasks.length === 0 ? "No tasks. Type a title and press Enter." : rows.length === 0 ? (filterCount > 0 ? "Nothing matches this filter." : "Nothing to show.") : null;
     return v_flex().id("root").size_full().bg(t.chrome).text_color(t.foreground)
       .child(h_flex().h(34).px(10).items_center().gap(6)
         .child(div().flex_1().text_size(12.5).font_semibold().child("Tasks"))
@@ -172,6 +183,7 @@ export default class Tasks extends View {
         .child(icon("new", "+", "New", () => edit(null))))
       .child(div().px(8).pb(6).child(Input.new(this.input).h(28).px(8).rounded(7).border_1().border_color(t.input).bg(t.background).text_size(12)))
       .when(filterCount > 0, (el) => el.child(chipsRow()))
+      .children(banners)
       .child(empty
         ? div().p(12).text_size(12).text_color(t.dim).child(empty)
         : v_flex().id("groups").flex_1().min_h(0).overflow_y_scrollbar().px(4).pb(8).gap(6).children(GROUPS.map(group).filter(Boolean)));

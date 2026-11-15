@@ -4,7 +4,8 @@ import { View, div } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, TextareaState, Textarea } from "gpui-base";
 import { theme, setShared, props, closeOverlay, openOverlay, exec, notify, shared } from "herdr";
 import { PROJECTS_KEY, addProject, updateProject, removeProject } from "./store.js";
-import { load, loadProjects, modSettings } from "./io.js";
+import { load, loadProjects, modSettings, remote } from "./io.js";
+import { withRemote, remoteOf } from "./remote.js";
 import { bind, isEnabled, whenLoaded, ready as cfgReady } from "./config.js";
 import { gated } from "./ui.js";
 
@@ -36,6 +37,11 @@ export class ProjectEditor {
     this.repos = TextareaState.new({ placeholder: "/path/to/repo (one per line, first is the default)", value: (p?.repos ?? []).map((r) => r.path).join("\n"), rows: 3 });
     this.folders = TextareaState.new({ placeholder: "/path/to/folder (one per line)", value: (p?.folders ?? []).join("\n"), rows: 3 });
     this.branch = InputState.new({ placeholder: "main", value: p?.branch ?? "main" });
+    // Remote binding (an existing project only): the project's cards then live on another machine, read-only here.
+    const r = p ? remoteOf(loadProjects(), p.id) : null;
+    this.machine = InputState.new({ placeholder: "omarchy", value: r?.machine ?? "" });
+    this.remoteId = InputState.new({ placeholder: "P-… (the project's id on that machine)", value: r?.projectId ?? "" });
+    this.remoteMsg = null; this.binding = false; this.bindGen = 0;
     this.name.focus();
     cx.timer.after(300, () => this.name.focus());
   }
@@ -47,7 +53,7 @@ export class ProjectEditor {
     const f = { name: this.name.value(), repos: this.repos.value(), folders: this.folders.value(), branch: this.branch.value() };
     const apply = () => (this.project ? updateProject(loadProjects(), this.project.id, f) : addProject(loadProjects(), f));
     const r = apply();
-    const bad = r.error ? null : await badRepo(r.project.repos.map((x) => x.path));
+    const bad = r.error || remoteOf(loadProjects(), this.project?.id) ? null : await badRepo(r.project.repos.map((x) => x.path)); // a remote project's paths are on the other machine
     // Recompute from the list as it is now: another dialog may have saved during the git checks.
     const fresh = bad ? r : apply();
     this.saving = false;
@@ -56,9 +62,36 @@ export class ProjectEditor {
     this.close();
   }
 
+  // Check the machine and its project (a read), then save the binding. Refusals show their message and save nothing.
+  async bindRemote(cx) {
+    if (this.closed || this.binding || !this.project) return;
+    const gen = ++this.bindGen, expected = JSON.stringify(remoteOf(loadProjects(), this.project.id) ?? null);
+    this.binding = true; this.remoteMsg = "Checking…"; cx.notify();
+    const r = await remote.bind(this.project, { machine: this.machine.value().trim(), projectId: this.remoteId.value().trim() }, { tasks: load(), projects: loadProjects() });
+    this.binding = false;
+    // An Unbind, a close or another dialog's change while checking cancels this attempt: it never writes back.
+    if (gen !== this.bindGen || JSON.stringify(remoteOf(loadProjects(), this.project.id) ?? null) !== expected) { this.remoteMsg = "Cancelled: the binding changed while checking"; cx.notify(); return; }
+    if (r.error) { this.remoteMsg = r.error; cx.notify(); return; }
+    const now = loadProjects(); // another dialog may have saved meanwhile
+    if (!now.some((x) => x.id === this.project.id) || load().some((x) => x.project === this.project.id && !x.archived)) { this.remoteMsg = "The project changed while checking: try again"; cx.notify(); return; }
+    setShared(PROJECTS_KEY, withRemote(now, this.project.id, r.project.remote));
+    this.remoteMsg = `Bound to ${r.project.remote.machine}: its cards now show read-only on the Board and Tasks`;
+    cx.notify();
+  }
+
+  unbindRemote(cx) {
+    const cur = remoteOf(loadProjects(), this.project?.id);
+    this.bindGen++;
+    if (!cur) return;
+    remote.detach(cur.machine, cur.projectId);
+    setShared(PROJECTS_KEY, withRemote(loadProjects(), this.project.id, null));
+    this.remoteMsg = "Unbound: this project shows its local cards again";
+    cx.notify();
+  }
+
   close() {
     if (this.closed) return;
-    this.closed = true;
+    this.closed = true; this.bindGen++;
     closeOverlay(props().overlay);
   }
 
@@ -75,6 +108,13 @@ export class ProjectEditor {
       .child(label("Repos (git, one path per line, first is the default)")).child(field(Textarea.new(this.repos)).py(6))
       .child(label("Folders (one path per line)")).child(field(Textarea.new(this.folders)).py(6))
       .child(label("Base branch")).child(field(Input.new(this.branch).h(34)))
+      .when(Boolean(this.project), (el) => el
+        .child(label("Remote: machine (hc machine ls) and the project's id there. Its cards show read-only."))
+        .child(h_flex().gap(8).child(field(Input.new(this.machine).h(34).w(160))).child(field(Input.new(this.remoteId).h(34).flex_1())))
+        .child(h_flex().pt(8).gap(8).items_center()
+          .child(button(t, "bind-remote", remoteOf(loadProjects(), this.project.id) ? "Rebind" : "Bind", false, (_e, cx) => cx.spawn((acx) => this.bindRemote(acx))))
+          .when(Boolean(remoteOf(loadProjects(), this.project.id)), (e) => e.child(button(t, "unbind-remote", "Unbind", false, (_e, cx) => this.unbindRemote(cx))))
+          .when(Boolean(this.remoteMsg), (e) => e.child(div().flex_1().min_w(0).text_size(12).text_color(t.muted).child(this.remoteMsg)))))
       .when(Boolean(this.error), (el) => el.child(div().pt(10).text_size(12).text_color(t.blocked).child(this.error)))
       .child(h_flex().pt(18).gap(8).child(div().flex_1())
         .child(button(t, "ed-cancel", "Cancel", false, () => this.close()))

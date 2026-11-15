@@ -4,6 +4,7 @@ import { shared, setShared, openOverlay, exec, hc, readTextFile, writeTextFile, 
 import * as fs from "fs/promises";
 import { KEY, SEEN_KEY, PROJECTS_KEY, firstSight, list, add, update, bySource, addCommand, applyCommand, repoOf, projectOf, projectKey, projectAddRequest, projectDiff, PROTOCOL, inboxGate, arrivalOf, addProject, projectNamed, nextReport, claim, release, editSize } from "./store.js";
 import { base64, httpProblem, jiraIssue, jiraKey, githubIssue, prItems } from "./sources.js";
+import { ownerError, createRemote, bindings as remoteBindings, mergeRemote } from "./remote.js";
 import { WAKE_KEY, reschedule, addWake, decide, setStatus, wakeOp } from "./wake.js";
 import { apply as applyKey } from "./keys.js";
 import { resolveWorkFolder, moveOffers, parseMove } from "./workfolder.js";
@@ -12,10 +13,25 @@ import { AGENTS_KEY, RUNS_KEY, config, plan, argv, leaderPrompt, createCardsProm
 
 export const load = () => list(shared(KEY));
 
+// The commit boundary: every card the result adds or changes is checked against its stored project AND its new one.
+function savedOwned(result) {
+  const ps = loadProjects();
+  if (!ps.some((p) => p.remote)) return null;
+  const stored = new Map(load().map((x) => [x.id, x]));
+  for (const x of result.tasks ?? []) {
+    const old = stored.get(x.id);
+    if (old && JSON.stringify(old) === JSON.stringify(x)) continue;
+    const e = ownerError(ps, x.project) ?? (old ? ownerError(ps, old.project) : null);
+    if (e) return e;
+  }
+  return result.task ? ownerError(ps, result.task.project) : null;
+}
+
 // Takes a store result: saves its tasks, or shows its error and saves nothing.
 export function save(result) {
-  if (result.error) {
-    notify({ title: "Task not saved", body: result.error, level: "error" });
+  const owned = result.error ? null : savedOwned(result); // a project on another machine takes no local card
+  if (result.error || owned) {
+    notify({ title: "Task not saved", body: result.error ?? owned, level: "error" });
     return null;
   }
   setShared(KEY, result.tasks);
@@ -25,9 +41,9 @@ export function save(result) {
 // Create and edit share the Multica-style modal shell (small 720x520, large 0.9x0.85). `draft` + `large`: the expand/shrink reopen.
 // parent: a create opens as a sub-issue of that task.
 export const NEWTASK_KEY = "drover.newtask.open";
-export const edit = (id, column, draft, large, parent) => {
+export const edit = (id, column, draft, large, parent, remoteCard) => {
   const overlay = openOverlay({ mod: "drover-todos", kind: "dialog", modal: true, ...editSize(large),
-    props: { edit: id ?? null, column: column ?? "todo", ...(draft ? { draft, large: Boolean(large) } : large ? { large: true } : {}), ...(parent ? { parent } : {}) } });
+    props: { edit: id ?? null, column: column ?? "todo", ...(draft ? { draft, large: Boolean(large) } : large ? { large: true } : {}), ...(parent ? { parent } : {}), ...(remoteCard ? { remoteCard } : {}) } }); // remoteCard: a card of another machine, shown read-only
   // A Create dialog is remembered so the new-task key does not stack a second one (see createDialogOpen).
   if (id == null) setShared(NEWTASK_KEY, { id: overlay, at: Date.now() });
   return overlay;
@@ -109,7 +125,30 @@ export function spaceProject() {
   const d = sp ? droverList().find((c) => c.space === sp) : null;
   return d ? projectOfDrover(loadRuns(), d.address) : null;
 }
+// The laptop's reader of a remote project's board: hc runs `file read --on <machine>`; the 10 s timeout is the wrapper's job (no setTimeout in a mod).
+export const remoteRun = (args) => hc(args); // hc takes argv only: the 10 s deadline is enforced by remote.js (tick), not here
+let screenOn = () => true; // set by watchRemote: the owning screen's switch
+export const remote = createRemote({ run: remoteRun, active: () => screenOn(), getShared: (k) => shared(k), setShared: (k, v) => setShared(k, v ?? undefined),
+  bound: (machine, projectId, id) => remoteBindings(loadProjects()).some((b) => b.machine === machine && b.projectId === projectId && b.id === id) });
 export const loadProjects = () => (Array.isArray(shared(PROJECTS_KEY)) ? shared(PROJECTS_KEY) : []);
+
+// Local cards plus the cached cards of every remote-bound project (read-only; see remote.js). { tasks, remotes } where remotes carry each banner.
+export const loadMerged = () => { const ps = loadProjects(); return remoteBindings(ps).length ? mergeRemote(load(), ps, remote.view) : { tasks: load(), remotes: [] }; };
+// Board / Tasks timer: keeps the tracked bindings equal to the projects' and reads the due ones (a mod copy polls on its own while it is open).
+// enabled(): the owning screen's switch. Off: no read, and a read in flight is dropped (the inbox consumers are separate and keep running).
+export function watchRemote(cx, enabled = () => true) {
+  screenOn = enabled;
+  const tick = (cx) => {
+    if (!enabled()) { remote.suspend(); return; }
+    const list = remoteBindings(loadProjects());
+    remote.sync(list); // the whole binding, id included: the commit-time check compares it
+    if (list.length && cx.spawn) cx.spawn(async (cx) => { if ((await remote.tick()).length) cx.notify(); });
+  };
+  cx.timer?.every?.(1000, tick);
+  tick(cx);
+}
+// The Retry control: a read now, then a repaint.
+export const retryRemote = (machine, projectId, cx) => cx.spawn(async (cx) => { await remote.retry(machine, projectId); cx.notify(); });
 export const loadRuns = () => (Array.isArray(shared(RUNS_KEY)) ? shared(RUNS_KEY) : []);
 
 // terminal.park can answer { pending: true } and fail later: wait (tries x ms) for the pane to leave its tab.
@@ -208,6 +247,8 @@ export async function moveWorkFolder(from, to) {
 export async function launch(task, runner, { worktree, reportTo, project, create, folder: chosen, note } = {}) {
   const label = task?.id ?? "Run";
   try {
+    const owned = ownerError(loadProjects(), task?.project ?? project);
+    if (owned) throw new Error(owned);
     const p = plan(loadConfig(), runner);
     if (p.error) throw new Error(p.error);
     if (worktree && !task) throw new Error("A worktree needs a task.");
@@ -269,6 +310,8 @@ export async function launch(task, runner, { worktree, reportTo, project, create
 // The Drover agent with a project is bound to it, through the same guards as `drover start --project` (a refusal is shown, never an unbound fallback).
 // Any other agent or squad only opens in the project's repo. No repo: the focused space's folder (else Herdr's default) and a hint.
 export async function startFromSquads(kind, id, projectId) {
+  const owned = ownerError(loadProjects(), projectId); // a project on another machine: its repo paths are not on this one
+  if (owned) { notify({ title: "Not started", body: owned, level: "error" }); return { error: owned }; }
   const project = projectId ? loadProjects().find((p) => p.id === projectId) ?? null : null;
   let folder = project ? repoOf({ project: project.id }, loadProjects()) : null;
   if (project && !folder) {
@@ -514,7 +557,8 @@ async function drain() {
       reply = await projectAdd(cmd);
     } else if (cmd?.op === "add") {
       const pk = projectKey(loadProjects(), cmd.project);
-      const r = pk.error ? pk : addCommand(load(), cmd, pk.id);
+      const owned = pk.error ? null : ownerError(loadProjects(), pk.id);
+      const r = pk.error ? pk : owned ? { error: owned } : addCommand(load(), cmd, pk.id);
       if (!r.error) setShared(KEY, r.tasks);
       reply = r.error ? `error: ${r.error}` : `ok: ${r.task.id} added to ${r.task.column}`;
     } else {
@@ -522,7 +566,9 @@ async function drain() {
       if (cmd?.op === "move") cmd = { ...cmd, fromDrover: isLiveDrover(loadRuns(), String(cmd.from ?? ""), liveState().alive) }; // always set here: a request file cannot claim it
       if (cmd?.op === "link") cmd = { ...cmd, jiraSite: jira }; // always set here: a request file cannot claim it
       const pk = cmd?.op === "project" ? projectKey(loadProjects(), cmd.project) : { id: null };
-      const r = pk.error ? pk : applyCommand(tasks, cmd.op === "project" ? { ...cmd, project: pk.id } : cmd);
+      // A retained card of a remote project is not edited here either: stored ownership counts, not only the destination.
+      const owned = pk.error ? null : ownerError(loadProjects(), pk.id) ?? ownerError(loadProjects(), typeof cmd?.id === "string" ? tasks.find((x) => x.id === cmd.id)?.project : null);
+      const r = pk.error ? pk : owned ? { error: owned } : applyCommand(tasks, cmd.op === "project" ? { ...cmd, project: pk.id } : cmd);
       if (!r.error) setShared(KEY, r.tasks);
       reply = r.error ? `error: ${r.error}` : cmd.op === "project" ? `ok: ${r.task.id} project ${r.task.project ?? "none"}` : cmd.op === "link" ? `ok: ${r.task.id} source ${r.task.source?.url ?? "none"}` : cmd.op === "note-edit" || cmd.op === "note-rm" ? `ok: ${r.task.id} ${cmd.noteId} ${cmd.op === "note-rm" ? "removed" : "edited"}` : cmd.op === "note" || cmd.op === "edit" ? `ok: ${r.task.id} ${cmd.op === "note" ? `note ${r.task.notes.length}` : "edited"}` : `ok: ${r.task.id} -> ${r.task.column}`;
     }
@@ -582,6 +628,8 @@ async function startFromAgent(cmd) {
   const pk = projectKey(loadProjects(), cmd.project);
   if (pk.error) return `error: ${pk.error}`;
   const bind = { ...cmd, project: pk.id };
+  const owned = ownerError(loadProjects(), task ? task.project : pk.id);
+  if (owned) return `error: ${owned}`;
   const guard = startGuard({ tasks: load(), runs: loadRuns(), projects: loadProjects(), binding: shared(BIND_KEY) ?? {}, ...liveState() }, bind);
   if (guard.error) return `error: ${guard.error}`;
   // No await between the guard and the claim: a 2nd start of the same card sees "claiming" and stops.
