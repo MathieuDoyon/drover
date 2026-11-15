@@ -18,7 +18,7 @@ Persistent writes (each printed as `WRITE <path>` by the installer):
 | `~/.config/systemd/user/drover-herdr.service` | only with `--with-service` |
 | `~/.config/systemd/user/default.target.wants/drover-herdr.service` | the enable symlink, made by `systemctl --user enable` (only with `--with-service`) |
 
-Scratch exception: the installer makes one `mktemp -d` under `$TMPDIR` (default `/tmp`) for the download and the unpacking, and removes it on exit (also on an error). Nothing else is written by the installer. Not by the installer, but changing anyway: herdr-core's runtime state (`~/.local/state/herdr-core/default`), because the app runs on the default core. The `drover` CLI is not put on `PATH`; use the full path below.
+Scratch exception: the installer makes one `mktemp -d` under `$TMPDIR` (default `/tmp`) for the download and the unpacking, and removes it on exit (also on an error). Nothing else is written by the installer. Not by the installer, but changing anyway: herdr-core's runtime state (`~/.local/state/herdr-core/default`), because the app runs on the default core. The `drover` CLI is put on `PATH` by `deploy/omarchy/bootstrap-agents.sh` (see "Agents on the remote" below): a symlink `~/.local/bin/drover` to `~/.local/share/herdr-app/src/mods/drover-tasks/bin/drover`, because `hc exec` runs `sh -c` (non-login, no rc file) and `~/.local/bin` is already on its `PATH`. The script refuses (exit 1, nothing changed) if a regular file or another symlink is already there.
 
 ```sh
 DROVER=~/.local/share/herdr-app/src/mods/drover-tasks/bin/drover
@@ -72,6 +72,10 @@ Throwaway agent for the lid-closed and wake tests: `drover.agents` in `shared.js
 Lid-closed reconcile: start a throwaway run (`"$DROVER" start - <throwaway squad>`), close the lid, end its terminal (`hc kill <t>`), reopen, and check `"$DROVER" tasks` shows the run ended. No-login start: reboot with linger on and log in nowhere, then `systemctl --user is-active drover-herdr` from ssh (see Verified for what the 2026-11-14 reboot did and did not prove).
 
 `deploy/omarchy/test.sh` is validated on the laptop. On omarchy the mise shims break its fake `HOME`, so do not rely on it there; run it before the rsync.
+
+## Agents on the remote
+
+`deploy/omarchy/bootstrap-agents.sh [--dry-run]` (user-level, no sudo) makes `hc` and `drover` resolvable for agents: it links `~/.local/bin/drover` (printed as `LINK`), appends one marked block to the rc files the login shells read (backup `<rc>.drover-bak.<UTC>` first; a second run adds nothing), and creates `~/.config/drover-herdr/agents` (mode 700, empty). It refuses, changing nothing, on a symlinked or out-of-HOME target or a damaged block. The script header says which shell reads which rc file.
 
 ## Update
 

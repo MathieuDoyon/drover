@@ -194,9 +194,133 @@ else last_out="$work/t9/out3"; bad "mods/install.sh default still runs the node 
 if mods_install "$work/t9/out4" DROVER_SKIP_TESTS=1 && [ -L "$work/t9/home/mods/drover-tasks" ]; then ok "DROVER_SKIP_TESTS=1 skips the node test stage"
 else bad "DROVER_SKIP_TESTS=1 skips the node test stage"; fi
 
+# 11. bootstrap-agents.sh: PATH + HERDR_APP_HOME for agents (fake HOME; nothing is touched outside it)
+boot_sh="$here/bootstrap-agents.sh"
+bs_dir=".local/share/herdr-app/src/mods/drover-tasks/bin"
+run_boot() { # <name> <zsh yes|no> [args...] -> $H, $out, $rc; the HOME is pre-seeded by the caller via $seed
+  local name="$1" z="$2"; shift 2
+  H="$work/$name/home"; mkdir -p "$H"; out="$work/$name/out"; last_out="$out"
+  [ -n "${seed:-}" ] && "$seed" "$H"
+  HOME="$H" DROVER_BOOTSTRAP_ZSH="$z" bash "$boot_sh" "$@" >"$out" 2>&1; rc=$?
+}
+seed_bash() { printf '# my bashrc\nalias ll="ls -l"' > "$1/.bashrc"; printf 'export FOO=1\n' > "$1/.profile"; printf '# my zshrc\n' > "$1/.zshrc"; }
+seed=seed_bash
+# 11a. --dry-run: prints the plan and the lines, writes nothing
+run_boot b1 yes --dry-run
+if [ "$rc" -eq 0 ] && grep -q '>>> drover-herdr agents PATH >>>' "$out" && grep -q "$H/.bashrc" "$out" && grep -q "$H/.zshenv" "$out" \
+   && [ "$(cat "$H/.bashrc")" = "$(printf '# my bashrc\nalias ll="ls -l"')" ] && [ ! -e "$H/.zshenv" ] && [ ! -e "$H/.config" ] && ! ls "$H"/*drover-bak* "$H"/.*drover-bak* >/dev/null 2>&1; then ok "bootstrap --dry-run lists rc files + exact lines, writes nothing"
+else bad "bootstrap --dry-run lists rc files + exact lines, writes nothing" "rc=$rc"; fi
+# 11b. real run: block in zshrc, zshenv, bashrc, profile; backups of the pre-existing ones; agents dir 700 and empty
+run_boot b2 yes
+baks="$(ls -A "$H" | grep -c 'drover-bak\.')"
+agents="$H/.config/drover-herdr/agents"
+if [ "$rc" -eq 0 ] && for f in .zshrc .zshenv .bashrc .profile; do grep -q '^# >>> drover-herdr agents PATH >>>$' "$H/$f" && grep -q '^# <<< drover-herdr agents PATH <<<$' "$H/$f" || exit 1; done \
+   && [ "$(grep -c '>>> drover-herdr' "$H/.bashrc")" = 1 ] && ls "$H"/.bashrc.drover-bak.* "$H"/.zshrc.drover-bak.* "$H"/.profile.drover-bak.* >/dev/null 2>&1 \
+   && [ ! -e "$H/.zshenv.drover-bak."* ] 2>/dev/null && [ "$baks" = 3 ] \
+   && [ -d "$agents" ] && [ "$(stat -c %a "$agents" 2>/dev/null || stat -f %Lp "$agents")" = 700 ] && empty_dir "$agents"; then ok "bootstrap: marked block in zshrc/zshenv/bashrc/profile, one backup per edited existing rc, agents dir 700 and empty"
+else bad "bootstrap: marked block in zshrc/zshenv/bashrc/profile, one backup per edited existing rc, agents dir 700 and empty" "rc=$rc baks=$baks"; fi
+bk="$(ls "$H"/.bashrc.drover-bak.* | head -1)"
+[ "$(cat "$bk")" = "$(printf '# my bashrc\nalias ll="ls -l"')" ] && [ "$(head -n 2 "$H/.bashrc")" = "$(printf '# my bashrc\nalias ll="ls -l"')" ] \
+  && ok "bootstrap: backup is the exact original; the user's lines stay on top" || bad "bootstrap: backup is the exact original; the user's lines stay on top"
+grep -q "^ADD $H/.bashrc" "$out" && grep -q 'export HERDR_APP_HOME=' "$out" && ok "bootstrap prints the exact lines added" || bad "bootstrap prints the exact lines added"
+# 11c. second run: nothing added, no new backups, files byte-identical
+sum1="$(cd "$H" && cat .bashrc .zshrc .zshenv .profile | cksum)"
+HOME="$H" DROVER_BOOTSTRAP_ZSH=yes bash "$boot_sh" >"$work/b2/out2" 2>&1; rc2=$?
+sum2="$(cd "$H" && cat .bashrc .zshrc .zshenv .profile | cksum)"
+if [ "$rc2" -eq 0 ] && [ "$sum1" = "$sum2" ] && [ "$(ls -A "$H" | grep -c 'drover-bak\.')" = 3 ] && grep -qi 'nothing to add' "$work/b2/out2" && ! grep -q '^ADD ' "$work/b2/out2"; then ok "bootstrap is idempotent: 2nd run adds nothing, no new backup, says so"
+else last_out="$work/b2/out2"; bad "bootstrap is idempotent: 2nd run adds nothing, no new backup, says so" "rc=$rc2"; fi
+# 11d. only the expected files exist in HOME
+extra="$(cd "$H" && find . -mindepth 1 -not -path './.bashrc*' -not -path './.zshrc*' -not -path './.zshenv*' -not -path './.profile*' -not -path './.config' -not -path './.config/drover-herdr' -not -path './.config/drover-herdr/agents' -not -path './.local' -not -path './.local/bin' -not -path './.local/bin/drover' -not -path './.local/share' -not -path './.local/share/*')"
+[ -z "$extra" ] && ok "bootstrap touches nothing else in HOME" || bad "bootstrap touches nothing else in HOME" "$extra"
+# 11e. the block works in the shells that read it: PATH gets both dirs once, HERDR_APP_HOME default, an existing one is kept
+chk='printf "%s|%s\n" "$PATH" "$HERDR_APP_HOME"'
+r1="$(env -i HOME="$H" PATH=/usr/bin:/bin bash -c ". $H/.bashrc; . $H/.bashrc; $chk")"
+case "$r1" in "$H/$bs_dir:$H/.local/bin:/usr/bin:/bin|$H/.config/herdr-app" | "$H/.local/bin:$H/$bs_dir:/usr/bin:/bin|$H/.config/herdr-app") ok "bootstrap block (bash, sourced twice): both dirs once, HERDR_APP_HOME default" ;; *) bad "bootstrap block (bash)" "got: $r1" ;; esac
+r2="$(env -i HOME="$H" PATH=/usr/bin:/bin HERDR_APP_HOME=/x/y sh -c ". $H/.profile; $chk")"
+case "$r2" in *"|/x/y") ok "bootstrap block (sh): an existing HERDR_APP_HOME is kept" ;; *) bad "bootstrap block (sh): an existing HERDR_APP_HOME is kept" "got: $r2" ;; esac
+if command -v zsh >/dev/null; then
+  r3="$(env -i HOME="$H" PATH=/usr/bin:/bin zsh -c "$chk")"   # non-interactive, non-login: only .zshenv is read
+  case "$r3" in *"$H/$bs_dir"*"$H/.local/bin"*"|$H/.config/herdr-app"|*"$H/.local/bin"*"$H/$bs_dir"*"|$H/.config/herdr-app") ok "bootstrap block reaches a non-interactive zsh (.zshenv)" ;; *) bad "bootstrap block reaches a non-interactive zsh (.zshenv)" "got: $r3" ;; esac
+else skp "non-interactive zsh check" "zsh not installed here"; fi
+# 11f. .bash_profile present: bash login reads it, not .profile, so .profile is left alone (and a note says why)
+seed_bp() { printf '# bp\n' > "$1/.bash_profile"; printf 'export FOO=1\n' > "$1/.profile"; printf '# rc\n' > "$1/.bashrc"; }
+seed=seed_bp; run_boot b3 no
+if [ "$rc" -eq 0 ] && [ "$(cat "$H/.profile")" = "export FOO=1" ] && ! grep -q drover-herdr "$H/.bash_profile" && grep -q '>>> drover-herdr' "$H/.bashrc" \
+   && [ ! -e "$H/.zshrc" ] && [ ! -e "$H/.zshenv" ] && grep -q '\.bash_profile' "$out"; then ok "bootstrap: .bash_profile present -> .profile untouched; no zsh -> no zsh files; reason printed"
+else bad "bootstrap: .bash_profile present -> .profile untouched; no zsh -> no zsh files; reason printed" "rc=$rc"; fi
+# 11g. fresh HOME with no rc files at all: created (no backup, nothing to back up), still idempotent
+seed=""; run_boot b4 yes
+if [ "$rc" -eq 0 ] && grep -q '>>> drover-herdr' "$H/.bashrc" && grep -q '>>> drover-herdr' "$H/.zshenv" && ! ls -A "$H" | grep -q 'drover-bak\.'; then ok "bootstrap: no rc yet -> created, no backup"
+else bad "bootstrap: no rc yet -> created, no backup" "rc=$rc"; fi
+# 11i. symlink refusal (Inspector High): rc symlink out, .config symlink out, ancestor symlink -> REFUSE, exit!=0, NOTHING changed
+refuse_case() { # <name> <desc> <seed fn>
+  local name="$1" desc="$2"; seed="$3"
+  H="$work/$name/home"; mkdir -p "$H" "$work/$name/outside"; "$seed" "$H" "$work/$name/outside"
+  out="$work/$name/out"; last_out="$out"
+  HOME="$H" DROVER_BOOTSTRAP_ZSH=yes bash "$boot_sh" >"$out" 2>&1; rc=$?
+  [ "$rc" -ne 0 ] && grep -q '^REFUSE ' "$out" && ! grep -q '^\(ADD\|WRITE\) ' "$out" && ok "bootstrap refuses: $desc, exits non-zero, no ADD/WRITE" || bad "bootstrap refuses: $desc" "rc=$rc"
+}
+sd_rc() { ln -s "$2/bashrc" "$1/.bashrc"; printf '# orig\n' > "$2/bashrc"; }
+sd_cfg() { ln -s "$2" "$1/.config"; }
+sd_anc() { mkdir -p "$1/.config"; ln -s "$2" "$1/.config/drover-herdr"; }
+sd_inhome() { mkdir -p "$1/real"; printf '# orig\n' > "$1/real/rc"; ln -s "$1/real/rc" "$1/.zshrc"; }
+refuse_case c1 "rc symlinked outside HOME" sd_rc
+[ "$(cat "$work/c1/outside/bashrc")" = "# orig" ] && ok "outside rc target unchanged" || bad "outside rc target unchanged"
+refuse_case c2 ".config symlinked outside HOME" sd_cfg
+empty_dir "$work/c2/outside" && ok "nothing created outside HOME via .config" || bad "nothing created outside HOME via .config"
+refuse_case c3 "~/.config/drover-herdr (ancestor of agents) symlinked" sd_anc
+empty_dir "$work/c3/outside" && ok "nothing created outside HOME via ancestor" || bad "nothing created outside HOME via ancestor"
+refuse_case c4 "rc symlink even inside HOME" sd_inhome
+[ "$(cat "$work/c4/home/real/rc")" = "# orig" ] && ! ls -A "$work/c4/home" | grep -q 'drover-bak' && [ ! -e "$work/c4/home/.bashrc" ] && [ ! -e "$work/c4/home/.config" ] \
+  && ok "refusal changed nothing: no other rc written, no backup, no agents dir" || bad "refusal changed nothing (all-or-nothing preflight)"
+# --dry-run refuses too
+HOME="$work/c1/home" DROVER_BOOTSTRAP_ZSH=yes bash "$boot_sh" --dry-run >"$work/c1/o2" 2>&1; [ $? -ne 0 ] && grep -q '^REFUSE ' "$work/c1/o2" && ok "--dry-run also refuses" || bad "--dry-run also refuses"
+
+# 11j. partial/damaged block (Inspector Medium): opening marker without the exact full block -> non-zero, file named, unmodified
+seed=""; H="$work/p1/home"; mkdir -p "$H"; printf '# >>> drover-herdr agents PATH >>>\n' > "$H/.bashrc"; cp "$H/.bashrc" "$work/p1/orig"
+out="$work/p1/out"; last_out="$out"; HOME="$H" DROVER_BOOTSTRAP_ZSH=no bash "$boot_sh" >"$out" 2>&1; rc=$?
+if [ "$rc" -ne 0 ] && grep -q "$H/.bashrc" "$out" && grep -qi 'partial' "$out" && cmp -s "$H/.bashrc" "$work/p1/orig" && ! ls -A "$H" | grep -q 'drover-bak' && [ ! -e "$H/.config" ]; then ok "bootstrap: opening marker alone -> non-zero, file named, nothing modified"
+else bad "bootstrap: opening marker alone -> non-zero, file named, nothing modified" "rc=$rc"; fi
+# a block with an altered body, and a full block plus a stray second opening marker, are also refused
+H="$work/p2/home"; mkdir -p "$H"; printf '# >>> drover-herdr agents PATH >>>\nexport PATH=/evil\n# <<< drover-herdr agents PATH <<<\n' > "$H/.bashrc"
+out="$work/p2/out"; last_out="$out"; HOME="$H" DROVER_BOOTSTRAP_ZSH=no bash "$boot_sh" >"$out" 2>&1; rc=$?
+[ "$rc" -ne 0 ] && grep -qi 'partial' "$out" && ok "bootstrap: markers around a different body -> refused" || bad "bootstrap: markers around a different body -> refused" "rc=$rc"
+H="$work/p3/home"; mkdir -p "$H"; run_p() { HOME="$H" DROVER_BOOTSTRAP_ZSH=no bash "$boot_sh" >"$work/p3/$1" 2>&1; }
+run_p o1; printf '# >>> drover-herdr agents PATH >>>\n' >> "$H/.bashrc"; cp "$H/.bashrc" "$work/p3/orig"; last_out="$work/p3/o2"; run_p o2; rc=$?
+[ "$rc" -ne 0 ] && cmp -s "$H/.bashrc" "$work/p3/orig" && ok "bootstrap: a good block plus a stray opening marker -> refused, unmodified" || bad "bootstrap: a good block plus a stray opening marker -> refused, unmodified" "rc=$rc"
+grep -q 'interactive-return guard' "$work/b2/out" && ok "bootstrap prints the .bashrc interactive-guard hint" || bad "bootstrap prints the .bashrc interactive-guard hint"
+
+# 11k. drover symlink (~/.local/bin/drover -> the CLI): 'hc exec' runs sh -c, reads no rc, but ~/.local/bin is already on its PATH
+link_t() { echo "$1/.local/share/herdr-app/src/mods/drover-tasks/bin/drover"; }
+seed=""; run_boot l1 no
+if [ "$rc" -eq 0 ] && [ -L "$H/.local/bin/drover" ] && [ "$(readlink "$H/.local/bin/drover")" = "$(link_t "$H")" ] && grep -q "^LINK $H/.local/bin/drover -> $(link_t "$H")" "$out"; then ok "bootstrap: creates ~/.local/bin/drover symlink, prints LINK"
+else bad "bootstrap: creates ~/.local/bin/drover symlink, prints LINK" "rc=$rc"; fi
+HOME="$H" DROVER_BOOTSTRAP_ZSH=no bash "$boot_sh" >"$work/l1/out2" 2>&1; rc2=$?
+if [ "$rc2" -eq 0 ] && ! grep -q '^LINK ' "$work/l1/out2" && grep -qi 'drover link.*nothing to add\|already the right' "$work/l1/out2" && [ "$(readlink "$H/.local/bin/drover")" = "$(link_t "$H")" ]; then ok "bootstrap: right symlink already there -> nothing to add, no LINK"
+else last_out="$work/l1/out2"; bad "bootstrap: right symlink already there -> nothing to add, no LINK" "rc=$rc2"; fi
+seed_reg() { mkdir -p "$1/.local/bin"; printf 'mine\n' > "$1/.local/bin/drover"; }
+seed_oth() { mkdir -p "$1/.local/bin"; ln -s /usr/bin/true "$1/.local/bin/drover"; }
+for kind in reg oth; do
+  seed="seed_$kind"; run_boot l2$kind no
+  if [ "$rc" -ne 0 ] && grep -q "^REFUSE $H/.local/bin/drover" "$out" && ! grep -q '^\(ADD\|WRITE\|LINK\) ' "$out" && [ ! -e "$H/.bashrc" ] && [ ! -e "$H/.config" ] \
+     && { if [ "$kind" = reg ]; then [ "$(cat "$H/.local/bin/drover")" = mine ]; else [ "$(readlink "$H/.local/bin/drover")" = /usr/bin/true ]; fi; }; then ok "bootstrap: $kind file/symlink at ~/.local/bin/drover -> REFUSE, nothing changed"
+  else bad "bootstrap: $kind file/symlink at ~/.local/bin/drover -> REFUSE, nothing changed" "rc=$rc"; fi
+done
+seed=seed_reg; H="$work/l3/home"; mkdir -p "$H"; seed_reg "$H"; HOME="$H" DROVER_BOOTSTRAP_ZSH=no bash "$boot_sh" --dry-run >"$work/l3/o" 2>&1
+[ $? -ne 0 ] && grep -q '^REFUSE ' "$work/l3/o" && ok "bootstrap --dry-run refuses a blocking drover file too" || bad "bootstrap --dry-run refuses a blocking drover file too"
+seed=""; run_boot l4 no --dry-run
+[ "$rc" -eq 0 ] && grep -q "$H/.local/bin/drover" "$out" && [ ! -e "$H/.local" ] && ok "bootstrap --dry-run lists the link, creates nothing" || bad "bootstrap --dry-run lists the link, creates nothing" "rc=$rc"
+seed=""; H="$work/l5/home"; mkdir -p "$H" "$work/l5/outside"; ln -s "$work/l5/outside" "$H/.local"; out="$work/l5/out"; last_out="$out"
+HOME="$H" DROVER_BOOTSTRAP_ZSH=no bash "$boot_sh" >"$out" 2>&1; rc=$?
+[ "$rc" -ne 0 ] && grep -q '^REFUSE ' "$out" && empty_dir "$work/l5/outside" && ok "bootstrap: ~/.local symlinked out -> REFUSE, nothing created" || bad "bootstrap: ~/.local symlinked out -> REFUSE, nothing created" "rc=$rc"
+
+# 11h. read-only/unknown option and the secret rule
+bash "$boot_sh" --nope >"$work/b4/o" 2>&1; [ $? -eq 2 ] && ok "bootstrap rejects unknown options" || bad "bootstrap rejects unknown options"
+if grep -v '^[[:space:]]*#' "$boot_sh" | grep -Eq '(^|[^a-z])sudo |/etc/'; then bad "bootstrap: no sudo, no /etc"; else ok "bootstrap: no sudo, no /etc"; fi
+
 # 10. static checks
-bash -n "$install_sh" && bash -n "$here/test.sh" && bash -n "$repo_root/mods/install.sh" && ok "bash -n" || bad "bash -n"
-if command -v shellcheck >/dev/null; then shellcheck -x "$install_sh" "$here/test.sh" && ok shellcheck || bad shellcheck
+bash -n "$install_sh" && bash -n "$boot_sh" && bash -n "$here/test.sh" && bash -n "$repo_root/mods/install.sh" && ok "bash -n" || bad "bash -n"
+if command -v shellcheck >/dev/null; then shellcheck -x "$install_sh" "$boot_sh" "$here/test.sh" && ok shellcheck || bad shellcheck
 else skp shellcheck "not installed here"; fi
 
 echo "passed=$pass failed=$fail skipped=$skip"
