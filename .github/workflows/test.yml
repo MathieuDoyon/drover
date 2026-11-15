@@ -20,3 +20,5 @@ jobs:
       # Nothing is skipped: if a test fails, read the failure; do not edit it out silently.
       - name: Test
         run: node --test mods/_lib/*.test.js mods/_test/*.test.js
+      - name: Public sync script
+        run: scripts/public-sync.test.sh
