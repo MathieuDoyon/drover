@@ -1,0 +1,361 @@
+#!/usr/bin/env -S python3 -I
+# drover-env-write prepare <id> | commit <id> <tmp> | abort <id> <tmp> | delete <id>   --config-dir DIR --stage-dir DIR
+# The mod runtime has no chmod, rename or file mode, and it may only write under its own app home. So this helper makes the
+# agent env file safe, with a staging folder the mod may write to:
+#   prepare: make <config>/agents (0700), the stage dir (0700) and, in the stage dir, an empty, uniquely named
+#            <id>.<16 hex>.tmp (0600, O_EXCL). Prints the tmp name. The mod writes the JSON into that tmp. Overlapping saves
+#            get different tmp files.
+#   commit:  check the named tmp (regular, ours, 0600, <= 8 KiB, same schema as drover-env), move it to <config>/agents/<id>.json
+#            (rename; across devices: the checked bytes go into a new 0600 tmp inside agents/, then rename), then check the
+#            published <id>.json again (regular, ours, 0600); if not, delete it and fail. A refused tmp is removed.
+#   abort:   remove that tmp from the stage dir.
+#   delete:  check every dir, remove every pending <id>.<hex>.tmp in agents/ and the stage dir, and only then <id>.json (a symlink is removed, never followed).
+#            Any failure before the last step leaves the identity file in place.
+# Only a name that prepare could have made for that id is accepted as <tmp>.
+# Values never travel in argv, stdout or an error: the mod writes them straight into the 0600 tmp file.
+# Fail closed: any problem prints a reason (never a value) and exits 1. delete/abort treat only a confirmed absence
+# (a config dir, agents/ or stage dir that does not exist) as success; a symlink, no access or any other open error exits 1.
+# Config dir: --config-dir DIR, else $DROVER_HERDR_CONFIG_DIR, else ~/.config/drover-herdr. Stage dir: --stage-dir DIR (required).
+# Both: absolute, no symlink, ours; the config dir must not be group/world writable, the stage dir is 0700.
+# Name and schema rules mirror drover-env and parseAgentEnv in mods/_lib/runs.js: keep them identical.
+# Known limitation (scope section 5: environment variables are not a sandbox): the mod reopens the tmp by path to write the value.
+# Same-user code could swap that tmp for a symlink between prepare and the write, or between commit's check and the move.
+# Another OS user cannot (0700 dirs). The post-move check above catches a swapped result and removes it. No private channel is
+# attempted: same-user code can read the 0600 file anyway.
+import errno, json, os, re, stat, sys
+
+MAX_BYTES = 8192
+ID = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+NAME = re.compile(r"^[A-Z_][A-Z0-9_]*$")
+DENY = re.compile(r"^(PATH|HOME|SHELL|USER|LOGNAME|TERM|HC_.*|HERDR_.*|LD_.*|DYLD_.*|PYTHON.*)$")
+CLOEXEC = getattr(os, "O_CLOEXEC", 0)
+TMPNAME = "{id}.[0-9a-f]{{16}}.tmp"
+DIRFLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | CLOEXEC
+
+
+def fail(reason):
+    sys.stderr.write("drover-env-write: " + reason + "\n")
+    sys.exit(1)
+
+
+def pairs(items):
+    d = {}
+    for k, v in items:
+        if k in d:
+            fail("duplicate variable name")
+        d[k] = v
+    return d
+
+
+def clean_dir(base, what):
+    if not os.path.isabs(base):
+        fail(what + " must be an absolute path")
+    base = base.rstrip("/")
+    if not base or os.path.basename(base) in (".", ".."):
+        fail(what + " must name a directory (no trailing . or ..)")
+    return base
+
+
+def config_dir(arg):
+    return clean_dir(arg or os.environ.get("DROVER_HERDR_CONFIG_DIR") or os.path.join(os.path.expanduser("~"), ".config", "drover-herdr"), "config dir")
+
+
+def open_stage(path, create):
+    """Pinned descriptor of the stage dir: a real dir of ours, 0700 (prepare creates it and tightens one of ours)."""
+    if create:
+        try:
+            os.mkdir(path, 0o700)
+        except FileExistsError:
+            pass
+        except OSError:
+            fail("cannot create the stage directory")
+    try:
+        fd = os.open(path, DIRFLAGS)
+    except OSError:
+        fail("stage directory missing or not a real directory")
+    st = os.fstat(fd)
+    if st.st_uid != os.geteuid():
+        fail("stage directory has the wrong owner")
+    if stat.S_IMODE(st.st_mode) != 0o700:
+        if not create:
+            fail("stage directory mode must be 0700")
+        os.fchmod(fd, 0o700)
+    return fd
+
+
+def open_base(base, create):
+    """Pinned descriptor of the config dir. Creates it (0700) when create; never follows a symlink."""
+    if create:
+        try:
+            os.makedirs(os.path.dirname(base) or "/", mode=0o700, exist_ok=True)
+            os.mkdir(base, 0o700)
+        except FileExistsError:
+            pass
+        except OSError:
+            fail("cannot create the config directory")
+    try:
+        fd = os.open(base, DIRFLAGS)
+    except OSError:
+        fail("config directory missing or not a real directory")
+    st = os.fstat(fd)
+    if st.st_uid != os.geteuid():
+        fail("config directory has the wrong owner")
+    if st.st_mode & 0o022:
+        fail("config directory must not be group or world writable")
+    return fd
+
+
+def open_agents(bfd, create):
+    if create:
+        try:
+            os.mkdir("agents", 0o700, dir_fd=bfd)
+        except FileExistsError:
+            pass
+        except OSError:
+            fail("cannot create the agents directory")
+    try:
+        fd = os.open("agents", DIRFLAGS, dir_fd=bfd)
+    except OSError:
+        fail("agents directory missing or not a real directory")
+    st = os.fstat(fd)
+    if st.st_uid != os.geteuid():
+        fail("agents directory has the wrong owner")
+    if stat.S_IMODE(st.st_mode) != 0o700:
+        if not create:
+            fail("agents directory mode must be 0700")
+        os.fchmod(fd, 0o700)  # ours and only being tightened
+    return fd
+
+
+def unlink(dfd, name):
+    try:
+        os.unlink(name, dir_fd=dfd)
+    except FileNotFoundError:
+        pass
+    except OSError:
+        fail("cannot remove " + name)
+
+
+def check(raw):
+    if len(raw) > MAX_BYTES:
+        fail("environment is larger than 8 KiB")
+    try:
+        data = json.loads(raw.decode("utf-8"), object_pairs_hook=pairs)
+    except SystemExit:
+        raise
+    except Exception:
+        fail("environment is not valid JSON")
+    if not isinstance(data, dict) or data.get("version") != 1 or isinstance(data.get("version"), bool) \
+            or not isinstance(data.get("env"), dict):
+        fail("environment needs version 1 and an env object")
+    for name, entry in data["env"].items():
+        if not NAME.fullmatch(name):
+            fail("bad variable name (use A-Z, 0-9, _)")
+        if DENY.fullmatch(name):
+            fail("variable name is not allowed: " + name)
+        if not isinstance(entry, dict) or not isinstance(entry.get("value"), str) or "\0" in entry["value"]:
+            fail("variable " + name + " needs a string value")
+    if "GH_TOKEN" in data["env"] and "GH_CONFIG_DIR" not in data["env"]:
+        fail("GH_TOKEN needs GH_CONFIG_DIR (otherwise gh could act as your own login)")
+
+
+def prepare(sfd, agent):
+    for _ in range(8):
+        tmp = "%s.%s.tmp" % (agent, os.urandom(8).hex())
+        try:
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | CLOEXEC, 0o600, dir_fd=sfd)
+        except FileExistsError:
+            continue
+        except OSError:
+            fail("cannot create the pending file")
+        try:
+            os.fchmod(fd, 0o600)  # the umask must not matter
+        finally:
+            os.close(fd)
+        return tmp
+    fail("cannot create the pending file")
+
+
+def verify_published(dfd, final):
+    """After the rename: what now sits at <id>.json must be a regular 0600 file of ours, else remove it."""
+    ok = False
+    try:
+        fd = os.open(final, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | CLOEXEC, dir_fd=dfd)
+        try:
+            st = os.fstat(fd)
+            ok = stat.S_ISREG(st.st_mode) and st.st_uid == os.geteuid() and stat.S_IMODE(st.st_mode) == 0o600
+        finally:
+            os.close(fd)
+    except OSError:
+        ok = False
+    if not ok:
+        try:
+            os.unlink(final, dir_fd=dfd)
+        except OSError:
+            pass
+        fail("the saved file did not pass the check and was removed")
+
+
+def publish(sfd, dfd, tmp, final, raw):
+    try:
+        os.replace(tmp, final, src_dir_fd=sfd, dst_dir_fd=dfd)
+        return True
+    except OSError as e:
+        if e.errno != errno.EXDEV:
+            fail("cannot move the file into place")
+    # Another device: put the already checked bytes into a new 0600 tmp inside agents/, then rename within that dir.
+    copy = "%s.%s.tmp" % (final[:-len(".json")], os.urandom(8).hex())
+    try:
+        fd = os.open(copy, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | CLOEXEC, 0o600, dir_fd=dfd)
+        try:
+            os.fchmod(fd, 0o600)
+            view = memoryview(raw)
+            while view:
+                view = view[os.write(fd, view):]
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        os.replace(copy, final, src_dir_fd=dfd, dst_dir_fd=dfd)
+    except OSError:
+        try:
+            os.unlink(copy, dir_fd=dfd)
+        except OSError:
+            pass
+        fail("cannot move the file into place")
+    try:
+        os.unlink(tmp, dir_fd=sfd)
+    except OSError:
+        return False
+    return True
+
+
+def commit(sfd, dfd, tmp, final):
+    try:
+        try:
+            fd = os.open(tmp, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | CLOEXEC, dir_fd=sfd)
+        except OSError:
+            fail("pending file missing, a symlink or unreadable")
+        try:
+            st = os.fstat(fd)
+            if not stat.S_ISREG(st.st_mode):
+                fail("pending file is not a regular file")
+            if st.st_uid != os.geteuid():
+                fail("pending file has the wrong owner")
+            if stat.S_IMODE(st.st_mode) != 0o600:
+                fail("pending file mode must be 0600")
+            if st.st_size > MAX_BYTES:
+                fail("environment is larger than 8 KiB")
+            raw = b""
+            while len(raw) <= MAX_BYTES:
+                chunk = os.read(fd, MAX_BYTES + 1 - len(raw))
+                if not chunk:
+                    break
+                raw += chunk
+        finally:
+            os.close(fd)
+        check(raw)
+        clean = publish(sfd, dfd, tmp, final, raw)
+        verify_published(dfd, final)
+        if not clean:
+            # Published and verified, but the secret-bearing stage copy is still there: not a clean success.
+            fail("saved, but the pending file could not be removed")
+    except SystemExit:
+        try:
+            os.unlink(tmp, dir_fd=sfd)  # a refused payload must not sit on disk
+        except OSError:
+            pass
+        raise
+
+
+def open_dir(path, what, parent=-1, exact_mode=None):
+    """A pinned descriptor, or None when the dir is confirmed absent. Anything else unsafe or unreadable fails."""
+    try:
+        fd = os.open(path, DIRFLAGS, dir_fd=parent) if parent >= 0 else os.open(path, DIRFLAGS)
+    except OSError as e:
+        if e.errno == errno.ENOENT:
+            return None
+        fail(what + " is not a real directory or cannot be opened")
+    if os.fstat(fd).st_uid != os.geteuid():
+        os.close(fd)
+        fail(what + " has the wrong owner")
+    if exact_mode is not None and stat.S_IMODE(os.fstat(fd).st_mode) != exact_mode:
+        os.close(fd)
+        fail(what + " mode must be 0700")
+    return fd
+
+
+def remove_pending(dfd, agent):
+    pending = re.compile(TMPNAME.format(id=re.escape(agent)))
+    for name in os.listdir(dfd):
+        if pending.fullmatch(name):
+            unlink(dfd, name)
+
+
+def main(argv):
+    args, opts = argv[1:], {}
+    for flag in ("--config-dir", "--stage-dir"):
+        if flag in args:
+            i = args.index(flag)
+            if i + 1 >= len(args):
+                fail(flag + " needs a value")
+            opts[flag] = args[i + 1]
+            del args[i:i + 2]
+    want = {"prepare": 2, "delete": 2, "commit": 3, "abort": 3}
+    if not args or want.get(args[0]) != len(args):
+        fail("usage: drover-env-write prepare <id> | commit <id> <tmp> | abort <id> <tmp> | delete <id> --config-dir DIR --stage-dir DIR")
+    cmd, agent = args[0], args[1]
+    if not ID.fullmatch(agent):
+        fail("bad agent id")
+    tmp = args[2] if len(args) == 3 else None
+    if tmp is not None and not re.fullmatch(TMPNAME.format(id=re.escape(agent)), tmp):
+        fail("bad pending file name")
+    if "--stage-dir" not in opts:
+        fail("--stage-dir is required")
+    stage = clean_dir(opts["--stage-dir"], "stage dir")
+    base = config_dir(opts.get("--config-dir"))
+    final = agent + ".json"
+    fds = []
+    try:
+        if cmd == "abort":
+            sfd = open_dir(stage, "stage directory", exact_mode=0o700)
+            if sfd is not None:
+                fds.append(sfd)
+                unlink(sfd, tmp)
+        elif cmd == "delete":
+            # Open and check everything first, finish every fallible pending-file cleanup, and only then remove the identity.
+            # A failure anywhere before that leaves the identity file, so a launch still wraps (never a plain launch).
+            bfd = open_dir(base, "config directory")
+            dfd = None
+            if bfd is not None:
+                fds.append(bfd)
+                dfd = open_dir("agents", "agents directory", bfd)
+                if dfd is not None:
+                    fds.append(dfd)
+            sfd = open_dir(stage, "stage directory", exact_mode=0o700)
+            if sfd is not None:
+                fds.append(sfd)
+            if dfd is not None:
+                remove_pending(dfd, agent)
+            if sfd is not None:
+                remove_pending(sfd, agent)
+            if dfd is not None:
+                unlink(dfd, final)  # the last step
+        else:
+            bfd = open_base(base, cmd == "prepare")
+            fds.append(bfd)
+            dfd = open_agents(bfd, cmd == "prepare")
+            fds.append(dfd)
+            sfd = open_stage(stage, cmd == "prepare")
+            fds.append(sfd)
+            if cmd == "prepare":
+                print(prepare(sfd, agent))
+                return
+            commit(sfd, dfd, tmp, final)
+    finally:
+        for d in fds:
+            os.close(d)
+    print("ok")
+
+
+if __name__ == "__main__":
+    main(sys.argv)

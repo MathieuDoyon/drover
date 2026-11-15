@@ -1,0 +1,22 @@
+name: test
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  node:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      # The full glob, never a hand list: a new test file runs without touching this file.
+      #
+      # Two tests used to be flaky (T-MWGRU7ZWLBE s8.test.js, T-MWGS1RD5PNU config-gate.test.js) and are fixed:
+      # neither has a timing budget now (one counts hash calls, the other waits for the condition, with a 10 s hang guard).
+      # Nothing is skipped: if a test fails, read the failure; do not edit it out silently.
+      - name: Test
+        run: node --test mods/_lib/*.test.js mods/_test/*.test.js

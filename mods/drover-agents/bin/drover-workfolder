@@ -1,0 +1,207 @@
+#!/usr/bin/env -S python3 -I
+# drover-workfolder ensure <abs dir> [--root <abs root>] | move <from> <to> [--root <abs root>]
+# The mod runtime has no chmod, so this helper makes the work folder (where agents write plans, scouts, reviews, lane logs)
+# private, and moves an existing <repo>/.drover into it when the person asks. It handles paths only, never secrets.
+#   ensure: mkdir -p. Every dir it creates is 0700 (also the parents it has to create); the leaf is chmod 0700 even when it
+#           existed. Existing parents are never touched. Refuses a relative path, a "." or ".." part, a NUL, a symlink leaf,
+#           or a leaf that is not a directory. With --root, the dir must be the root or inside it, and NO component below the
+#           root may be a symlink (a link at the project or run segment would redirect the folder out of the root). The root
+#           itself and everything above it may be links (system aliases such as /tmp). Prints the folder.
+#   move:   <from> must be an existing directory (not a symlink) and <to> is made like ensure (same --root rule). Moves every
+#           file and symlink of <from> (recursively) to the same place under <to>. NEVER overwrites, also when a writer
+#           creates the name between the check and the move: each file is published with link(2) (fails if the name exists),
+#           or, when links are not possible (another device), by opening the target with O_EXCL and copying; the source is
+#           removed only after the publish succeeded. A name that exists in <to> is skipped and listed as a conflict. Empty
+#           sub-folders left behind are removed; <from> itself is never deleted. <to> inside <from>, or the same folder, is
+#           refused. Symlinks are moved as links, never followed.
+#           The SOURCE is claimed first (atomic rename to <dir>/.drover-claim-<uuid hex>), the claimed file is published, then
+#           the claim is removed: a newer source saved in between is never deleted. On a conflict or an error the claim goes
+#           back to its name; if that name exists again the claim stays and is printed as "leftover: <abs path>" (so is a
+#           claim left by an earlier crash, which is never moved).
+#           Prints "moved N, skipped M", then "conflict: <relative path>" per skipped name, then "leftover: <path>" per kept claim.
+#           Exit 0 even with conflicts.
+# Fail closed: any other problem prints a reason to stderr and exits 1.
+import errno, os, shutil, stat, sys, uuid
+
+
+def fail(reason):
+    sys.stderr.write("drover-workfolder: " + reason + "\n")
+    sys.exit(1)
+
+
+def clean(path, what):
+    if "\0" in path or not os.path.isabs(path):
+        fail(what + " must be an absolute path")
+    parts = [p for p in path.split("/") if p]
+    if any(p in (".", "..") for p in parts):
+        fail(what + " must not contain . or ..")
+    return "/" + "/".join(parts)
+
+
+def ensure(path, root=None):
+    if root is not None and path != root and not path.startswith(root + "/"):
+        fail("dir is not inside the root")
+    cur, checking = "/", False
+    for part in [p for p in path.split("/") if p]:
+        cur = os.path.join(cur, part)
+        if checking and os.path.islink(cur):
+            fail("symlink in the work folder path: " + cur)
+        if not os.path.lexists(cur):
+            try:
+                os.mkdir(cur, 0o700)
+                os.chmod(cur, 0o700)  # the umask may only remove bits, but be exact
+            except OSError as e:
+                fail("cannot create %s: %s" % (cur, e.strerror))
+        if cur == root:
+            checking = True  # only the components BELOW the root are checked
+    if os.path.islink(path) or not os.path.isdir(path):
+        fail(path + " is not a directory (a symlink or a file is refused)")
+    try:
+        os.chmod(path, 0o700)
+    except OSError as e:
+        fail("cannot chmod %s: %s" % (path, e.strerror))
+
+
+CLAIM = ".drover-claim-"
+
+
+def put_exclusive(src, dst):
+    """Copy or link src to dst without ever replacing dst. True when dst now holds it, False when dst exists."""
+    st = os.lstat(src)
+    if stat.S_ISLNK(st.st_mode):
+        try:
+            os.symlink(os.readlink(src), dst)  # fails if dst exists
+        except FileExistsError:
+            return False
+        return True
+    try:
+        os.link(src, dst)  # atomic, fails with EEXIST if dst exists
+        return True
+    except FileExistsError:
+        return False
+    except OSError as e:
+        if e.errno not in (errno.EXDEV, errno.EPERM, errno.EMLINK, errno.ENOTSUP, errno.EOPNOTSUPP, errno.EACCES):
+            raise
+    try:
+        out = open(dst, "xb")  # O_EXCL: fails if dst exists
+    except FileExistsError:
+        return False
+    try:
+        with out, open(src, "rb") as f:
+            shutil.copyfileobj(f, out)
+        shutil.copystat(src, dst)
+    except BaseException:
+        try:
+            os.unlink(dst)  # our own partial file
+        except OSError:
+            pass
+        raise
+    return True
+
+
+def restore(claim, src):
+    """Put the claimed file back at src without clobbering a newer src. False when src exists: the claim is then kept."""
+    if not put_exclusive(claim, src):
+        return False
+    os.unlink(claim)
+    return True
+
+
+def publish(src, dst, leftovers):
+    """Move src to dst. Returns "moved", "conflict" or "gone".
+    The source is CLAIMED first (an atomic rename to a private name), so a newer src saved meanwhile is never touched:
+    the claimed file is published to dst exclusively, then the claim is removed. On a conflict or an error the claim goes
+    back to src; if src exists again the claim stays and its path is added to leftovers (never silently lost)."""
+    st = os.lstat(src)
+    if not (stat.S_ISLNK(st.st_mode) or stat.S_ISREG(st.st_mode)):
+        return "conflict"  # a socket, fifo or device is left where it is and listed
+    # A fresh random name; rename() would replace an existing path, so a name that exists is never used (5 tries, then skip).
+    for _ in range(5):
+        claim = os.path.join(os.path.dirname(src), CLAIM + uuid.uuid4().hex)
+        if not os.path.lexists(claim):
+            break
+    else:
+        return "conflict"
+    try:
+        os.rename(src, claim)
+    except FileNotFoundError:
+        return "gone"
+    try:
+        done = put_exclusive(claim, dst)
+    except BaseException:
+        if not restore(claim, src):
+            leftovers.append(claim)
+        raise
+    if done:
+        os.unlink(claim)
+        return "moved"
+    if not restore(claim, src):
+        leftovers.append(claim)
+    return "conflict"
+
+
+def merge(src, dst, rel, counts, conflicts, leftovers):
+    for e in sorted(os.scandir(src), key=lambda x: x.name):
+        r = os.path.join(rel, e.name)
+        d = os.path.join(dst, e.name)
+        if e.is_dir(follow_symlinks=False):
+            if os.path.islink(d) or (os.path.lexists(d) and not os.path.isdir(d)):
+                conflicts.append(r)
+                continue
+            try:
+                os.mkdir(d, 0o700)
+            except FileExistsError:
+                if os.path.islink(d) or not os.path.isdir(d):
+                    conflicts.append(r)
+                    continue
+            merge(e.path, d, r, counts, conflicts, leftovers)
+            try:
+                os.rmdir(e.path)  # only when it is empty now
+            except OSError:
+                pass
+        elif e.name.startswith(CLAIM):
+            leftovers.append(e.path)  # a claim from an earlier crash: reported, never moved
+        else:
+            how = publish(e.path, d, leftovers)
+            if how == "moved":
+                counts[0] += 1
+            elif how == "conflict":
+                conflicts.append(r)
+
+
+def main(argv):
+    root = None
+    if "--root" in argv:
+        i = argv.index("--root")
+        if i + 1 >= len(argv):
+            fail("--root needs a path")
+        root = clean(argv[i + 1], "root")
+        argv = argv[:i] + argv[i + 2:]
+    if len(argv) == 3 and argv[1] == "ensure":
+        path = clean(argv[2], "dir")
+        ensure(path, root)
+        print(path)
+    elif len(argv) == 4 and argv[1] == "move":
+        src, dst = clean(argv[2], "from"), clean(argv[3], "to")
+        if os.path.islink(src) or not os.path.isdir(src):
+            fail(src + " is not a directory")
+        real_src, real_dst = os.path.realpath(src), os.path.realpath(dst)
+        if real_dst == real_src or real_dst.startswith(real_src + "/"):
+            fail("to is the same folder as from, or inside it")
+        ensure(dst, root)
+        counts, conflicts, leftovers = [0], [], []
+        try:
+            merge(src, dst, "", counts, conflicts, leftovers)
+        except OSError as e:
+            fail("move failed: %s (%s)" % (e.strerror, e.filename))
+        print("moved %d, skipped %d" % (counts[0], len(conflicts)))
+        for c in conflicts:
+            print("conflict: " + c)
+        for c in leftovers:
+            print("leftover: " + c)
+    else:
+        fail("usage: drover-workfolder ensure <abs dir> [--root R] | move <from> <to> [--root R]")
+
+
+if __name__ == "__main__":
+    main(sys.argv)

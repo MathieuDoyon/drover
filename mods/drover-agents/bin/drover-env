@@ -1,0 +1,128 @@
+#!/usr/bin/env -S python3 -I
+# drover-env <agent-id> -- cmd [args...]
+# Runs cmd with the variables from <config>/agents/<agent-id>.json merged into its environment.
+# Fail closed: any problem prints a reason (never a value) and exits 1; cmd never starts.
+# Config dir: $DROVER_HERDR_CONFIG_DIR (absolute path; tests and disposable homes), else ~/.config/drover-herdr.
+# The override gets the same checks as the default. Config dir: real dir (no symlink), owned by us, not group/world writable.
+# agents/: real dir opened relative to it, owned by us, mode 0700. All opens go through pinned descriptors (no path re-resolution).
+# File: regular, not a symlink, owned by us, mode 0600, <= 8 KiB, {"version":1,"env":{"NAME":{"value":"..","secret":true}}}.
+# Known limitation: only the config dir and agents/ are checked. Ancestors above the config dir (e.g. ~/.config) are NOT
+# checked, so same-user or root-owned-path trust is assumed there. A symlinked config dir is refused, not followed.
+# Also refused: GH_TOKEN without GH_CONFIG_DIR in the file (gh could fall back to the person's own login).
+# Name rules mirror ENV_NAME / ENV_DENY / parseAgentEnv in mods/_lib/runs.js: keep them identical.
+import json, os, re, stat, sys
+
+MAX_BYTES = 8192
+ID = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+NAME = re.compile(r"^[A-Z_][A-Z0-9_]*$")
+DENY = re.compile(r"^(PATH|HOME|SHELL|USER|LOGNAME|TERM|HC_.*|HERDR_.*|LD_.*|DYLD_.*|PYTHON.*)$")
+
+
+def fail(reason):
+    sys.stderr.write("drover-env: " + reason + "\n")
+    sys.exit(1)
+
+
+def pairs(items):
+    d = {}
+    for k, v in items:
+        if k in d:
+            fail("duplicate variable name")
+        d[k] = v
+    return d
+
+
+def main(argv):
+    if len(argv) < 4 or argv[2] != "--":
+        fail("usage: drover-env <agent-id> -- cmd [args...]")
+    agent, cmd = argv[1], argv[3:]
+    if not ID.fullmatch(agent):
+        fail("bad agent id")
+    base = os.environ.get("DROVER_HERDR_CONFIG_DIR") or os.path.join(os.path.expanduser("~"), ".config", "drover-herdr")
+    if not os.path.isabs(base):
+        fail("config dir must be an absolute path")
+    # O_NOFOLLOW only covers the last component: "link/" or "link/." would traverse a symlink. Normalize, refuse dot spellings.
+    base = base.rstrip("/")
+    if not base or os.path.basename(base) in (".", ".."):
+        fail("config dir must name a directory (no trailing . or ..)")
+    euid = os.geteuid()
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+    # Pin the chain with descriptors: config dir, then agents/ relative to it, then the file relative to that.
+    # A later rename or symlink swap cannot redirect what was already opened and checked.
+    bfd = dfd = fd = -1
+    try:
+        try:
+            bfd = os.open(base, flags)
+        except OSError:
+            fail("config directory missing or not a real directory")
+        bs = os.fstat(bfd)
+        if bs.st_uid != euid:
+            fail("config directory has the wrong owner")
+        if bs.st_mode & 0o022:
+            fail("config directory must not be group or world writable")
+        try:
+            dfd = os.open("agents", flags, dir_fd=bfd)
+        except OSError:
+            fail("agents directory missing or not a real directory")
+        ds = os.fstat(dfd)
+        if ds.st_uid != euid:
+            fail("agents directory has the wrong owner")
+        if stat.S_IMODE(ds.st_mode) != 0o700:
+            fail("agents directory mode must be 0700")
+        try:
+            # O_NONBLOCK: a FIFO must not block the open; the S_ISREG check below rejects it.
+            fd = os.open(agent + ".json", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0), dir_fd=dfd)
+        except OSError:
+            fail("identity file missing, a symlink or unreadable")
+        fs = os.fstat(fd)
+        if not stat.S_ISREG(fs.st_mode):
+            fail("identity file is not a regular file")
+        if fs.st_uid != euid:
+            fail("identity file has the wrong owner")
+        if stat.S_IMODE(fs.st_mode) != 0o600:
+            fail("identity file mode must be 0600")
+        if fs.st_size > MAX_BYTES:
+            fail("identity file is larger than 8 KiB")
+        raw = b""
+        while len(raw) <= MAX_BYTES:
+            chunk = os.read(fd, MAX_BYTES + 1 - len(raw))
+            if not chunk:
+                break
+            raw += chunk
+    finally:
+        for d in (fd, dfd, bfd):
+            if d >= 0:
+                os.close(d)
+    if len(raw) > MAX_BYTES:
+        fail("identity file is larger than 8 KiB")
+    try:
+        data = json.loads(raw.decode("utf-8"), object_pairs_hook=pairs)
+    except SystemExit:
+        raise
+    except Exception:
+        fail("identity file is not valid JSON")
+    if not isinstance(data, dict) or data.get("version") != 1 or isinstance(data.get("version"), bool) \
+            or not isinstance(data.get("env"), dict):
+        fail("identity file needs version 1 and an env object")
+    env = {}
+    for name, entry in data["env"].items():
+        if not NAME.fullmatch(name):
+            fail("bad variable name (use A-Z, 0-9, _)")
+        if DENY.fullmatch(name):
+            fail("variable name is not allowed: " + name)
+        if not isinstance(entry, dict) or not isinstance(entry.get("value"), str) or "\0" in entry["value"]:
+            fail("variable " + name + " needs a string value")
+        env[name] = entry["value"]
+    if "GH_TOKEN" in env and "GH_CONFIG_DIR" not in env:
+        fail("GH_TOKEN needs GH_CONFIG_DIR (otherwise gh could act as your own login)")
+    merged = dict(os.environ)
+    merged.update(env)
+    try:
+        os.execvpe(cmd[0], cmd, merged)
+    except OSError:
+        sys.stderr.write("drover-env: cannot run command\n")
+        sys.exit(127)
+
+
+if __name__ == "__main__":
+    main(sys.argv)

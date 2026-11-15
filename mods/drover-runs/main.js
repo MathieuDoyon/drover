@@ -1,0 +1,91 @@
+// Drover Runs: every agent/squad run with its members' live status.
+// A stopped agent is "stopped: check the result", never "done": only the person or `drover move` says review.
+import { View, div } from "gpui-kit";
+import { v_flex, h_flex } from "gpui-base";
+import { agents, terminals, run, theme, setShared, shared } from "herdr";
+import { RUNS_KEY, liveStatuses, runStatus, runTitle, lineageOf, squadRows, stopTargets, openCommand } from "./runs.js";
+import { age } from "./sources.js";
+import { load, loadRuns, edit, observeEnded, modSettings } from "./io.js";
+import { bind, isEnabled, whenLoaded, ready as cfgReady } from "./config.js";
+import { gated } from "./ui.js";
+
+const LABEL = { blocked: "Needs you", working: "Working", stopped: "Stopped: check the result", ended: "Ended" };
+
+export default class Runs extends View {
+  init(_props, cx) {
+    this.confirm = null;
+    this.showEnded = false;
+    bind({ shared, modSettings });
+    this.started = false;
+    this.stopped = false; // seen off since the last render that was on
+    whenLoaded("drover-runs", cx, (cx) => this.ensureStarted(cx));
+  }
+
+  // Idempotent. Off: no observeEnded (it can kill parked workers) and no timer. On: starts once; back from off, observes again.
+  ensureStarted(cx) {
+    if (!isEnabled("drover-runs")) { this.stopped = this.started; return; }
+    if (!cfgReady("drover-runs")) return;
+    if (this.started) { if (this.stopped) { this.stopped = false; observeEnded(); } return; }
+    this.started = true;
+    observeEnded();
+    cx.timer.every(60000, (cx) => { if (!isEnabled("drover-runs")) return; observeEnded(); cx.notify(); }); // ages; saves first-observed end times
+  }
+
+  render(cx) {
+    const t = theme();
+    this.ensureStarted(cx);
+    { const g = gated("drover-runs"); if (g) return g; }
+    const live = liveStatuses(agents(), terminals());
+    const alive = new Set(terminals().map((x) => x.address));
+    const tasks = new Map(load().map((x) => [x.id, x]));
+    const all = loadRuns().map((r) => ({ r, status: runStatus(r, live, alive) }));
+    const shown = all.filter((x) => this.showEnded || x.status !== "ended");
+    const color = { blocked: t.blocked, working: t.working, stopped: t.done, ended: t.dim, gone: t.dim, running: t.idle, idle: t.idle, done: t.done };
+    const link = (id, text, action) => div().id(id).h(22).px(7).flex().items_center().rounded(5).text_size(11.5).text_color(t.muted)
+      .cursor_pointer().hover((s) => s.bg(t.raised).text_color(t.foreground)).on_click((_e, cx) => { action(); cx.notify(); }).child(text);
+
+    const card = ({ r, status }) => {
+      const task = tasks.get(r.task);
+      const stop = () => {
+        if (this.confirm !== r.id) { this.confirm = r.id; return; }
+        this.confirm = null;
+        for (const a of stopTargets(r, alive)) run("terminal.kill", { terminal: a });
+      };
+      return v_flex().id(`run-${r.id}`).p(10).gap(6).rounded(9).bg(t.background).border_1().border_color(t.border)
+        .child(h_flex().gap(8).items_center()
+          .child(div().w(8).h(8).rounded(4).bg(color[status]))
+          .child(div().flex_1().truncate().text_size(13).child(runTitle(r, task)))
+          .child(div().text_size(11).text_color(color[status]).child(LABEL[status])))
+        .child(div().text_size(11).text_color(t.dim).truncate()
+          .child([r.id, r.name, `started ${age(r.started)} ago`, task ? `column ${task.column}` : "task deleted", r.worktree?.branch].filter(Boolean).join(" · ")))
+        .children(squadRows(lineageOf(r, all.map((x) => x.r), live, alive, Date.now())).map((m) => {
+          const row = h_flex().id(`m-${r.id}-${m.address}`).min_h(26).px(6).pl(6 + m.depth * 14).gap(8).items_center().rounded(6)
+            .when(m.dim, (el) => el.opacity(0.5))
+            .when(m.focusable, (el) => el.cursor_pointer().hover((x) => x.bg(t.hover)).on_click(() => run(openCommand(m), { terminal: m.address })));
+          return row
+            .child(div().w(6).h(6).rounded(3).flex_none().bg(color[m.status] ?? t.idle))
+            .child(div().text_size(12).flex_none().child(m.name))
+            .child(div().flex_1().truncate().text_size(11).text_color(t.dim).child([m.role, m.address].filter(Boolean).join(" · ")))
+            .child(div().px(5).rounded(4).flex_none().bg(t.raised).text_size(11).text_color(t.muted).child(`req: ${m.modelText}`))
+            .child(div().text_size(11).flex_none().text_color(color[m.status] ?? t.muted).child(m.status))
+            .child(div().w(44).flex_none().text_size(11).text_color(t.dim).child(m.durationText));
+        }))
+        .child(h_flex().gap(4)
+          .when(Boolean(r.space), (el) => el.child(link(`room-${r.id}`, "Open room", () => run("space.select", { id: r.space }))))
+          .when(Boolean(task), (el) => el.child(link(`task-${r.id}`, "Task", () => edit(r.task))))
+          .when(Boolean(r.worktree), (el) => el.child(div().flex_1().truncate().text_size(10.5).text_color(t.dim).child(r.worktree.path)))
+          .when(!r.worktree, (el) => el.child(div().flex_1()))
+          .when(status !== "ended", (el) => el.child(link(`stop-${r.id}`, this.confirm === r.id ? "Click again to kill all" : "Stop", stop)))
+          .when(status === "ended", (el) => el.child(link(`forget-${r.id}`, "Forget", () => setShared(RUNS_KEY, loadRuns().filter((x) => x.id !== r.id))))));
+    };
+
+    const ended = all.length - all.filter((x) => x.status !== "ended").length;
+    return v_flex().id("root").size_full().bg(t.surface).text_color(t.foreground)
+      .child(h_flex().h(36).px(12).gap(8).items_center().border_b_1().border_color(t.border)
+        .child(div().flex_1().text_size(13).font_semibold().child("Runs"))
+        .child(link("ended", this.showEnded ? `Hide ended (${ended})` : `Show ended (${ended})`, () => { this.showEnded = !this.showEnded; })))
+      .child(shown.length === 0
+        ? div().p(14).text_size(12).text_color(t.dim).child(all.length ? "No active runs." : "No runs yet. Press ▶ on a task.")
+        : v_flex().id("list").flex_1().min_h(0).overflow_y_scrollbar().p(8).gap(8).children(shown.map(card)));
+  }
+}

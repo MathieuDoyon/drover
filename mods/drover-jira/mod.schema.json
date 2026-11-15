@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Jira mod.json",
+  "type": "object",
+  "properties": {
+    "$schema": {
+      "type": "string"
+    },
+    "version": {
+      "type": "string"
+    },
+    "title": {
+      "type": "string"
+    },
+    "place": {
+      "enum": [
+        "left",
+        "right",
+        "top",
+        "bottom",
+        "none"
+      ]
+    },
+    "size": {
+      "type": "number",
+      "minimum": 0
+    },
+    "focusable": {
+      "type": "boolean"
+    },
+    "settings": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "jql": {
+          "title": "Default JQL",
+          "description": "Query the list runs when you haven't typed one (the box keeps what you last ran).",
+          "type": "string",
+          "default": "assignee = currentUser() AND statusCategory != Done ORDER BY updated DESC"
+        },
+        "pages": {
+          "title": "Pages",
+          "description": "How many pages of 50 issues to load before the list says partial.",
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 20,
+          "default": 4
+        }
+      }
+    }
+  }
+}

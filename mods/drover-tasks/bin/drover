@@ -1,0 +1,198 @@
+#!/usr/bin/env bash
+# Drover CLI for agents. Writes go through an open Drover mod (file inbox); reads come from shared.json.
+set -euo pipefail
+home="${HERDR_APP_HOME:-$HOME/.config/herdr-app}"
+usage() {
+  cat >&2 <<'EOF'
+usage: drover tasks [tag|column] [--project <id|name>]   list tasks (id, column, priority, tags, title)
+       drover task <T-…>                          one task with its description
+       drover note <T-…> [--kind decision|log|blocker|pr|handoff] "<text…>"   add a note to a task (after an owner decision or a scope)
+       drover edit <T-…> [--title "<t>"] [--desc "<d>"] [--parent <T-…|none>]   replace the title, the description and/or the parent (1 flag at least)
+       drover projects                            list projects (id, name, default repo)
+       drover task-project <T-…> <id|name|none>   put a task in a project (none clears it)
+       drover link <T-…> <url|none>               link a card to its GitHub issue/PR or Jira issue (shows as Source in the task dialog); none unlinks
+       drover squads                              list squads and agents you can start
+       drover add "<title>" [--desc "<text>"] [--tag <t>]… [--column backlog|todo] [--priority P0-P3] [--project <id|name>] [--assignee <agent|squad>:<id>] [--parent <T-…>]
+       drover move <T-…> <backlog|todo|doing|review|blocked|done>   (an agent cannot move to done: the owner does)
+       drover next                                queue mode: free slots + Ready cards of your project (starts nothing)
+       drover archive <T-…>                               archive a task (like the editor's Archive button)
+       drover start <T-…|-> <squad|agent> [--worktree] [--project <id|name>]   open a squad (or 1 agent) on a task, or none (-);
+                                                  its leader reports to you ($HC_TERMINAL_ID);
+                                                  --project (agent drover only) binds that Drover to a project (queue mode)
+       drover wake <terminal|T-…> <when> <message…>       once: now, 15m, 2h, 1d, 14:30, "tomorrow 9:00", "2026-11-12 09:00"
+       drover wake <terminal|T-…> every <30m|2h|1d> <message…>   repeat (first time after one interval)
+       drover wakes [terminal|T-…]                list wakeups (id, name, target, schedule, next, status, on/off)
+       drover wake off|on <W-…>                   disable or enable one wakeup
+       drover wake rm <W-…>                       remove one wakeup
+EOF
+  exit 2
+}
+json() { python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$1"; }
+read_shared() { python3 - "$home/shared.json" "$@" <<'PY'
+import json, sys
+path, what, *args = sys.argv[1:]
+try: d = json.load(open(path))
+except FileNotFoundError: d = {}
+tasks = [t for t in d.get("drover.tasks", []) if not t.get("archived")]
+projects = d.get("drover.projects") or []
+def repo(p):
+    r = p.get("repos") or []
+    return next((x["path"] for x in r if x.get("default")), r[0]["path"] if r else "-")
+def find(k):
+    return next((p for p in projects if p["id"] == k or p["name"].lower() == k.lower()), None)
+if what == "projects":
+    for p in projects: print(f'{p["id"]}  {p["name"]}  {repo(p)}')
+elif what == "tasks":
+    pf = None
+    if "--project" in args:
+        i = args.index("--project")
+        if i + 1 >= len(args): sys.exit("error: --project needs an id or name")
+        pf = find(args[i + 1])
+        if not pf: sys.exit(f"error: no project {args[i + 1]} (see: drover projects)")
+        args = args[:i] + args[i + 2:]
+        tasks = [t for t in tasks if t.get("project") == pf["id"]]
+    f = args[0].lower().lstrip("#") if args else None
+    order = {"doing": 0, "review": 1, "blocked": 2, "todo": 3, "backlog": 4, "done": 5}
+    for t in sorted(tasks, key=lambda t: (order.get(t["column"], 9), t.get("priority", "P2"))):
+        if f and f != t["column"] and f not in t.get("tags", []): continue
+        tags = " ".join("#" + x for x in t.get("tags", []))
+        print(f'{t["id"]}  {t["column"]:<7} {t.get("priority","P2")}  {t["title"]}{"  " + tags if tags else ""}{"  agent " + t["agent"] if t.get("agent") else ""}')
+elif what == "task":
+    t = next((t for t in tasks if t["id"] == args[0]), None)
+    if not t: sys.exit(f"error: no task {args[0]}")
+    print(f'{t["id"]} [{t["column"]}] {t.get("priority","P2")} {t["title"]}')
+    if t.get("tags"): print("tags: " + ", ".join(t["tags"]))
+    pr = find(t["project"]) if t.get("project") else None
+    if pr: print(f'project: {pr["name"]} ({pr["id"]}) repo {repo(pr)}')
+    a = t.get("assignee")
+    if isinstance(a, dict) and a.get("kind") and a.get("id"): print(f'assignee: {a["kind"]}:{a["id"]}')
+    if t.get("source"): print("source: " + t["source"].get("url", ""))
+    if t.get("desc"): print("\n" + t["desc"])
+    if t.get("notes"):
+        import datetime
+        print("\n## Notes")
+        import re
+        seen = set()
+        def fnv(s):  # two FNV-1a 32-bit passes over the UTF-8 bytes: same as store.js noteIds
+            out = ""
+            for h in (0x811c9dc5, 0x9e3779b9):
+                for c in s.encode(): h = ((h ^ c) * 16777619) & 0xffffffff
+                out += "%08x" % h
+            return out
+        def nid(n):  # same ids as the editor's store.js (noteIds): kept when valid, else fnv(at\nby\ntext)
+            if re.fullmatch(r"N-[0-9a-f]{6,}", str(n.get("id", ""))) and n["id"] not in seen: seen.add(n["id"]); return n["id"]
+            h = fnv(f'{n.get("at")}\n{n.get("by", "")}\n{n.get("text", "")}'); k = 0
+            while "N-" + h in seen: k += 1; h = fnv(f"{h}#{k}")
+            seen.add("N-" + h); return "N-" + h
+        for n in t["notes"]: print(f'- {t["id"]}#{nid(n)} · {datetime.datetime.fromtimestamp(n["at"] / 1000).strftime("%Y-%m-%d %H:%M")} · {n["by"]}{" · [" + n["kind"] + "]" if n.get("kind") else ""} · {n["text"]}')
+elif what == "squads":
+    cfg = d.get("drover.agents") or {}
+    for q in cfg.get("squads", []):
+        print(f'squad {q["id"]:<14} {q["name"]}: leader {q["leader"]}, members ' + (", ".join(m["agent"] for m in q.get("members", [])) or "none"))
+    for a in cfg.get("agents", []):
+        print(f'agent {a["id"]:<14} {a["name"]}: {a["command"]}')
+    if not cfg: print("default squads: cattle-drive, stray, scouting, dev-review (open the Squads screen once to save them)")
+PY
+}
+send() {  # body, seconds to wait for the answer
+  dir="$home/data/drover-inbox"; mkdir -p "$dir"
+  name="$(date +%s)-$$"
+  printf '%s\n' "$1" > "$dir/.$name.tmp"
+  mv "$dir/.$name.tmp" "$dir/$name.json"
+  for _ in $(seq $(( $2 * 4 ))); do
+    if [ -f "$dir/$name.result" ]; then
+      result="$(cat "$dir/$name.result")"; rm -f "$dir/$name.result"; echo "$result"
+      [[ "$result" == ok:* ]]; exit
+    fi
+    sleep 0.25
+  done
+  echo "queued: no Drover Tasks, Board or Wakeups mod is open; it applies when one opens"
+}
+case "${1:-}" in
+  tasks) read_shared tasks "${@:2}" ;;
+  task) [ $# -eq 2 ] || usage; read_shared task "$2" ;;
+  squads) read_shared squads ;;
+  projects) read_shared projects ;;
+  note)
+    [ $# -ge 3 ] && [[ "$2" =~ ^T-[A-Z0-9]+$ ]] || usage
+    id="$2"; shift 2; kind=""
+    if [ "${1:-}" = "--kind" ]; then [ $# -ge 3 ] || usage; kind="$2"; shift 2; fi
+    send "{\"op\":\"note\",\"id\":\"$id\",\"text\":$(json "$*"),\"kind\":$(json "$kind"),\"by\":$(json "${HC_TERMINAL_ID:-}")}" 5 ;;
+  edit)
+    [ $# -ge 4 ] && [[ "$2" =~ ^T-[A-Z0-9]+$ ]] || usage
+    id="$2"; shift 2; fields=""
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --title) [ $# -ge 2 ] || usage; fields="$fields,\"title\":$(json "$2")"; shift 2 ;;
+        --desc) [ $# -ge 2 ] || usage; fields="$fields,\"desc\":$(json "$2")"; shift 2 ;;
+        --parent) [ $# -ge 2 ] && { [ "$2" = none ] || [[ "$2" =~ ^T-[A-Z0-9]+$ ]]; } || usage; fields="$fields,\"parent\":$(json "$2")"; shift 2 ;;
+        *) usage ;;
+      esac
+    done
+    send "{\"op\":\"edit\",\"id\":\"$id\"$fields}" 5 ;;
+  task-project)
+    [ $# -eq 3 ] && [[ "$2" =~ ^T-[A-Z0-9]+$ ]] || usage
+    send "{\"op\":\"project\",\"id\":\"$2\",\"project\":$(json "$3")}" 5 ;;
+  link)
+    [ $# -eq 3 ] && [[ "$2" =~ ^T-[A-Z0-9]+$ ]] || usage
+    send "{\"op\":\"link\",\"id\":\"$2\",\"url\":$(json "$3"),\"by\":$(json "${HC_TERMINAL_ID:-}")}" 5 ;;
+  move)
+    [ $# -eq 3 ] && [[ "$2" =~ ^T-[A-Z0-9]+$ ]] || usage
+    case "$3" in backlog|todo|doing|review|blocked|done) ;; *) usage ;; esac
+    send "{\"op\":\"move\",\"id\":\"$2\",\"column\":\"$3\",\"from\":$(json "${HC_TERMINAL_ID:-}")}" 5 ;;
+  next)
+    [ $# -eq 1 ] || usage
+    send "{\"op\":\"next\",\"from\":$(json "${HC_TERMINAL_ID:-}")}" 5 ;;
+  archive)
+    [ $# -eq 2 ] && [[ "$2" =~ ^T-[A-Z0-9]+$ ]] || usage
+    send "{\"op\":\"archive\",\"id\":\"$2\"}" 5 ;;
+  add)
+    [ $# -ge 2 ] || usage
+    title="$2"; shift 2; desc="" column="backlog" priority="P2" project="" assignee="" parent="" tags=()
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --desc) desc="$2"; shift 2 ;; --tag) tags+=("$2"); shift 2 ;;
+        --column) column="$2"; shift 2 ;; --priority) priority="$2"; shift 2 ;;
+        --project) project="$2"; shift 2 ;; --assignee) assignee="$2"; shift 2 ;;
+        --parent) [ $# -ge 2 ] && [[ "$2" =~ ^T-[A-Z0-9]+$ ]] || usage; parent="$2"; shift 2 ;; *) usage ;;
+      esac
+    done
+    tj="[$(for t in ${tags[@]+"${tags[@]}"}; do printf '%s,' "$(json "$t")"; done | sed 's/,$//')]"
+    aj=null
+    if [ -n "$assignee" ]; then
+      case "$assignee" in agent:?*|squad:?*) aj="{\"kind\":$(json "${assignee%%:*}"),\"id\":$(json "${assignee#*:}")}" ;; *) usage ;; esac
+    fi
+    send "{\"op\":\"add\",\"title\":$(json "$title"),\"desc\":$(json "$desc"),\"tags\":$tj,\"column\":$(json "$column"),\"priority\":$(json "$priority"),\"project\":$(json "$project"),\"assignee\":$aj,\"parent\":$(json "$parent")}" 5 ;;
+  start)
+    [ $# -ge 3 ] || usage
+    task="$2"; [ "$task" = "-" ] && task=""
+    [ -z "$task" ] || [[ "$task" =~ ^T-[A-Z0-9]+$ ]] || usage
+    runner="$3"; shift 3; wt=false; project=""
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --worktree) wt=true; shift ;;
+        --project) [ $# -ge 2 ] || usage; project="$2"; shift 2 ;;
+        *) usage ;;
+      esac
+    done
+    send "{\"op\":\"start\",\"task\":$(json "$task"),\"runner\":$(json "$runner"),\"worktree\":$wt,\"project\":$(json "$project"),\"from\":$(json "${HC_TERMINAL_ID:-}")}" 120 ;;
+  wakes)
+    [ $# -le 2 ] || usage
+    send "{\"op\":\"wakes\",\"target\":$(json "${2:-}")}" 5 ;;
+  wake)
+    case "${2:-}" in off|on|rm)
+      [ $# -eq 3 ] || usage
+      send "{\"op\":\"wake-$2\",\"id\":$(json "$3")}" 5; exit ;;
+    esac
+    [ $# -ge 4 ] || usage
+    target="$2"
+    if [ "$3" = "every" ]; then
+      [ $# -ge 5 ] || usage
+      every="$4"; shift 4
+      send "{\"op\":\"wake\",\"target\":$(json "$target"),\"every\":$(json "$every"),\"text\":$(json "$*")}" 5
+    else
+      when="$3"; shift 3
+      send "{\"op\":\"wake\",\"target\":$(json "$target"),\"when\":$(json "$when"),\"text\":$(json "$*")}" 5
+    fi ;;
+  *) usage ;;
+esac

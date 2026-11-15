@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "GitHub mod.json",
+  "type": "object",
+  "properties": {
+    "$schema": {
+      "type": "string"
+    },
+    "version": {
+      "type": "string"
+    },
+    "title": {
+      "type": "string"
+    },
+    "place": {
+      "enum": [
+        "left",
+        "right",
+        "top",
+        "bottom",
+        "none"
+      ]
+    },
+    "size": {
+      "type": "number",
+      "minimum": 0
+    },
+    "focusable": {
+      "type": "boolean"
+    },
+    "settings": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "limit": {
+          "title": "Results per scope",
+          "description": "Most issues and PRs loaded for each org or repo; reaching it marks the list partial.",
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000,
+          "x-step": 50,
+          "default": 100
+        }
+      }
+    }
+  }
+}
