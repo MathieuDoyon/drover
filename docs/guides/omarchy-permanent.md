@@ -87,6 +87,42 @@ ssh omarchy 'bash -lc "~/.local/share/herdr-app/checkout/deploy/omarchy/install.
 ssh omarchy 'XDG_RUNTIME_DIR=/run/user/$(id -u) systemctl --user restart drover-herdr'
 ```
 
+## Update the mods
+
+Use this when only the Drover mods or the `drover` CLI changed (for example a new verb), not the app release. It stops the unit around the redeploy so no mod is mid-write while `src/` is replaced. **The owner approves each live redeploy first.**
+
+1. The owner approves the redeploy.
+2. Stop the unit:
+
+   ```sh
+   ssh omarchy 'XDG_RUNTIME_DIR=/run/user/$(id -u) systemctl --user stop drover-herdr'
+   ```
+
+3. Refresh the checkout and rerun the installer (no `--version`: the release stays; no `--with-service`: the unit is already there):
+
+   ```sh
+   rsync -a --exclude .git ./ omarchy:.local/share/herdr-app/checkout/
+   ssh omarchy 'bash -lc "~/.local/share/herdr-app/checkout/deploy/omarchy/install.sh"'
+   ```
+
+4. Start the unit and look at it:
+
+   ```sh
+   ssh omarchy 'XDG_RUNTIME_DIR=/run/user/$(id -u) systemctl --user start drover-herdr'
+   ssh omarchy 'XDG_RUNTIME_DIR=/run/user/$(id -u) systemctl --user is-active drover-herdr; bash -lc "herdr-app status"'   # active; "layout":"drover", "errors":[]
+   ```
+
+5. Version-aware check for the `drover project add` verb (the only check defined so far). On omarchy, pick any git repository there (`<repo>`, an absolute path):
+
+   ```sh
+   ssh omarchy 'bash -lc "drover project add zz-probe --repo <repo>"'   # answers "ok: P-… project zz-probe" (a second run: "ok: P-… exists")
+   ssh omarchy 'bash -lc "drover projects"'                             # lists zz-probe
+   ```
+
+   Then the owner either removes `zz-probe` through the Projects data (there is no remove verb) or leaves it named `zz-probe`.
+
+Not covered yet: there are no protocol, stale-request or expiry checks. The protocol card defines them in this section when it lands, and the card that turns on laptop writes runs them live on omarchy and requires them. This redeploy is not approval for laptop writes: the laptop does not send `project-add`, or any other write, to omarchy. Keep every command's raw output in the work folder; never print an rc file or the environment (`service.env`, `env`, `printenv`).
+
 ## Uninstall
 
 ```sh

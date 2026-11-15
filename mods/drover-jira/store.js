@@ -431,6 +431,33 @@ export function addProject(projects, fields, now = Date.now()) {
   return { projects: [...projects, project], project };
 }
 
+// Inbox op project-add: the shape of the request (no Git here). Returns { error } or { value: { name, repo, branch, folders } };
+// branch "" means omitted (the consumer resolves it from the repo). A path is absolute with no newline/NUL/edge space, at most 4096 chars.
+const PATH_MAX = 4096, FOLDERS_MAX = 20, NAME_MAX = 200;
+const badText = (s) => /[\0\r\n]/.test(s);
+const goodPath = (p) => typeof p === "string" && p.startsWith("/") && p.length <= PATH_MAX && !badText(p) && p === p.trim();
+export function projectAddRequest(cmd) {
+  const name = typeof cmd?.name === "string" && !badText(cmd.name) ? cmd.name.trim() : ""; // a line break is refused before trim, never trimmed away
+  if (!name || name.length > NAME_MAX) return { error: `Name must be 1-${NAME_MAX} characters with no line break` };
+  if (!goodPath(cmd.repo)) return { error: `repo must be an absolute path (at most ${PATH_MAX} characters, no line break)` };
+  const raw = cmd.folders ?? [];
+  if (!Array.isArray(raw) || raw.length > FOLDERS_MAX) return { error: `folders must be a list of at most ${FOLDERS_MAX} absolute paths` };
+  if (!raw.every(goodPath)) return { error: `every folder must be an absolute path (at most ${PATH_MAX} characters, no line break)` };
+  const branch = cmd.branch == null ? "" : cmd.branch;
+  if (typeof branch !== "string" || badText(branch) || branch.startsWith("-") || branch !== branch.trim()) return { error: "branch is not a valid branch name" };
+  return { value: { name, repo: cmd.repo, branch, folders: [...new Set(raw)] } };
+}
+
+// Which fields of an existing project differ from a normalized request (branch already resolved). [] = the same request.
+export function projectDiff(project, req) {
+  const diff = [];
+  if (project.repos.length !== 1 || project.repos[0].path !== req.repo) diff.push("repo");
+  if (project.branch !== req.branch) diff.push("branch");
+  const a = [...project.folders].sort(), b = [...req.folders].sort();
+  if (a.length !== b.length || a.some((f, i) => f !== b[i])) diff.push("folders");
+  return diff;
+}
+
 export function updateProject(projects, id, fields) {
   const cur = projects.find((p) => p.id === id);
   if (!cur) return { error: `Project ${id} not found` };
@@ -447,6 +474,7 @@ export function removeProject(projects, tasks, id) {
   return { projects: projects.filter((p) => p.id !== id) };
 }
 
+export const projectNamed = (projects, name) => projects.find((p) => sameName(p.name, name)) ?? null; // by name only: a name that looks like an id is still a name
 export const findProject = (projects, key) => projects.find((p) => p.id === key) ?? projects.find((p) => sameName(p.name, String(key ?? ""))) ?? null;
 export const projectOf = (task, projects) => (task?.project ? projects.find((p) => p.id === task.project) ?? null : null);
 export const repoOf = (task, projects) => {

@@ -2,7 +2,7 @@
 // The herdr side of the store: tasks persist in shared state (shared.json, written atomically).
 import { shared, setShared, openOverlay, exec, hc, readTextFile, writeTextFile, notify, focused, appHome, home, watchFolder, spaces, panes, agents, terminals } from "herdr";
 import * as fs from "fs/promises";
-import { KEY, SEEN_KEY, PROJECTS_KEY, firstSight, list, add, update, bySource, addCommand, applyCommand, repoOf, projectOf, projectKey, nextReport, claim, release, editSize } from "./store.js";
+import { KEY, SEEN_KEY, PROJECTS_KEY, firstSight, list, add, update, bySource, addCommand, applyCommand, repoOf, projectOf, projectKey, projectAddRequest, projectDiff, addProject, projectNamed, nextReport, claim, release, editSize } from "./store.js";
 import { base64, httpProblem, jiraIssue, jiraKey, githubIssue, prItems } from "./sources.js";
 import { WAKE_KEY, reschedule, addWake, decide, setStatus, wakeOp } from "./wake.js";
 import { apply as applyKey } from "./keys.js";
@@ -418,6 +418,43 @@ export async function envCounts(ids) {
   return out;
 }
 
+// Inbox op project-add. Every Git check awaits, so the store is read only after the last await and the name/equality recheck plus the write
+// happen in one synchronous block: a project the Projects dialog or another request saved meanwhile is never overwritten or duplicated.
+const gitOut = (cwd, args) => exec("git", ["-C", cwd, ...args], { timeout: 10000 }).catch(() => ({ code: 1, stdout: "", stderr: "" }));
+async function projectAdd(cmd) {
+  const q = projectAddRequest(cmd);
+  if (q.error) return `error: ${q.error}`;
+  const { name, repo, folders } = q.value;
+  let branch = q.value.branch, warning = "";
+  if (branch) {
+    const f = await exec("git", ["check-ref-format", "--branch", branch], { timeout: 10000 }).catch(() => ({ code: 1, stdout: "" }));
+    if (f.code !== 0 || String(f.stdout).trim() !== branch) return `error: ${branch} is not a valid branch name`;
+  }
+  if ((await gitOut(repo, ["rev-parse", "--git-dir"])).code !== 0) return `error: ${repo} is not a git repository on this machine`;
+  const head = await gitOut(repo, ["symbolic-ref", "--short", "HEAD"]);
+  const current = head.code === 0 ? String(head.stdout).trim() : "";
+  const committed = (await gitOut(repo, ["rev-parse", "--verify", "--quiet", "HEAD^{commit}"])).code === 0;
+  if (!committed && current) { // unborn HEAD: the branch exists only as a name
+    if (branch && branch !== current) return `error: branch ${branch} does not exist; this repo has no commit yet and its branch is ${current}`;
+    branch = current;
+    warning = " · no commit yet; the first start needs one";
+  } else if (branch) {
+    if ((await gitOut(repo, ["rev-parse", "--verify", `refs/heads/${branch}`])).code !== 0) return `error: branch ${branch} does not exist in ${repo}`;
+  } else branch = current || "main";
+  // ---- no await below: re-read, recheck, write ----
+  const projects = loadProjects();
+  const same = projectNamed(projects, name);
+  const req = { name, repo, branch, folders };
+  if (same) {
+    const diff = projectDiff(same, req);
+    return diff.length ? `error: a project named ${same.name} exists (${same.id}) with a different ${diff.join(", ")}; nothing changed` : `ok: ${same.id} exists`;
+  }
+  const r = addProject(projects, { name, repos: [repo], folders, branch });
+  if (r.error) return `error: ${r.error}`;
+  setShared(PROJECTS_KEY, r.projects);
+  return `ok: ${r.project.id} project ${r.project.name}${warning}`;
+}
+
 async function drain() {
   for (const name of await fs.readdir(INBOX())) {
     if (!name.endsWith(".json")) continue;
@@ -445,6 +482,8 @@ async function drain() {
       reply = await startFromAgent(cmd);
     } else if (cmd?.op === "next") {
       reply = nextFor(cmd.from);
+    } else if (cmd?.op === "project-add") {
+      reply = await projectAdd(cmd);
     } else if (cmd?.op === "add") {
       const pk = projectKey(loadProjects(), cmd.project);
       const r = pk.error ? pk : addCommand(load(), cmd, pk.id);

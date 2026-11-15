@@ -9,6 +9,7 @@ usage: drover tasks [tag|column] [--project <id|name>]   list tasks (id, column,
        drover note <T-…> [--kind decision|log|blocker|pr|handoff] "<text…>"   add a note to a task (after an owner decision or a scope)
        drover edit <T-…> [--title "<t>"] [--desc "<d>"] [--parent <T-…|none>]   replace the title, the description and/or the parent (1 flag at least)
        drover projects                            list projects (id, name, default repo)
+       drover project add "<name>" --repo <abs path> [--branch <b>] [--folder <abs path>]…   create a project (repo = default; branch defaults to the repo's current one)
        drover task-project <T-…> <id|name|none>   put a task in a project (none clears it)
        drover link <T-…> <url|none>               link a card to its GitHub issue/PR or Jira issue (shows as Source in the task dialog); none unlinks
        drover squads                              list squads and agents you can start
@@ -42,6 +43,7 @@ def find(k):
     return next((p for p in projects if p["id"] == k or p["name"].lower() == k.lower()), None)
 if what == "projects":
     for p in projects: print(f'{p["id"]}  {p["name"]}  {repo(p)}')
+    if not projects: print('no projects (create one: drover project add "<name>" --repo <abs path>)', file=sys.stderr)
 elif what == "tasks":
     pf = None
     if "--project" in args:
@@ -130,6 +132,21 @@ case "${1:-}" in
       esac
     done
     send "{\"op\":\"edit\",\"id\":\"$id\"$fields}" 5 ;;
+  project)
+    [ "${2:-}" = add ] && [ $# -ge 3 ] || usage
+    pname="$3"; shift 3; repo="" branch="" folders=()
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --repo) [ $# -ge 2 ] || usage; repo="$2"; shift 2 ;;
+        --branch) [ $# -ge 2 ] || usage; branch="$2"; shift 2 ;;
+        --folder) [ $# -ge 2 ] || usage; folders+=("$2"); shift 2 ;;
+        *) usage ;;
+      esac
+    done
+    [[ "$repo" == /* ]] || usage
+    fj="[$(for f in ${folders[@]+"${folders[@]}"}; do printf '%s,' "$(json "$f")"; done | sed 's/,$//')]"
+    if [ -n "$branch" ]; then bj=",\"branch\":$(json "$branch")"; else bj=""; fi
+    send "{\"op\":\"project-add\",\"name\":$(json "$pname"),\"repo\":$(json "$repo")$bj,\"folders\":$fj}" 30 ;;
   task-project)
     [ $# -eq 3 ] && [[ "$2" =~ ^T-[A-Z0-9]+$ ]] || usage
     send "{\"op\":\"project\",\"id\":\"$2\",\"project\":$(json "$3")}" 5 ;;

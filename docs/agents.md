@@ -39,6 +39,7 @@ Edit or add agents and squads in the Squads screen. Profiles are versioned on sa
 | `add "<title>" [--desc …] [--tag …] [--column …] [--priority P0-P3] [--project …] [--parent <T-…>]` | Create a task |
 | `move <T-…> <backlog\|todo\|doing\|review\|blocked\|done>` | Move a card (an agent never moves to done) |
 | `note <T-…> [--kind decision\|log\|blocker\|pr\|handoff] "<text>"`, `edit`, `link`, `archive`, `task-project` | Notes and edits |
+| `project add "<name>" --repo <abs path> [--branch <b>] [--folder <abs path>]…` | Create a project (for a headless Drover); same request again answers `exists` |
 | `start <T-…\|-> <squad\|agent> [--worktree]` | Open a squad on a task; its leader reports to `$HC_TERMINAL_ID` |
 | `wake <t\|T-…> <when> "<msg>"`, `wake … every <30m\|2h\|1d> "<msg>"`, `wakes`, `wake off\|on\|rm <W-…>` | Wakeups |
 
