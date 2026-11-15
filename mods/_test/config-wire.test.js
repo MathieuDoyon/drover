@@ -17,8 +17,11 @@ const { SCHEMA, validate } = await import("../_lib/config-schema.js");
 const { createModel } = await import("../drover-config/model.js");
 
 const { InputState } = await import(new URL("./stubs/gpui-base.js", import.meta.url).href);
-const tick = () => new Promise((r) => setImmediate(r));
-const settle = async () => { for (let i = 0; i < 25; i++) await tick(); };
+const { until, drain } = await import(new URL("./stubs/until.js", import.meta.url).href);
+// Every cx.spawn is counted while it runs, so idle() resolves when the view has no async work left in flight.
+// A test that holds a fetch or a credential read open waits for that held call itself (waiting / held), then releases it.
+let flight = { n: 0 }; // reset by host(): a spawn of an earlier test can end late without touching this count
+const idle = () => until(() => flight.n === 0, "no spawned work in flight");
 const CFG = "drover.config";
 const jiraFiles = { "/h/.config/drover-herdr/atlassian.json": JSON.stringify({ email: "a@b.c", apiToken: "t" }) };
 let reads, execs, fetches, timers;
@@ -26,7 +29,7 @@ let reads, execs, fetches, timers;
 // settings: mod.json `settings` per mod; shared: other shared keys.
 function host({ config = {}, settings = {}, shared = {}, now } = {}) {
   C.resetCache();
-  reads = []; execs = []; fetches = []; timers = [];
+  reads = []; execs = []; fetches = []; timers = []; flight = { n: 0 };
   Object.assign(globalThis.__host, {
     state: { [CFG]: config, ...shared },
     readTextFile: async (p) => {
@@ -44,7 +47,8 @@ function host({ config = {}, settings = {}, shared = {}, now } = {}) {
   if (now) Date.now = now;
 }
 const cxOf = () => {
-  const cx = { notify() {}, spawn: (fn) => { Promise.resolve().then(() => fn(cx)); }, timer: { every: (ms, fn) => timers.push({ ms, fn }), after() {} } };
+  const mine = flight;
+  const cx = { notify() {}, spawn: (fn) => { mine.n++; Promise.resolve().then(() => fn(cx)).finally(() => { mine.n--; }); }, timer: { every: (ms, fn) => timers.push({ ms, fn }), after() {} } };
   return cx;
 };
 const realNow = Date.now;
@@ -69,7 +73,7 @@ async function github(opts) {
   const origNew = InputState.new;
   InputState.new = function (o) { const s = origNew.call(this, o); patchInput(s); return s; };
   try { view.init({}, cxOf()); } finally { InputState.new = origNew; }
-  await settle();
+  await idle();
   return view;
 }
 const ghArgs = () => execs.filter((e) => e.cmd === "gh").map((e) => e.args);
@@ -173,7 +177,7 @@ async function jira(opts) {
   host(opts);
   const view = new Jira();
   view.init({}, cxOf());
-  await settle();
+  await idle();
   return view;
 }
 const SITE = { "drover-jira": { site: "acme.atlassian.net" } };
@@ -187,7 +191,7 @@ test("jira: JIRA_SITE is gone; an empty site shows the message and makes no requ
   assert.match(v.errorShown(), /^Set the Jira site in Drover Config/);
   v.refresh(cxOf());
   v.input.handlers.submit({}, cxOf());
-  await settle();
+  await drain(); // an empty site must make no request: a bounded drain, not a wait for a result
   assert.deepEqual(fetches, []);
   await assert.rejects(() => IO.jiraFetch("", "/x"), /Set the Jira site in Drover Config/);
   assert.deepEqual(fetches, []);
@@ -227,7 +231,7 @@ test("jira: jql precedence saved drover.jira.jql > shared config > mod.json > de
 
 test("jira: pages precedence shared > mod.json > default", async () => {
   const paged = () => { globalThis.fetch = async (url, init) => { fetches.push({ url, body: JSON.parse(init.body) }); return { ok: true, url, json: async () => ({ issues: [], nextPageToken: "n" }) }; }; };
-  const run = async (o) => { host(o); paged(); const v = new Jira(); v.init({}, cxOf()); await settle(); return searches().length; };
+  const run = async (o) => { host(o); paged(); const v = new Jira(); v.init({}, cxOf()); await idle(); return searches().length; };
   assert.equal(await run({ config: { "drover-jira": { site: "a.b", pages: 2 } }, settings: { "drover-jira": { pages: 3 } } }), 2);
   assert.equal(await run({ config: { "drover-jira": { site: "a.b" } }, settings: { "drover-jira": { pages: 3 } } }), 3);
   assert.equal(await run({ config: { "drover-jira": { site: "a.b" } } }), 4);
@@ -239,7 +243,7 @@ test("jira: refresh minutes are read live on every tick (no hard-coded 5 min)", 
   assert.equal(searches().length, 1);
   assert.equal(timers.length, 1);
   assert.ok(timers[0].ms <= 60_000, "the timer only ticks; the interval is checked live");
-  const tickAt = async (min) => { t = 1_000_000 + min * 60_000; timers[0].fn(cxOf()); await settle(); };
+  const tickAt = async (min) => { t = 1_000_000 + min * 60_000; timers[0].fn(cxOf()); await idle(); };
   await tickAt(5);
   assert.equal(searches().length, 1, "5 min < 10 configured");
   await tickAt(10);
@@ -283,7 +287,7 @@ async function pending(config) {
   const waiting = deferredFetch();
   const v = new Jira();
   v.init({}, cxOf());
-  await settle();
+  await until(() => waiting.length === 1, "page 1 requested (held)");
   return { v, waiting };
 }
 
@@ -294,7 +298,7 @@ test("jira: site cleared while page 1 is in flight -> no page-2 request to the o
   v.refresh(cxOf());
   timers[0].fn(cxOf());
   waiting[0]({ issues: [issue("1")], nextPageToken: "n" });
-  await settle();
+  await idle();
   assert.equal(searches().length, 1, "no second page to the old host");
   assert.equal(snap(), undefined, "no stale snapshot");
   assert.equal(v.loading, false);
@@ -306,14 +310,14 @@ test("jira: site A -> B while in flight: A's data is never published; B loads on
   const { v, waiting } = await pending({ "drover-jira": { site: "a.b", pages: 2 } });
   globalThis.__host.state[CFG] = { "drover-jira": { site: "c.d", pages: 2 } };
   timers[0].fn(cxOf()); // reconciles: the load for a.b is dropped, c.d starts
-  await settle();
+  await until(() => searches().some((f) => f.url.startsWith("https://c.d/")), "c.d requested (held)");
   assert.equal(searches().at(-1).url, "https://c.d/rest/api/3/search/jql");
   waiting[0]({ issues: [issue("1")], nextPageToken: "n" }); // A answers late
-  await settle();
+  await drain(); // a late answer must change nothing: a bounded drain, B is still held
   assert.equal(searches().filter((f) => f.url.startsWith("https://a.b/")).length, 1, "no page 2 to a.b");
   assert.equal(snap(), undefined, "A's result not published under B");
   waiting[1]({ issues: [issue("2")], isLast: true });
-  await settle();
+  await until(() => snap(), "B's snapshot published");
   assert.equal(snap().items.length, 1);
   assert.match(snap().items[0].id, /^c\.d\//);
   assert.equal(v.loading, false);
@@ -324,10 +328,10 @@ test("jira: A -> B refresh pressed while A is still loading starts B at once", a
   const { v, waiting } = await pending({ "drover-jira": { site: "a.b" } });
   globalThis.__host.state[CFG] = { "drover-jira": { site: "c.d" } };
   v.refresh(cxOf());
-  await settle();
+  await until(() => searches().some((f) => f.url.startsWith("https://c.d/")), "c.d requested (held)");
   assert.equal(searches().at(-1).url, "https://c.d/rest/api/3/search/jql");
   waiting[0]({ issues: [issue("1")], isLast: true });
-  await settle();
+  await drain(); // A's late answer must publish nothing: a bounded drain, B is still held
   assert.equal(snap(), undefined);
 });
 
@@ -335,13 +339,13 @@ test("jira: settled configured -> empty: the message shows on render and after a
   host({ config: { "drover-jira": { site: "a.b" } } });
   const v = new Jira();
   v.init({}, cxOf());
-  await settle();
+  await idle();
   assert.equal(v.render(cxOf()) !== undefined, true);
   const before = fetches.length;
   globalThis.__host.state[CFG] = {};
   assert.match(v.errorShown(), NO_SITE);
   timers[0].fn(cxOf());
-  await settle();
+  await idle();
   assert.match(v.errorShown(), NO_SITE);
   assert.equal(fetches.length, before);
   globalThis.__host.state[CFG] = { "drover-jira": { site: "a.b" } };
@@ -361,13 +365,13 @@ test("jira: site cleared + refresh while the credential read is held -> zero fet
   const held = heldCredentials();
   const v = new Jira();
   v.init({}, cxOf());
-  await settle();
+  await until(() => held.length === 1, "the credential read is held");
   assert.equal(held.length, 1);
   assert.equal(fetches.length, 0);
   globalThis.__host.state[CFG] = {};
   v.refresh(cxOf());
   held[0]();
-  await settle();
+  await idle();
   assert.equal(fetches.length, 0, "no request to the old host");
   assert.equal(snap(), undefined);
   assert.match(v.errorShown(), NO_SITE);
@@ -379,12 +383,12 @@ test("jira: site A -> B while the credential read is held -> only B is requested
   const held = heldCredentials();
   const v = new Jira();
   v.init({}, cxOf());
-  await settle();
+  await until(() => held.length === 1, "A's credential read is held");
   globalThis.__host.state[CFG] = { "drover-jira": { site: "c.d" } };
   v.refresh(cxOf());
-  await settle();
+  await until(() => held.length === 2, "B's credential read is held");
   held.forEach((r) => r());
-  await settle();
+  await idle();
   assert.deepEqual(fetches.map((f) => new URL(f.url).host), ["c.d"]);
 });
 

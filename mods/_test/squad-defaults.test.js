@@ -9,8 +9,7 @@ const C = await import("../_lib/config.js");
 const { default: Agents } = await import("../drover-agents/main.js");
 
 const CFG = "drover.config", LAST = "drover.agents.last", AGENTS = "drover.agents";
-const tick = () => new Promise((r) => setImmediate(r));
-const settle = async () => { for (let i = 0; i < 20; i++) await tick(); };
+const { until } = await import(new URL("./stubs/until.js", import.meta.url).href);
 const task = { id: "T-1", title: "t", desc: "", column: "todo", priority: "P2", tags: [], notes: [], created: 1 };
 const squad = { id: "s1", name: "Squad one", version: 1, leader: "claude", members: [] };
 
@@ -23,7 +22,7 @@ async function picker({ config = {}, last, settings, squads = [squad] } = {}) {
   const cx = { notify() {}, spawn: (fn) => Promise.resolve().then(() => fn(cx)), timer: { every() {} } };
   const v = new Agents();
   v.init({}, cx);
-  await settle();
+  await until(() => C.ready("drover-agents"), "the mod.json layer loaded");
   return v.dialog;
 }
 

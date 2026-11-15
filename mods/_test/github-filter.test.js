@@ -7,6 +7,7 @@ import {
 } from "../drover-github/filter.js";
 import { githubSearchArgs, toArgs } from "../drover-github/query.js";
 
+const { until } = await import(new URL("./stubs/until.js", import.meta.url).href);
 const FIELDS = "number,url";
 const qual = (key, value, negated = false) => ({ kind: "qual", key, value, negated });
 
@@ -117,7 +118,7 @@ test("createLoader: A running, B committed, A completes -> A discarded, B runs a
   loader.commit({ query: "C", scopes: ["p"] }); // coalesced: only the latest is kept
   assert.equal(loader.state().pending.query, "C");
   gates.A();
-  await new Promise((r) => setImmediate(r));
+  await until(() => loader.state().running?.query === "C", "the loader moved on to C");
   assert.deepEqual(seen, []);
   assert.equal(loader.state().running.query, "C");
   assert.ok(!gates.B, "B never ran");
@@ -309,10 +310,10 @@ test("scope removal while a request runs supersedes it, clears results of the ol
   c.refresh(); // empty-scope state is enqueued too
   assert.equal(loader.state().pending.scopes.length, 0);
   gates.o();
-  await new Promise((r) => setImmediate(r));
+  await until(() => gates.none, "the empty-scope request started");
   assert.deepEqual(seen, []);
   gates.none();
-  await new Promise((r) => setImmediate(r));
+  await until(() => seen.length === 1, "the empty-scope result arrived");
   assert.deepEqual(seen, [[[], "got 0"]]);
 });
 

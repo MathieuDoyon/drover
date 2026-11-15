@@ -10,8 +10,11 @@ globalThis.__host = { props: {}, state: {}, notified: [], exec: async () => ({ c
 const { default: GitHub } = await import(new URL("../drover-github/main.js", import.meta.url).href);
 const { InputState } = await import(new URL("./stubs/gpui-base.js", import.meta.url).href);
 
-const tick = () => new Promise((r) => setImmediate(r));
-const settle = async () => { for (let i = 0; i < 20; i++) await tick(); };
+const { until } = await import(new URL("./stubs/until.js", import.meta.url).href);
+// The view's async work all runs through cx.spawn: rig() counts the spawns still running (a spawn started inside another one is counted before the outer one ends),
+// so idle() resolves exactly when the view has nothing left in flight (the loader's commit() resolves only once its queue is empty).
+let flight = { n: 0 }; // the latest rig(): spawns of an earlier test can end late without touching this count
+const idle = () => until(() => flight.n === 0, "the view has no spawned work in flight");
 
 // A fake host content model on top of the stub InputState: text + token spans.
 function patchInput(input, echo) {
@@ -34,9 +37,10 @@ function rig(exec, { echoChange = false, syncSpawn = false } = {}) {
   globalThis.__host.exec = exec;
   const painted = [];
   let view;
+  const mine = flight = { n: 0 };
   const asyncCx = {
     notify() { painted.push({ loading: view.loading, error: view.error, inputError: view.inputError }); },
-    spawn: (fn) => { const run = () => fn(asyncCx); (syncSpawn ? Promise.resolve(run()) : Promise.resolve().then(run)).catch((e) => painted.push({ spawnFailed: String(e) })); },
+    spawn: (fn) => { mine.n++; const run = () => fn(asyncCx); (syncSpawn ? Promise.resolve(run()) : Promise.resolve().then(run)).catch((e) => painted.push({ spawnFailed: String(e) })).finally(() => { mine.n--; }); },
     timer: { every() {} },
   };
   const eventCx = () => {
@@ -59,11 +63,11 @@ const ok = (items = []) => async () => ({ code: 0, stdout: JSON.stringify(items)
 test("rejected search (real stderr shape, exit 1) after an empty result: loading clears, repaint shows the message", async () => {
   let n = 0;
   const { view, painted, fire, last } = rig(async () => (n++ === 0 ? { code: 0, stdout: "[]", stderr: "" } : { code: 1, stdout: "", stderr: REAL_STDERR }));
-  await settle();
+  await idle();
   assert.equal(last().loading, false, "first load (empty) done");
   view.input.v += "author:nobody-xyz-123";
   fire("change"); fire("submit");
-  await settle();
+  await idle();
   assert.equal(view.loading, false);
   assert.equal(last().loading, false, "repainted with loading cleared");
   assert.match(last().error, /^GitHub rejected the query \(unknown user, label or qualifier\?\): is:issue state:open author:nobody-xyz-123\.$/);
@@ -72,10 +76,10 @@ test("rejected search (real stderr shape, exit 1) after an empty result: loading
 test("exec() rejecting (host failure) also clears loading and repaints the error", async () => {
   let n = 0;
   const { view, last, fire } = rig(async () => { if (n++ === 0) return { code: 0, stdout: "[]", stderr: "" }; throw new Error("exec rejected"); });
-  await settle();
+  await idle();
   view.input.v += "label:bug";
   fire("submit");
-  await settle();
+  await idle();
   assert.equal(view.loading, false);
   assert.equal(last().loading, false);
   assert.match(last().error, /exec rejected/);
@@ -83,11 +87,11 @@ test("exec() rejecting (host failure) also clears loading and repaints the error
 
 test("repaint does not depend on a stored event cx: error and success after the handler returned", async () => {
   const { view, painted, fire } = rig(async () => ({ code: 1, stdout: "", stderr: REAL_STDERR }));
-  await settle();
+  await idle();
   assert.equal(painted.at(-1).loading, false);
   assert.match(painted.at(-1).error, /GitHub rejected/);
   fire("submit");
-  await settle();
+  await idle();
   assert.equal(painted.at(-1).loading, false);
   assert.ok(!painted.some((p) => p.spawnFailed), JSON.stringify(painted.filter((p) => p.spawnFailed)));
 });
@@ -96,10 +100,10 @@ for (const [name, opts] of [["host echoes change after a token edit", { echoChan
   test(`rejected search clears loading and repaints: ${name}`, async () => {
     let n = 0;
     const { view, last, fire } = rig(async () => (n++ === 0 ? { code: 0, stdout: "[]", stderr: "" } : { code: 1, stdout: "", stderr: REAL_STDERR }), opts);
-    await settle();
+    await idle();
     view.input.v += "author:nobody-xyz-123";
     fire("change"); fire("submit");
-    await settle();
+    await idle();
     assert.equal(view.loading, false);
     assert.equal(last().loading, false);
     assert.match(last().error, /GitHub rejected/);
@@ -108,7 +112,7 @@ for (const [name, opts] of [["host echoes change after a token edit", { echoChan
 
 test("menu: opens on focus, Enter picks the highlighted item once (no extra submit), Esc closes, empty Enter commits", async () => {
   const { view, fire } = rig(ok());
-  await settle();
+  await idle();
   const cx = { notify() {}, spawn: (fn) => { Promise.resolve().then(() => fn(cx)); }, stop_propagation() { this.stopped = true; }, timer: { after() {} } };
   const key = (k) => { cx.stopped = false; view.menuView({}, cx).onKey({ key: k }, cx); return cx.stopped; };
   assert.equal(view.menuView({}, view.cx).open, false, "closed until the input is focused");
@@ -146,7 +150,7 @@ function menuRig() {
 
 test("a pending blur callback does not close the menu after the input regained focus", async () => {
   const { view, timers, cx, handler } = menuRig();
-  await settle();
+  await idle();
   handler("focus");
   handler("blur");
   handler("focus");
@@ -160,7 +164,7 @@ test("a pending blur callback does not close the menu after the input regained f
 
 test("only the submit of the consumed Enter is skipped; a later Enter commits", async () => {
   const { view, handler, key } = menuRig();
-  await settle();
+  await idle();
   handler("focus");
   view.input.v += "auth";
   assert.equal(key("enter"), true); // picks Author (a text pick: author:)
@@ -174,7 +178,7 @@ test("only the submit of the consumed Enter is skipped; a later Enter commits", 
 
 test("an Enter pick whose submit never arrives does not swallow the next Enter", async () => {
   const { view, handler, key } = menuRig();
-  await settle();
+  await idle();
   handler("focus");
   view.input.v += "auth";
   key("enter"); // consumed, host sent no submit
@@ -186,7 +190,7 @@ test("an Enter pick whose submit never arrives does not swallow the next Enter",
 
 test("a mouse pick never swallows a submit", async () => {
   const { view, cx, handler } = menuRig();
-  await settle();
+  await idle();
   handler("focus");
   view.input.v += "auth";
   view.pick(view.menuNow(view.cx).items[0], cx);
@@ -204,7 +208,7 @@ test("loadValues: refetch after expiry and reopen, one call while cached, none f
     const self = { values, pending: new Set(), };
     const spawnCx = { spawn: (fn) => fn({ notify() {} }) };
     const open = { open: true, stage: "values", key: "milestone" };
-    const load = async (m, list = ["o/r"]) => { GitHub.prototype.loadValues.call(self, m, list, spawnCx); await settle(); };
+    const load = async (m, list = ["o/r"]) => { GitHub.prototype.loadValues.call(self, m, list, spawnCx); await until(() => self.pending.size === 0, "the values fetch finished"); };
     await load(open);
     for (let i = 0; i < 5; i++) await load(open); // typing: cache decides, no call
     assert.equal(calls, 1);
@@ -222,7 +226,7 @@ test("loadValues: refetch after expiry and reopen, one call while cached, none f
 // People rows draw a plain circle with the login's initial; no Avatar parts, no remote image (the host did not draw the fallback).
 test("people value menu: each row shows the uppercased initial of the login", async () => {
   const { view, fire } = rig(ok());
-  await settle();
+  await idle();
   globalThis.__host.state["drover.github.snapshot"] = { items: [{ repo: "o/r", author: "ada", assignees: ["bob", "cy"], labels: [] }] };
   fire("focus");
   for (const key of ["assignee", "author"]) {
@@ -242,7 +246,7 @@ test("people value menu: each row shows the uppercased initial of the login", as
 
 test("menu view: 'commen' in an empty focused field opens the popup with Commenter and Comments", async () => {
   const { view, fire } = rig(ok());
-  await settle();
+  await idle();
   fire("focus");
   view.input.set_value("");
   for (const w of ["comm", "commen", "ass"]) {
@@ -256,7 +260,7 @@ test("menu view: 'commen' in an empty focused field opens the popup with Comment
 
 test("menu view: typing 'commen' one key at a time (with change events) keeps the popup open at every step", async () => {
   const { view, fire } = rig(ok());
-  await settle();
+  await idle();
   fire("focus");
   view.input.set_value("");
   for (const ch of "commen") {
@@ -281,11 +285,11 @@ test("Defaults: saved [] shadows Config scopes; reset forgets it and the Config 
   const log = execLog();
   const { view, fire } = rig(log.exec);
   withConfig({}, ["cfg-org"], []);
-  await settle();
+  await idle();
   assert.deepEqual(log.calls.filter((c) => c.includes("cfg-org")), [], "saved [] : nothing loads");
   assert.ok(ids(view).includes("reset-defaults"), "button shows: saved scopes differ from Config");
   view.resetDefaults(view.cx);
-  await settle();
+  await idle();
   assert.equal(globalThis.__host.state["drover.github.scopes"], null);
   assert.ok(log.calls.some((c) => c.includes("cfg-org")), log.calls.join("\n"));
   assert.ok(!ids(view).includes("reset-defaults"), "hidden once default");
@@ -297,18 +301,18 @@ test("Defaults: reset also restores the query and drops the stale snapshot", asy
   withConfig({}, ["cfg-org"], ["o/r"]);
   globalThis.__host.state["drover.github.snapshot"] = { items: [{ id: "x", repo: "o/r", updated: 1, state: "OPEN" }], query: [], at: 1 };
   view.input.v += "label:bug"; fire("submit");
-  await settle();
+  await idle();
   assert.ok(ids(view).includes("reset-defaults"));
   globalThis.__host.exec = async (...a) => { assert.equal(globalThis.__host.state["drover.github.snapshot"], null, "dropped before the reload"); return log.exec(...a); };
   view.resetDefaults(view.cx);
-  await settle();
+  await idle();
   assert.equal(view.input.v.trim(), "is:issue state:open");
 });
 
 test("Defaults: hidden when saved scopes equal Config (any order) and the query is the default; reset then is a no-op for scopes", async () => {
   const { view } = rig(ok());
   withConfig({}, ["a", "b/c"], ["b/c", "a"]);
-  await settle();
+  await idle();
   assert.ok(!ids(view).includes("reset-defaults"));
   withConfig({}, ["a"], undefined);
   assert.ok(!ids(view).includes("reset-defaults"), "never saved: nothing differs");
@@ -317,12 +321,12 @@ test("Defaults: hidden when saved scopes equal Config (any order) and the query 
 test("Defaults: after reset, + scope saves the Config scopes plus the new one", async () => {
   const { view } = rig(ok());
   withConfig({}, ["cfg-org"], []);
-  await settle();
+  await idle();
   view.resetDefaults(view.cx);
-  await settle();
+  await idle();
   view.scopeInput.set_value("new-org");
   view.scopeInput.handlers.submit({}, view.cx);
-  await settle();
+  await idle();
   assert.deepEqual(globalThis.__host.state["drover.github.scopes"], ["cfg-org", "new-org"]);
 });
 
@@ -330,9 +334,9 @@ test("menu Reset filter restores the scopes too", async () => {
   const log = execLog();
   const { view } = rig(log.exec);
   withConfig({}, ["cfg-org"], []);
-  await settle();
+  await idle();
   view.pick({ insert: { reset: true } }, view.cx);
-  await settle();
+  await idle();
   assert.equal(globalThis.__host.state["drover.github.scopes"], null);
   assert.ok(log.calls.some((c) => c.includes("cfg-org")));
 });
@@ -341,9 +345,9 @@ test("Defaults: a committed query whose argv differs only in word boundaries fro
   const { view, fire } = rig(ok());
   withConfig({}, ["o/r"], undefined);
   globalThis.__host.state["drover.config"]["drover-github"].query = 'label:"good first issue"';
-  await settle();
+  await idle();
   view.input.set_value("label:good first issue");
   fire("submit");
-  await settle();
+  await idle();
   assert.ok(ids(view).includes("reset-defaults"));
 });

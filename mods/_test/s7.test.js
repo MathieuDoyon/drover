@@ -8,6 +8,7 @@ register("./hooks.js", import.meta.url);
 globalThis.__host = { props: {}, state: {}, notified: [], exec: async () => ({ code: 0 }) };
 const { Editor } = await import(new URL("../drover-todos/main.js", import.meta.url).href);
 const { NODE } = await import(new URL("./stubs/el.js", import.meta.url).href);
+const { until, drain } = await import(new URL("./stubs/until.js", import.meta.url).href);
 
 let host, work, errors;
 const tick = () => new Promise((r) => setImmediate(r));
@@ -211,7 +212,7 @@ test("a send in flight blocks a second one", async () => {
   const e = seed({ assignee: { kind: "agent", id: "claude" } });
   let release; e.launch = (...a) => new Promise((r) => { release = () => r({ id: "R" }); });
   e.note.set_value("one"); e.noteKey(mkcx());
-  await tick();
+  await until(() => release, "the first launch is in flight");
   e.note.set_value("two"); e.noteKey(mkcx());
   release(); await flushAll();
   assert.deepEqual(stored().notes.map((n) => n.text), ["one"]);
@@ -237,10 +238,9 @@ test("while a send is in flight, close / expand / archive / open child do nothin
   const e = seed({ assignee: { kind: "agent", id: "claude" } }, [T("T-1", { parent: "T-E" })]);
   held(e);
   e.note.set_value("go"); e.noteKey(mkcx());
-  await tick(); await tick();
-  assert.equal(e.started.length, 1);
+  await until(() => e.started.length === 1, "the launch is in flight");
   e.close(mkcx()); e.expand(mkcx()); e.archive(mkcx()); e.openParent("T-1", mkcx());
-  await tick();
+  await drain(); // a negative: a bounded drain
   assert.equal(host.closeCalls.length, 0);
   assert.equal(host.opened.length, 0);
   e.release(); await flushAll();
@@ -273,11 +273,11 @@ test("the launch claims the card (agent 'claiming', doing) while in flight and a
   const e = seed({ column: "todo", assignee: { kind: "agent", id: "claude" } });
   held(e);
   e.note.set_value("one"); e.noteKey(mkcx());
-  await tick(); await tick();
-  assert.equal(stored().agent, "claiming");
+  await until(() => stored().agent === "claiming", "the card is claimed");
   const e2 = new Editor({ focus_handle: () => ({}), timer: { after() {} }, notify() {} });
   e2.launch = e.launch;
-  e2.note.set_value("two"); e2.noteKey(mkcx()); await tick(); await tick(); await tick();
+  e2.note.set_value("two"); e2.noteKey(mkcx());
+  await until(() => stored().notes.some((n) => n.text === "two"), "the second note is saved");
   assert.equal(e.started.length, 1, "no second launch");
   assert.deepEqual(stored().notes.map((n) => n.text), ["one", "two"], "the second note is still saved");
   const r = render(e2);
@@ -307,8 +307,8 @@ test("round 3: a send during the leave-edit-mode flush is rejected, so that flus
   const e = seed({ assignee: { kind: "agent", id: "claude" } });
   e.editing = true;
   let done; e.pending = new Promise((r) => (done = r)); // an accepted paste still in flight
-  e.toggleEdit(mkcx()); await tick();
-  assert.equal(e.submitting, true);
+  e.toggleEdit(mkcx());
+  await until(() => e.submitting === true, "the leave-edit flush holds the lock");
   e.note.set_value("go");
   assert.equal(e.sendNote(mkcx()), false, "rejected while the flush holds the lock");
   done(); await flushAll();
@@ -320,9 +320,11 @@ test("round 3: a send during the leave-edit-mode flush is rejected, so that flus
 test("round 3: while sending, the pencil does nothing", async () => {
   const e = seed({ assignee: { kind: "agent", id: "claude" } });
   held(e);
-  e.note.set_value("go"); e.noteKey(mkcx()); await tick(); await tick();
+  e.note.set_value("go"); e.noteKey(mkcx());
+  await until(() => e.started.length === 1, "the launch is in flight");
   e.editing = true;
-  e.toggleEdit(mkcx()); await tick();
+  e.toggleEdit(mkcx());
+  await drain(); // a negative: a bounded drain
   assert.equal(e.editing, true, "no flush started");
   assert.equal(e.submitting, true);
   e.release(); await flushAll();

@@ -19,8 +19,7 @@ const { default: Config } = await import(new URL("../drover-config/main.js", imp
 
 const CFG = "drover.config";
 const STUB = "Disabled in Drover Config";
-const tick = () => new Promise((r) => setImmediate(r));
-const settle = async () => { for (let i = 0; i < 25; i++) await tick(); };
+const { until, drain } = await import(new URL("./stubs/until.js", import.meta.url).href);
 const off = (...mods) => ({ [CFG]: Object.fromEntries(mods.map((m) => [m, { enabled: false }])) });
 
 // One fake host for every test: records the calls a switched-off screen must not make. watchFolder never resolves (the inbox
@@ -28,14 +27,14 @@ const off = (...mods) => ({ [CFG]: Object.fromEntries(mods.map((m) => [m, { enab
 let log;
 function host(state = {}, extra = {}) {
   C.resetCache();
-  log = { exec: [], read: [], fetch: [], timers: [], spawns: 0, hc: [], runs: [] };
+  log = { exec: [], read: [], fetch: [], timers: [], spawns: 0, flight: 0, watchers: 0, hc: [], runs: [] };
   Object.assign(globalThis.__host, {
     props: {}, state, notified: [], appHome: TMP, focused: null, layout: null, window: null, fetchImpl: null,
     exec: async (cmd, args) => { log.exec.push([cmd, ...(args ?? [])].join(" ")); return { code: 0, stdout: "[]", stderr: "" }; },
     readTextFile: async (p) => { log.read.push(p); return null; },
     hc: async (a) => { log.hc.push(a.join(" ")); return { code: 0, stdout: "", stderr: "" }; },
     run: (...a) => { log.runs.push(a); },
-    watchFolder: () => new Promise(() => {}),
+    watchFolder: () => { log.watchers++; return new Promise(() => {}); },
     ...extra,
   });
   globalThis.fetch = async (url, init) => { log.fetch.push(String(url)); return globalThis.__host.fetchImpl ? globalThis.__host.fetchImpl(url, init) : { ok: true, status: 200, json: async () => ({ issues: [], isLast: true }) }; };
@@ -43,13 +42,17 @@ function host(state = {}, extra = {}) {
 }
 // A host context that records timers; spawn runs the body (like the real one) so a started load really runs.
 const cxOf = () => {
+  const L = log;
   const cx = {
     notify() {}, stop_propagation() {}, focus_handle: () => ({ focus() {} }),
-    spawn: (fn) => { log.spawns++; return Promise.resolve().then(() => fn(cx)).catch(() => {}); },
+    spawn: (fn) => { L.spawns++; L.flight++; return Promise.resolve().then(() => fn(cx)).catch(() => {}).finally(() => { L.flight--; }); },
     timer: { every: (ms, fn) => { log.timers.push({ ms, fn }); }, after: (ms, fn) => { log.timers.push({ ms, fn, once: true }); } },
   };
   return cx;
 };
+// Every cx.spawn is counted while it runs; the inbox consumers park one spawn each on watchFolder for good, so those are not "in flight".
+// idle() resolves when the screen has no other async work left. A test that holds a call open waits for that held call itself instead.
+const idle = () => until(() => log.flight === log.watchers, "no spawned work in flight");
 const tickAll = (cx) => Promise.all(log.timers.filter((t) => !t.once).map((t) => t.fn(cx)));
 const setConfig = (obj) => { globalThis.__host.state[CFG] = obj; };
 const withRec = (fn) => {
@@ -95,7 +98,7 @@ const menuIds = async (state) => {
   host(state, { props: { menu: "drover", overlay: "o" } });
   const v = new Tabs();
   v.init({}, cxOf());
-  await settle(); // the settings of every listed screen are loaded first
+  await idle(); // the settings of every listed screen are loaded first
   return withRec(() => v.render(cxOf())).rec.ids;
 };
 
@@ -128,7 +131,7 @@ async function tasksCapsule(state) {
   host(state, { layout: { id: "root", children: [{ id: "drover", hidden: false }] } });
   const v = new Tabs();
   v.init({}, cxOf());
-  await settle();
+  await idle();
   globalThis.__rec = { ids: [], texts: [] };
   try { return findNode(v.render(cxOf())[NODE], "tasks"); } finally { globalThis.__rec = undefined; }
 }
@@ -172,6 +175,9 @@ function patchInput(input) {
   input.replace_range_with_token = () => {};
 }
 const mount = (file, state = {}, extra = {}) => mountRaw(file, state, extra, true);
+// No wait: for a test that holds a call open (a wait for idle would never end) and for the render-before-ready checks.
+const mountNow = (file, state, extra) => mountRaw(file, state, extra, false);
+const textNow = (view, cx) => withRec(() => view.render(cx)).rec.texts.join("\n");
 async function mountRaw(file, state, extra, wait) {
   host(state, extra);
   const { default: Cls } = await import(new URL(`../${file}/main.js`, import.meta.url).href);
@@ -180,12 +186,12 @@ async function mountRaw(file, state, extra, wait) {
   const orig = InputState.new;
   InputState.new = function (o) { const st = orig.call(this, o); patchInput(st); return st; };
   try { view.init({}, cx); } finally { InputState.new = orig; }
-  if (wait) await settle();
+  if (wait) await idle();
   return { view, cx };
 }
 async function show(view, cx) {
   const { rec } = withRec(() => view.render(cx));
-  await settle();
+  await idle();
   return rec.texts.join("\n");
 }
 // The work a switched-off screen must not do: exec, file reads, fetches. `timers` lists the interval (ms) of each timer started.
@@ -207,7 +213,7 @@ const ghCalls = () => log.exec.filter((c) => c.startsWith("gh "));
 test("github off: stub text, no timer, no gh, no config read", async () => {
   const { view, cx } = await mount("drover-github", { ...off("drover-github"), ...GH });
   assert.match(await show(view, cx), new RegExp(STUB));
-  await tickAll(cx); await settle();
+  await tickAll(cx); await idle();
   quiet();
 });
 
@@ -221,7 +227,7 @@ test("github off -> on -> off -> on: starts without a restart, stops, restarts; 
   assert.deepEqual(log.timers.map((t) => t.ms), [5 * 60 * 1000]);
   setConfig(off("drover-github")[CFG]);
   assert.match(await show(view, cx), new RegExp(STUB));
-  await tickAll(cx); await settle();
+  await tickAll(cx); await idle();
   assert.equal(ghCalls().length, 1, "a timer tick while off does nothing");
   setConfig({});
   await show(view, cx);
@@ -232,12 +238,12 @@ test("github off -> on -> off -> on: starts without a restart, stops, restarts; 
 
 test("github: a load in flight when it is switched off is dropped (no snapshot written)", async () => {
   const gate = deferred();
-  const { view, cx } = await mount("drover-github", GH, { exec: async (cmd, args) => { log.exec.push([cmd, ...args].join(" ")); await gate.promise; return { code: 0, stdout: "[]", stderr: "" }; } });
-  assert.equal(ghCalls().length, 1, "the load is in flight");
+  const { view, cx } = await mountNow("drover-github", GH, { exec: async (cmd, args) => { log.exec.push([cmd, ...args].join(" ")); await gate.promise; return { code: 0, stdout: "[]", stderr: "" }; } });
+  await until(() => ghCalls().length === 1, "the gh load is in flight (held)");
   setConfig(off("drover-github")[CFG]);
-  await show(view, cx);
+  textNow(view, cx);
   gate.resolve();
-  await settle();
+  await idle();
   assert.equal(globalThis.__host.state["drover.github.snapshot"], undefined, "no write while off");
   assert.equal(view.loading, false);
 });
@@ -250,7 +256,7 @@ const jiraHost = { readTextFile: async (p) => { log.read.push(p); return p === j
 test("jira off: stub text, no timer, no credential read, no request", async () => {
   const { view, cx } = await mount("drover-jira", { [CFG]: { "drover-jira": { site: "acme.atlassian.net", enabled: false } } }, jiraHost);
   assert.match(await show(view, cx), new RegExp(STUB));
-  await tickAll(cx); await settle();
+  await tickAll(cx); await idle();
   quiet();
 });
 
@@ -265,7 +271,7 @@ test("jira off -> on -> off -> on: loads when turned on, nothing while off, load
   assert.match(await show(view, cx), new RegExp(STUB));
   const before = log.fetch.length;
   view.lastRun = 0;
-  await tickAll(cx); await settle();
+  await tickAll(cx); await idle();
   assert.equal(log.fetch.length, before, "a tick while off requests nothing");
   setConfig(JIRA);
   await show(view, cx);
@@ -275,12 +281,12 @@ test("jira off -> on -> off -> on: loads when turned on, nothing while off, load
 
 test("jira: a request in flight when it is switched off is dropped (no snapshot written)", async () => {
   const gate = deferred();
-  const { view, cx } = await mount("drover-jira", jiraOn(), { ...jiraHost, fetchImpl: async () => { await gate.promise; return { ok: true, status: 200, json: async () => ({ issues: [{ id: "1", key: "A-1", fields: { summary: "s" } }], isLast: true }) }; } });
-  assert.equal(log.fetch.length, 1, "the request is in flight");
+  const { view, cx } = await mountNow("drover-jira", jiraOn(), { ...jiraHost, fetchImpl: async () => { await gate.promise; return { ok: true, status: 200, json: async () => ({ issues: [{ id: "1", key: "A-1", fields: { summary: "s" } }], isLast: true }) }; } });
+  await until(() => log.fetch.length === 1, "the request is in flight (held)");
   setConfig({ "drover-jira": { site: "acme.atlassian.net", enabled: false } });
-  await show(view, cx);
+  textNow(view, cx);
   gate.resolve();
-  await settle();
+  await idle();
   assert.equal(globalThis.__host.state["drover.jira.snapshot"], undefined, "no write while off");
   assert.equal(view.loading, false);
 });
@@ -295,7 +301,7 @@ const prList = () => log.exec.filter((c) => c.startsWith("gh pr list --head"));
 test("room off: stub text; only the CLI wakeup consumer keeps a timer; no gh, no mod.json read", async () => {
   const { view, cx } = await mount("drover-room", roomState({ "drover-room": { enabled: false } }), roomHost);
   assert.match(await show(view, cx), new RegExp(STUB));
-  await tickAll(cx); await settle();
+  await tickAll(cx); await idle();
   quiet([15000]);
 });
 
@@ -309,7 +315,7 @@ test("room off -> on -> off -> on", async () => {
   setConfig({ "drover-room": { enabled: false } });
   assert.match(await show(view, cx), new RegExp(STUB));
   globalThis.__host.state["drover.room"] = {};
-  await tickAll(cx); await settle();
+  await tickAll(cx); await idle();
   assert.equal(prList().length, 1, "a tick while off does nothing");
   setConfig({});
   await show(view, cx);
@@ -319,13 +325,12 @@ test("room off -> on -> off -> on", async () => {
 
 test("room: a context load in flight when it is switched off is dropped (nothing written)", async () => {
   const gate = deferred();
-  const { view, cx } = await mount("drover-room", roomState(), { ...roomHost, exec: async (cmd, args) => { log.exec.push([cmd, ...args].join(" ")); await gate.promise; return { code: 0, stdout: "[]", stderr: "" }; } });
-  await show(view, cx);
-  assert.equal(prList().length, 1, "the load is in flight");
+  const { view, cx } = await mountNow("drover-room", roomState(), { ...roomHost, exec: async (cmd, args) => { log.exec.push([cmd, ...args].join(" ")); await gate.promise; return { code: 0, stdout: "[]", stderr: "" }; } });
+  await until(() => { textNow(view, cx); return prList().length === 1; }, "the room load is in flight (held)");
   setConfig({ "drover-room": { enabled: false } });
-  await show(view, cx);
+  textNow(view, cx);
   gate.resolve();
-  await settle();
+  await idle();
   assert.equal(globalThis.__host.state["drover.room"], undefined, "no write while off");
   assert.equal(view.loading, null);
 });
@@ -335,7 +340,7 @@ test("room: a context load in flight when it is switched off is dropped (nothing
 test("board off: stub text; only the CLI inbox consumer's timer remains; nothing else runs", async () => {
   const { view, cx } = await mount("drover-board", off("drover-board"));
   assert.match(await show(view, cx), new RegExp(STUB));
-  await settle();
+  await idle();
   quiet([30000]);
 });
 
@@ -358,7 +363,7 @@ test("board off -> on -> off -> on: the board comes back without a restart, filt
 test("todos list off: stub text, no timer, no exec, no read; on again shows the list", async () => {
   const { view, cx } = await mount("drover-todos", off("drover-todos"));
   assert.match(await show(view, cx), new RegExp(STUB));
-  await settle();
+  await idle();
   quiet();
   setConfig({});
   const on = await show(view, cx);
@@ -383,7 +388,7 @@ test("tasks off: draws nothing (an empty div, no stub text, no rows); keeps the 
   assert.deepEqual(globalThis.__rec, undefined);
   const { rec } = withRec(() => view.render(cx));
   assert.deepEqual(rec.ids, [], "no elements with ids");
-  await settle();
+  await idle();
   quiet([30000, 15000]);
 });
 
@@ -409,15 +414,10 @@ test("a CLI command in the inbox is still served while the Tasks, Board and Wake
     writeFileSync(join(TMP, "data/drover-inbox", name), JSON.stringify({ op: "add", title: `from the CLI via ${mod}` }));
     const { view, cx } = await mount(mod, off(mod));
     await show(view, cx);
-    // The inbox drain reads real files with node fs, so its result arrives when the OS delivers it: wait for the condition, not for a
-    // count of ticks. The 10 s cap only keeps a broken build from hanging the run; it is a hang guard, not a timing expectation:
-    // the happy path leaves the loop as soon as the state matches.
+    // The inbox drain reads real files with node fs, so its result arrives when the OS delivers it: wait for the condition (the hang guard
+    // in until() is not a timing expectation: the happy path returns as soon as the state matches).
     const want = new RegExp(`from the CLI via ${mod}`);
-    const HANG_GUARD_MS = 10000, started = Date.now();
-    while (!want.test(JSON.stringify(globalThis.__host.state)) && Date.now() - started < HANG_GUARD_MS) {
-      await new Promise((r) => setImmediate(r));
-      await show(view, cx);
-    }
+    await until(() => { textNow(view, cx); return want.test(JSON.stringify(globalThis.__host.state)); }, `${mod}: the inbox add command was applied`);
     assert.match(JSON.stringify(globalThis.__host.state), want, `${mod}: the add command was applied while off`);
   }
 });
@@ -426,7 +426,7 @@ test("a due wakeup is delivered (hc send) while the Tasks screen is off", async 
   const w = { id: "W-2", target: "t7", text: "ping tasks", due: Date.now() - 1000, status: "scheduled", created: Date.now() - 5000, enabled: true };
   const { view, cx } = await mount("drover-tasks", { ...off("drover-tasks"), "drover.wakeups": [w] }, { agents: [{ address: "t7", status: "idle" }], terminals: [{ address: "t7" }] });
   await show(view, cx);
-  await settle();
+  await until(() => log.hc.length >= 1, "the due wake was sent");
   assert.deepEqual(log.hc, ["send t7 ping tasks"]);
 });
 
@@ -435,7 +435,7 @@ const isStub = (text) => new RegExp(STUB).test(text);
 test("agents (Squads) off: stub text, no reaper timer, no env-name read; on again starts it once", async () => {
   const { view, cx } = await mount("drover-agents", off("drover-agents"));
   assert.match(await show(view, cx), new RegExp(STUB));
-  await settle();
+  await idle();
   quiet();
   setConfig({});
   const on = await show(view, cx);
@@ -467,7 +467,7 @@ test("runs off: stub text, no observeEnded (no shared write, no kill), no timer;
   const before = JSON.stringify(state["drover.runs"]);
   const { view, cx } = await mount("drover-runs", state, endedHost);
   assert.match(await show(view, cx), new RegExp(STUB));
-  await tickAll(cx); await settle();
+  await tickAll(cx); await idle();
   quiet();
   assert.equal(JSON.stringify(globalThis.__host.state["drover.runs"]), before, "runs untouched while off");
   setConfig({});
@@ -482,7 +482,7 @@ test("runs off: stub text, no observeEnded (no shared write, no kill), no timer;
 test("wakeups off: stub text; only the CLI inbox and wakeup consumers keep their timers; on adds the countdown timer once", async () => {
   const { view, cx } = await mount("drover-wakeups", off("drover-wakeups"));
   assert.match(await show(view, cx), new RegExp(STUB));
-  await settle();
+  await idle();
   quiet([30000, 15000]);
   setConfig({});
   assert.doesNotMatch(await show(view, cx), new RegExp(STUB));
@@ -498,7 +498,7 @@ test("wakeups: a due wakeup is still delivered while the screen is off (the queu
   const w = { id: "W-1", target: "t7", text: "ping", due: Date.now() - 1000, status: "scheduled", created: Date.now() - 5000, enabled: true };
   const { view, cx } = await mount("drover-wakeups", { ...off("drover-wakeups"), "drover.wakeups": [w] }, { agents: [{ address: "t7", status: "idle" }], terminals: [{ address: "t7" }] });
   await show(view, cx);
-  await settle();
+  await until(() => log.hc.length >= 1, "the due wake was sent");
   assert.deepEqual(log.hc, ["send t7 ping"]);
 });
 
@@ -520,7 +520,7 @@ const finds = () => log.exec.filter((c) => c.startsWith("find "));
 test("reader off: stub text, no timer, no find, no transcript read; on starts reading, off stops, on again reads", async () => {
   const { view, cx } = await mount("drover-reader", off("drover-reader"), readerHost);
   assert.match(await show(view, cx), new RegExp(STUB));
-  await tickAll(cx); await settle();
+  await tickAll(cx); await idle();
   quiet();
   setConfig({});
   assert.doesNotMatch(await show(view, cx), new RegExp(STUB));
@@ -529,7 +529,7 @@ test("reader off: stub text, no timer, no find, no transcript read; on starts re
   assert.deepEqual(log.timers.map((t) => t.ms), [5000]);
   setConfig(off("drover-reader")[CFG]);
   assert.match(await show(view, cx), new RegExp(STUB));
-  await tickAll(cx); await settle();
+  await tickAll(cx); await idle();
   assert.equal(dataReads().length, 1, "a tick while off reads nothing");
   setConfig({});
   await show(view, cx);
@@ -539,12 +539,12 @@ test("reader off: stub text, no timer, no find, no transcript read; on starts re
 
 test("reader: a read in flight when it is switched off is dropped (state not updated)", async () => {
   const gate = deferred();
-  const { view, cx } = await mount("drover-reader", {}, { ...readerHost, exec: async (cmd, args) => { log.exec.push([cmd, ...args].join(" ")); await gate.promise; return { code: 0, stdout: "", stderr: "" }; } });
-  assert.equal(finds().length, 1, "the read is in flight");
+  const { view, cx } = await mountNow("drover-reader", {}, { ...readerHost, exec: async (cmd, args) => { log.exec.push([cmd, ...args].join(" ")); await gate.promise; return { code: 0, stdout: "", stderr: "" }; } });
+  await until(() => finds().length === 1, "the find is in flight (held)");
   setConfig(off("drover-reader")[CFG]);
-  await show(view, cx);
+  textNow(view, cx);
   gate.resolve();
-  await settle();
+  await idle();
   assert.deepEqual(view.state, { loading: true }, "the late answer was dropped");
 });
 
@@ -555,14 +555,14 @@ const claudeLine = (text) => JSON.stringify({ type: "user", message: { content: 
 test("github: a multi-scope load switched off after its first gh call starts no further gh call", async () => {
   const gate = deferred();
   let first = true;
-  const { view, cx } = await mount("drover-github", { "drover.github.scopes": ["acme", "beta"] }, {
+  const { view, cx } = await mountNow("drover-github", { "drover.github.scopes": ["acme", "beta"] }, {
     exec: async (cmd, args) => { log.exec.push([cmd, ...args].join(" ")); if (first) { first = false; await gate.promise; } return { code: 0, stdout: "[]", stderr: "" }; },
   });
-  assert.equal(ghCalls().length, 1, "the first scope is in flight");
+  await until(() => ghCalls().length === 1, "the first scope is in flight (held)");
   setConfig(off("drover-github")[CFG]);
-  assert.match(await show(view, cx), new RegExp(STUB));
+  assert.match(textNow(view, cx), new RegExp(STUB));
   gate.resolve();
-  await settle();
+  await idle();
   assert.equal(ghCalls().length, 1, "the second scope is not requested while off");
   assert.equal(globalThis.__host.state["drover.github.snapshot"], undefined);
 });
@@ -570,58 +570,56 @@ test("github: a multi-scope load switched off after its first gh call starts no 
 test("room: a context load switched off after its first gh call starts no further gh call (carriedBy)", async () => {
   const gate = deferred();
   let first = true;
-  const { view, cx } = await mount("drover-room", roomState(), { ...roomHost,
+  const { view, cx } = await mountNow("drover-room", roomState(), { ...roomHost,
     exec: async (cmd, args) => { log.exec.push([cmd, ...args].join(" ")); if (first) { first = false; await gate.promise; } return { code: 0, stdout: "[]", stderr: "" }; } });
-  await show(view, cx);
-  assert.equal(prList().length, 1, "the branch query is in flight");
+  await until(() => { textNow(view, cx); return prList().length === 1; }, "the branch query is in flight (held)");
   setConfig({ "drover-room": { enabled: false } });
-  assert.match(await show(view, cx), new RegExp(STUB));
+  assert.match(textNow(view, cx), new RegExp(STUB));
   gate.resolve();
-  await settle();
+  await idle();
   assert.deepEqual(log.exec.filter((c) => c.includes("--state open")), [], "no carried-by query while off");
   assert.equal(globalThis.__host.state["drover.room"], undefined);
 });
 
 test("reader: a find that finishes after it was switched off does not start the transcript read", async () => {
   const gate = deferred();
-  const { view, cx } = await mount("drover-reader", {}, { ...readerHost, exec: async (cmd, args) => { log.exec.push([cmd, ...args].join(" ")); await gate.promise; return { code: 0, stdout: "/fake/session.jsonl\n", stderr: "" }; } });
-  assert.equal(finds().length, 1);
+  const { view, cx } = await mountNow("drover-reader", {}, { ...readerHost, exec: async (cmd, args) => { log.exec.push([cmd, ...args].join(" ")); await gate.promise; return { code: 0, stdout: "/fake/session.jsonl\n", stderr: "" }; } });
+  await until(() => finds().length === 1, "the find is in flight (held)");
   setConfig(off("drover-reader")[CFG]);
-  await show(view, cx);
+  textNow(view, cx);
   gate.resolve();
-  await settle();
+  await idle();
   assert.deepEqual(log.read.filter((p) => !/mod\.json$/.test(p)), [], "no transcript read while off");
 });
 
 test("reader: an old read from before a disable cannot overwrite the read started by the re-enable", async () => {
   const gates = [deferred(), deferred()];
   let n = 0;
-  const { view, cx } = await mount("drover-reader", {}, { ...readerHost,
+  const { view, cx } = await mountNow("drover-reader", {}, { ...readerHost,
     exec: async (cmd, args) => { log.exec.push([cmd, ...args].join(" ")); return { code: 0, stdout: "/fake/session.jsonl\n", stderr: "" }; },
     readTextFile: async (p) => { if (/mod\.json$/.test(p)) return null; log.read.push(p); const i = n++; await gates[i].promise; return claudeLine(i === 0 ? "OLD" : "NEW"); } });
-  assert.equal(log.read.length, 1, "the first read is held");
+  await until(() => log.read.length === 1, "the first read is held");
   setConfig(off("drover-reader")[CFG]);
-  await show(view, cx);
+  textNow(view, cx);
   setConfig({});
-  await show(view, cx);
-  assert.equal(log.read.length, 2, "the re-enable started a second read");
+  textNow(view, cx);
+  await until(() => log.read.length === 2, "the re-enable started a second read (held)");
   gates[1].resolve();
-  await settle();
-  assert.equal(view.state.entries?.[0]?.text, "NEW");
+  await until(() => view.state.entries?.[0]?.text === "NEW", "the new read landed");
   gates[0].resolve();
-  await settle();
+  await idle();
   assert.equal(view.state.entries?.[0]?.text, "NEW", "the late old read is dropped");
 });
 
 test("jira: a JQL typed while the first-enable settings load is pending is kept", async () => {
   const gate = deferred();
   const dis = { "drover-jira": { site: "acme.atlassian.net", enabled: false } };
-  const { view, cx } = await mount("drover-jira", { [CFG]: dis }, { readTextFile: async (p) => { log.read.push(p); if (/mod\.json$/.test(p)) { await gate.promise; return null; } return null; } });
+  const { view, cx } = await mountNow("drover-jira", { [CFG]: dis }, { readTextFile: async (p) => { log.read.push(p); if (/mod\.json$/.test(p)) { await gate.promise; return null; } return null; } });
   setConfig({ "drover-jira": { site: "acme.atlassian.net" } });
-  await show(view, cx);
+  textNow(view, cx);
   view.input.set_value("project = MYDRAFT");
   gate.resolve();
-  await settle();
+  await idle();
   assert.equal(view.input.value(), "project = MYDRAFT");
 });
 
@@ -637,7 +635,7 @@ for (const [mod, timers, extra] of SCREENS_CFG) {
     const { view, cx } = await mount(mod, {}, { ...extra, ...inheritedHost(mod, { enabled: false }) });
     const isOff = (text) => (mod === "drover-tasks" ? text === "" : new RegExp(STUB).test(text)); // Tasks draws nothing
     assert.ok(isOff(await show(view, cx)), "stub once the settings are loaded");
-    await tickAll(cx); await settle();
+    await tickAll(cx); await idle();
     assert.deepEqual(log.exec, []);
     assert.deepEqual(dataReads(), []);
     assert.deepEqual(log.fetch, []);
@@ -657,7 +655,7 @@ test("tabs: an inherited enabled=false hides the screen from the menu and preset
   const cx = cxOf();
   const v = new TabsView();
   v.init({}, cx);
-  await settle();
+  await idle();
   const ids = withRec(() => v.render(cx)).rec.ids;
   assert.equal(ids.includes("s-drover-github"), false);
   assert.equal(ids.includes("p-Sources"), false);
@@ -678,8 +676,6 @@ function heldSettings(settings) {
   const gate = deferred();
   return { release: () => gate.resolve(), extra: { readTextFile: async (p) => { log.read.push(p); if (/mod\.json$/.test(p)) { await gate.promise; return JSON.stringify({ settings }); } return null; } } };
 }
-const mountNow = (file, state, extra) => mountRaw(file, state, extra, false);
-const textNow = (view, cx) => withRec(() => view.render(cx)).rec.texts.join("\n");
 
 for (const [mod, timers, extra] of SCREENS_CFG) {
   test(`${mod}: before its settings are ready it renders a neutral view, shows no content and does no work; then the inherited off applies`, async () => {
@@ -690,7 +686,7 @@ for (const [mod, timers, extra] of SCREENS_CFG) {
     assert.deepEqual(dataReads(), []);
     assert.deepEqual(log.fetch, []);
     held.release();
-    await settle();
+    await idle();
     const after = textNow(view, cx);
     assert.ok(mod === "drover-tasks" ? after === "" : new RegExp(STUB).test(after), "off once loaded");
     assert.deepEqual(log.exec, []);
@@ -704,7 +700,7 @@ for (const [mod, timers, extra] of SCREENS_CFG) {
     const t = textNow(off1.view, off1.cx);
     assert.ok(mod === "drover-tasks" ? t === "" : new RegExp(STUB).test(t), "shared false: stub immediately");
     held.release();
-    await settle();
+    await idle();
   });
 }
 
@@ -714,7 +710,7 @@ test("room: a focused run with a branch is not queried while the settings are pe
   textNow(view, cx);
   assert.deepEqual(log.exec, [], "no gh before the settings are ready");
   held.release();
-  await settle();
+  await idle();
   textNow(view, cx);
   assert.deepEqual(log.exec, []);
 });
@@ -725,7 +721,7 @@ test("agents: the env files of the default agents are not read while the setting
   textNow(view, cx);
   assert.deepEqual(dataReads(), []);
   held.release();
-  await settle();
+  await idle();
 });
 
 test("tabs: no screen entry is offered until the settings are ready; a shared false hides at once; a mod without settings becomes ready", async () => {
@@ -739,14 +735,14 @@ test("tabs: no screen entry is offered until the settings are ready; a shared fa
   assert.equal(ids.some((i) => i.startsWith("s-drover-")), false, "no entry while loading");
   assert.equal(ids.some((i) => i.startsWith("p-")), false, "no preset while loading");
   held.release();
-  await settle();
+  await idle();
   ids = withRec(() => v.render(cx)).rec.ids;
   assert.equal(ids.includes("s-drover-todos"), false, "inherited off");
   host({}, { props: { menu: "drover", overlay: "o" } });
   const w = new TabsView();
   const cx2 = cxOf();
   w.init({}, cx2);
-  await settle();
+  await idle();
   assert.ok(withRec(() => w.render(cx2)).rec.ids.includes("s-drover-todos"), "no settings anywhere: ready, shown");
 });
 
@@ -759,7 +755,7 @@ test("tabs: a settings read that never resolves hides only its own screen; the o
   const cx = { ...cxOf(), notify() { notified++; }, spawn: (fn) => Promise.resolve().then(() => fn(cx)).catch(() => {}) };
   const v = new TabsView();
   v.init({}, cx);
-  await settle();
+  await until(() => notified >= 9, "every readable settings read repainted");
   const ids = withRec(() => v.render(cx)).rec.ids;
   assert.equal(ids.includes("s-drover-github"), false, "the stuck screen stays hidden");
   for (const m of ["todos", "board", "jira", "agents", "runs", "wakeups", "projects", "reader"]) assert.ok(ids.includes(`s-drover-${m}`), `${m} is offered`);

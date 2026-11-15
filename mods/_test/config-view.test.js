@@ -8,8 +8,9 @@ globalThis.__host = { props: { overlay: "o1" }, state: {}, notified: [], readTex
 const { default: Config } = await import(new URL("../drover-config/main.js", import.meta.url).href);
 
 const KEY = "drover.config";
-const tick = () => new Promise((r) => setImmediate(r));
-const settle = async () => { for (let i = 0; i < 10; i++) await tick(); };
+const { until } = await import(new URL("./stubs/until.js", import.meta.url).href);
+const { SCHEMA } = await import(new URL("../_lib/config-schema.js", import.meta.url).href);
+const MODS = [...new Set(SCHEMA.map((f) => f.mod))];
 
 // mod.json settings per mod, as modSettings() reads them: readTextFile(`<home>/mods/<mod>/mod.json`).
 async function open({ shared = {}, settings = {} } = {}) {
@@ -21,7 +22,7 @@ async function open({ shared = {}, settings = {} } = {}) {
   const cx = { notify() {}, spawn(fn) { return Promise.resolve().then(() => fn(cx)); }, timer: { every() {} } };
   const view = new Config();
   view.init({}, cx);
-  await settle();
+  await until(() => MODS.every((m) => view.inherited.has(m)), "every mod.json layer loaded");
   view.render(cx); // a render refreshes clean inputs
   return { view, cx };
 }

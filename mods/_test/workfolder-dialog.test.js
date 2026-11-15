@@ -11,9 +11,12 @@ globalThis.__host = { props: { overlay: "o1" }, state: {}, notified: [], readTex
 const { default: Config } = await import(new URL("../drover-config/main.js", import.meta.url).href);
 const { NODE } = await import(new URL("./stubs/el.js", import.meta.url).href);
 const findNode = (n, id) => (n.id === id ? n : n.kids.map((k) => findNode(k, id)).find(Boolean));
+const { until, drain } = await import(new URL("./stubs/until.js", import.meta.url).href);
 const KEY = "drover.config";
-const tick = () => new Promise((r) => setImmediate(r));
-const settle = async () => { for (let i = 0; i < 20; i++) await tick(); };
+// init() starts its own loadOffers() and does not keep the promise: record each instance's first call so open() waits for exactly that load.
+const firstLoad = new WeakMap();
+const realLoadOffers = Config.prototype.loadOffers;
+Config.prototype.loadOffers = function () { const p = realLoadOffers.call(this); if (!firstLoad.has(this)) firstLoad.set(this, p); return p; };
 const stored = () => globalThis.__host.state[KEY];
 
 // mode: stored work_folder; repoFiles: files to create in <repo>/.drover. Returns the view and the helper calls.
@@ -28,7 +31,7 @@ async function open({ mode, repoFiles = [] } = {}) {
   const cx = { notify() {}, spawn(fn) { return Promise.resolve().then(() => fn(cx)); }, timer: { every() {} } };
   const view = new Config();
   view.init({}, cx);
-  await settle();
+  await firstLoad.get(view); // init's own load: offers are final when it resolves (undefined if init never started one)
   return { view, cx, repo, helper };
 }
 const rec = async (fn) => { globalThis.__rec = { ids: [], texts: [], inputs: [] }; try { return await fn(); } finally { globalThis.__rec = undefined; } };
@@ -67,7 +70,7 @@ test("project mode with files in <repo>/.drover: an offer shows, and nothing mov
     assert.ok(findNode(r, "move-P-1"));
     assert.equal(findNode(r, "move-confirm-P-1"), undefined);
   });
-  await settle();
+  await drain();
   assert.deepEqual(helper, [], "the helper is never called without the confirm click");
 });
 
@@ -85,7 +88,7 @@ test("Move… only asks; Cancel backs out; the confirm Move runs the helper once
     findNode(root(view, cx), "move-P-1").args.on_click[0]({}, cx);
     findNode(root(view, cx), "move-confirm-P-1").args.on_click[0]({}, cx);
   });
-  await settle();
+  await until(() => view.moveMsg.get("P-1") === "Moved 2 files." && view.confirm === null, "the move finished");
   assert.deepEqual(helper, [["/app/mods/drover-agents/bin/drover-workfolder", "move", `${repo}/.drover`, "/home/u/.config/drover-herdr/work/P-1", "--root", "/home/u/.config/drover-herdr"]]);
   assert.equal(view.moveMsg.get("P-1"), "Moved 2 files.");
   assert.equal(view.confirm, null);
@@ -107,8 +110,7 @@ test("switching the mode to project loads the offer", async () => {
   const { view, cx } = await open({ mode: "repo", repoFiles: ["a.md"] });
   assert.deepEqual(view.offers, []);
   view.commit("drover-config", "work_folder", "project", cx);
-  await settle();
-  assert.equal(view.offers.length, 1);
+  await until(() => view.offers.length === 1, "the offer loaded");
 });
 
 test("a description with line breaks draws one text row per line; one without stays a single row (work folder lists one line per choice)", async () => {

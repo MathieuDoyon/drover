@@ -15,13 +15,15 @@ const W = await import("../_lib/wake.js");
 const IO = await import("../_lib/io.js");
 
 const CFG = "drover.config";
-const tick = () => new Promise((r) => setImmediate(r));
-const settle = async () => { for (let i = 0; i < 30; i++) await tick(); };
+const { until, drain } = await import(new URL("./stubs/until.js", import.meta.url).href);
+// Every cx.spawn (also one started inside another, or from a timer tick) is counted while it runs, so idle() resolves when the mod has no async work left in flight.
+let flight = { n: 0 }; // reset by host(): a spawn of an earlier test can end late without touching this count
+const idle = () => until(() => flight.n === 0, "no spawned work in flight");
 let timers, reads;
 // settingsByMod: what each mod's mod.json `settings` block holds (read through readTextFile, like modSettings does).
 function host({ state = {}, props = {}, settingsByMod = {}, extra = {} } = {}) {
   C.resetCache();
-  timers = []; reads = [];
+  timers = []; reads = []; flight = { n: 0 };
   Object.assign(globalThis.__host, {
     props, state, notified: [], appHome: TMP, watchFolder: () => new Promise(() => {}), agents: [], terminals: [],
     readTextFile: async (p) => { reads.push(p); const m = /mods\/([^/]+)\/mod\.json$/.exec(p); return m && settingsByMod[m[1]] ? JSON.stringify({ settings: settingsByMod[m[1]] }) : null; },
@@ -34,19 +36,21 @@ const cxOf = () => {
   let dead = false;
   const live = (what) => { if (dead) throw new Error(`stale cx: ${what}`); };
   const fresh = () => cxOf().cx;
+  const mine = flight;
   const cx = { notify() { live("notify"); }, stop_propagation() {}, focus_handle: () => ({ focus() {} }),
-    spawn: (fn) => { live("spawn"); return Promise.resolve().then(() => fn(fresh())); },
+    spawn: (fn) => { live("spawn"); mine.n++; return Promise.resolve().then(() => fn(fresh())).finally(() => { mine.n--; }); },
     timer: { every: (ms, fn) => { live("timer.every"); timers.push({ ms, fn: () => fn(fresh()) }); }, after: () => {} } };
   return { cx, expire: () => { dead = true; } };
 };
-const mount = async (mod, opts) => {
+// ready: the condition the test asserts next (mounted views may keep a watcher spawn running for good, so "no spawn in flight" is not a fit here).
+const mount = async (mod, opts, ready = () => true) => {
   host(opts);
   const { default: V } = await import(new URL(`../${mod}/main.js`, import.meta.url).href);
   const v = new V();
   const c = cxOf();
   v.init({}, c.cx);
   c.expire();
-  await settle();
+  await until(ready, `${mod} cold startup finished`);
   return v;
 };
 
@@ -54,25 +58,25 @@ beforeEach(() => host());
 
 test("cold task-editor overlay applies shared overrides: context refresh timer and PR cap", async () => {
   const task = { id: "T-1", title: "t", desc: "", column: "todo", priority: "P2", tags: [], notes: [], created: 1 };
-  await mount("drover-todos", { props: { overlay: "o", edit: "T-1" }, state: { "drover.tasks": [task], [CFG]: { "drover-todos": { context_refresh_seconds: 5, pr_cap: 1 } } } });
+  await mount("drover-todos", { props: { overlay: "o", edit: "T-1" }, state: { "drover.tasks": [task], [CFG]: { "drover-todos": { context_refresh_seconds: 5, pr_cap: 1 } } } }, () => timers.length > 0);
   assert.deepEqual(timers.map((t) => t.ms).filter((ms) => ms !== 0), [5000], "the configured interval, not the 60s default");
   assert.equal(C.cfg("drover-todos", "pr_cap"), 1);
 });
 
 test("cold task-editor overlay loads the mod.json fallback of Todos before it installs the timer, with the screen gate off", async () => {
   const task = { id: "T-1", title: "t", desc: "", column: "todo", priority: "P2", tags: [], notes: [], created: 1 };
-  await mount("drover-todos", { props: { overlay: "o", edit: "T-1" }, state: { "drover.tasks": [task], [CFG]: { "drover-todos": { enabled: false } } }, settingsByMod: { "drover-todos": { context_refresh_seconds: 7 } } });
+  await mount("drover-todos", { props: { overlay: "o", edit: "T-1" }, state: { "drover.tasks": [task], [CFG]: { "drover-todos": { enabled: false } } }, settingsByMod: { "drover-todos": { context_refresh_seconds: 7 } } }, () => timers.length > 0);
   assert.deepEqual(timers.map((t) => t.ms), [7000], "a dialog is never blocked by the screen being off");
 });
 
 test("cold wakeup dialog enforces the shared minimum, and the dialog still opens when the Wakeups screen is off", async () => {
-  const v = await mount("drover-wakeups", { props: { overlay: "o", wakeEdit: null, wakeTarget: "t7" }, state: { [CFG]: { "drover-wakeups": { min_repeat_minutes: 15, enabled: false } } } });
+  const v = await mount("drover-wakeups", { props: { overlay: "o", wakeEdit: null, wakeTarget: "t7" }, state: { [CFG]: { "drover-wakeups": { min_repeat_minutes: 15, enabled: false } } } }, () => C.ready("drover-wakeups"));
   assert.equal(W.addWake([], { target: "t7", text: "x", every: "10m" }).error, "Repeat at most every 15m");
   assert.ok(v.editor, "the editor opened");
 });
 
 test("cold wakeup dialog uses the mod.json fallback (inherited expiry)", async () => {
-  await mount("drover-wakeups", { props: { overlay: "o", wakeEdit: null, wakeTarget: "t7" }, settingsByMod: { "drover-wakeups": { expiry_hours: 6 } } });
+  await mount("drover-wakeups", { props: { overlay: "o", wakeEdit: null, wakeTarget: "t7" }, settingsByMod: { "drover-wakeups": { expiry_hours: 6 } } }, () => C.ready("drover-wakeups"));
   assert.equal(W.addWake([], { target: "t7", text: "x", when: "now" }, 1000).wake.expires, 1000 + 6 * 3600000);
 });
 
@@ -84,7 +88,7 @@ async function cli(cmd) {
   const name = `c${seq++}`;
   writeFileSync(join(inbox, `${name}.json`), JSON.stringify(cmd));
   const file = join(inbox, `${name}.result`);
-  for (let i = 0; i < 300; i++) { if (readdirSync(inbox).includes(`${name}.result`) && readFileSync(file, "utf8")) break; await new Promise((r) => setTimeout(r, 5)); }
+  await until(() => readdirSync(inbox).includes(`${name}.result`) && readFileSync(file, "utf8"), `the inbox answered ${name}`);
   return readFileSync(file, "utf8");
 }
 test("Tasks-only inbox startup: the wake op follows min_repeat_minutes from the Wakeups mod.json", async () => {
@@ -121,7 +125,7 @@ test("watchWakes delivers a due wake with a fresh cx: the wake ends sent, never 
   const c = cxOf();
   IO.watchWakes(c.cx);
   c.expire();
-  await settle();
+  await until(() => globalThis.__host.state["drover.wakeups"]?.[0].status === "sent", "the due wake was delivered");
   assert.deepEqual(sent, ["send t7 ping"]);
   assert.equal(globalThis.__host.state["drover.wakeups"][0].status, "sent");
   await Promise.all(timers.map((t) => t.fn())); // the 15s tick also runs on a fresh cx
@@ -138,11 +142,11 @@ test("wakeup dialog: Save while the inherited policy is still loading waits for 
   const ed = v.editor;
   ed.kind = "every"; ed.minutes.set_value("10"); ed.text.set_value("ping");
   ed.submit(cxOf().cx);
-  await settle();
+  await drain(); // nothing may happen while the policy read is held: a bounded drain, not a wait for a result
   assert.equal(closed, 0, "Save does not run on defaults while the policy is loading");
   assert.equal((globalThis.__host.state["drover.wakeups"] ?? []).length, 0);
   release();
-  await settle();
+  await until(() => ed.error, "the held Save finished");
   assert.equal(ed.error, "Repeat at most every 15m");
   assert.equal(closed, 0);
 });
@@ -151,7 +155,7 @@ test("wakeup dialog: Save while the inherited policy is still loading waits for 
 const LIST_SCREENS = [["drover-room", 30000], ["drover-wakeups", 30000], ["drover-reader", 5000], ["drover-runs", 60000]];
 for (const [mod, ms] of LIST_SCREENS) {
   test(`${mod}: cold list-screen startup installs its timer with a live cx (init cx expired)`, async () => {
-    const v = await mount(mod, {});
+    const v = await mount(mod, {}, () => timers.some((t) => t.ms === ms));
     assert.ok(timers.some((t) => t.ms === ms), `${mod}: timer ${ms} installed, got ${timers.map((t) => t.ms)}`);
     await Promise.all(timers.map((t) => t.fn())); // a tick runs on a fresh cx and does not throw
     assert.ok(v);
@@ -159,7 +163,7 @@ for (const [mod, ms] of LIST_SCREENS) {
 }
 
 test("drover-reader: re-enable after off reads again with the render cx, not the dead init cx", async () => {
-  const v = await mount("drover-reader", {});
+  const v = await mount("drover-reader", {}, () => timers.some((t) => t.ms === 5000));
   assert.ok(timers.some((t) => t.ms === 5000));
   globalThis.__host.state[CFG] = { "drover-reader": { enabled: false } };
   v.render(cxOf().cx);
@@ -167,7 +171,7 @@ test("drover-reader: re-enable after off reads again with the render cx, not the
   globalThis.__host.state[CFG] = {};
   const reads0 = reads.length;
   assert.doesNotThrow(() => v.render(cxOf().cx));
-  await settle();
+  await idle();
   assert.equal(v.stopped, false);
   assert.ok(reads.length >= reads0);
 });
@@ -180,7 +184,7 @@ StubInput.prototype.set_value = function (v) { this.v = typeof v === "string" ? 
 const COLD_SCREENS = [["drover-agents", 30000], ["drover-jira", 60000], ["drover-github", 300000]];
 for (const [mod, ms] of COLD_SCREENS) {
   test(`${mod}: cold startup installs its timer with a live cx (init cx expired)`, async () => {
-    const v = await mount(mod, {});
+    const v = await mount(mod, {}, () => timers.some((t) => t.ms === ms));
     assert.ok(timers.some((t) => t.ms === ms), `${mod}: timer ${ms} installed, got ${timers.map((t) => t.ms)}`);
     await Promise.all(timers.map((t) => t.fn())); // a tick runs on a fresh cx and does not throw
     assert.ok(v);
@@ -188,19 +192,19 @@ for (const [mod, ms] of COLD_SCREENS) {
 }
 
 test("drover-jira: re-enable after off reloads with the render cx, not the dead init cx", async () => {
-  const v = await mount("drover-jira", { state: { [CFG]: { "drover-jira": { site: "acme.atlassian.net" } } } });
+  const v = await mount("drover-jira", { state: { [CFG]: { "drover-jira": { site: "acme.atlassian.net" } } } }, () => timers.length > 0);
   globalThis.__host.state[CFG] = { "drover-jira": { enabled: false } };
   v.render(cxOf().cx);
   globalThis.__host.state[CFG] = { "drover-jira": { site: "acme.atlassian.net" } };
   assert.doesNotThrow(() => v.render(cxOf().cx));
-  await settle();
+  await idle();
 });
 
 test("drover-github: re-enable after off reloads with the render cx, not the dead init cx", async () => {
-  const v = await mount("drover-github", {});
+  const v = await mount("drover-github", {}, () => timers.length > 0);
   globalThis.__host.state[CFG] = { "drover-github": { enabled: false } };
   v.render(cxOf().cx);
   globalThis.__host.state[CFG] = {};
   assert.doesNotThrow(() => v.render(cxOf().cx));
-  await settle();
+  await idle();
 });

@@ -9,6 +9,7 @@ import { fileURLToPath } from "node:url";
 import { register } from "node:module";
 
 register("./hooks.js", import.meta.url);
+const { until } = await import(new URL("./stubs/until.js", import.meta.url).href);
 globalThis.__host = { props: {}, state: {}, notified: [], exec: async () => ({ code: 0, stdout: "[]", stderr: "" }), readTextFile: async () => null, home: "/h", appHome: "/a" };
 const C = await import("../_lib/config.js");
 const { field } = await import("../_lib/config-schema.js");
@@ -112,10 +113,7 @@ test("the CLI wake op (inbox) enforces the configured minimum, the same value as
     const cx = { notify() {}, timer: { every() {} }, spawn: (fn) => Promise.resolve().then(() => fn(cx)).catch(() => {}) };
     IO.watchInbox(cx);
     const file = join(tmp, "data/drover-inbox", `${name}.result`);
-    for (let i = 0; i < 200; i++) {
-      if (readdirSync(join(tmp, "data/drover-inbox")).includes(`${name}.result`) && readFileSync(file, "utf8")) break;
-      await new Promise((r) => setTimeout(r, 5));
-    }
+    await until(() => readdirSync(join(tmp, "data/drover-inbox")).includes(`${name}.result`) && readFileSync(file, "utf8"), `the inbox answered ${name}`);
     return readFileSync(file, "utf8");
   };
   set({ "drover-wakeups": { min_repeat_minutes: 15 } });

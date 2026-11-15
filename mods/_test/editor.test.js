@@ -15,6 +15,7 @@ const main = process.env.EDITOR_MAIN ? pathToFileURL(process.env.EDITOR_MAIN).hr
 globalThis.__host = { props: {}, state: {}, notified: [], exec: async () => ({ code: 0 }) };
 const { Editor } = await import(main);
 const { default: Agents } = await import("../drover-agents/main.js");
+const { drain } = await import(new URL("./stubs/until.js", import.meta.url).href);
 // The Squads screen renders a neutral view until its settings are ready: these tests are about the ready screen.
 (await import("../_lib/config.js")).setSettings("drover-agents", {});
 
@@ -417,7 +418,7 @@ test("assignee: cold inherited default_worktree and default_report (mod.json) ap
   const e = open(); e.assignee = runner;
   const l = e.launch = fakeLaunch(); l.open();
   await save(e);
-  for (let i = 0; i < 10; i++) await new Promise((r) => setImmediate(r));
+  await drain(); // a negative: a bounded drain
   assert.equal(l.calls.length, 0, "no launch while the settings read is pending");
   release(); await flush();
   assert.deepEqual(l.calls[0][2], { worktree: true, reportTo: "t9" });

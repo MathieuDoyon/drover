@@ -28,13 +28,15 @@ test("startOptions: reports to the Drover in the focused space, not the newest o
 
 // The picker: default = Drover of the space the sidebar is in; 2+ Drovers show the list; a choice is for this launch only.
 const { default: Agents } = await import("../drover-agents/main.js");
+const C = await import("../_lib/config.js");
+const { until } = await import(new URL("./stubs/until.js", import.meta.url).href);
 test("picker: defaults to the same-space Drover, lists both, a pick applies to this picker only", async () => {
   host.props = { overlay: "o", pick: "T-1" };
   host.state["drover.tasks"] = [{ id: "T-1", title: "t", desc: "", column: "todo", priority: "P2", tags: [], notes: [], created: 1 }];
   host.state["drover.agents"] = { agents: [{ id: "claude", name: "Claude", command: "claude", instructions: "", version: 1 }], squads: [] };
   const cx = { notify() {}, spawn: (fn) => Promise.resolve().then(() => fn(cx)), timer: { every() {} } };
   const v = new Agents(); v.init({}, cx);
-  for (let i = 0; i < 20; i++) await new Promise((r) => setImmediate(r));
+  await until(() => C.ready("drover-agents"), "the picker's settings layer loaded");
   const p = v.dialog;
   assert.equal(p.droverAt(), "t1", "same space as the sidebar");
   globalThis.__rec = { ids: [], texts: [] };

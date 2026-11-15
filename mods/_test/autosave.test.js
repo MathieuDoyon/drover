@@ -9,6 +9,7 @@ import { join } from "node:path";
 register("./hooks.js", import.meta.url);
 globalThis.__host = { props: {}, state: {}, notified: [], exec: async () => ({ code: 0 }) };
 const { Editor } = await import(new URL("../drover-todos/main.js", import.meta.url).href);
+const { drain } = await import(new URL("./stubs/until.js", import.meta.url).href);
 
 let host, errors, timers, writes;
 const work = new Set();
@@ -171,7 +172,7 @@ test("flush waits for a paste in flight, then writes the text with the link", as
   e.pasteImage(mkcx());
   typeTitle(e, "with image");
   const p = e.flushSave(mkcx());
-  await tick();
+  await drain(); // a negative: a bounded drain
   assert.equal(writes, 0, "not before the paste lands");
   open(); await p; await flushAll();
   assert.equal(tasks()[0].title, "with image");

@@ -8,7 +8,7 @@ globalThis.__host = { props: { overlay: "o1" }, state: {}, notified: [], appHome
 const { default: Config } = await import(new URL("../drover-config/main.js", import.meta.url).href);
 
 const canon = (o) => JSON.stringify(o, null, 2) + "\n";
-const settle = async () => { for (let i = 0; i < 10; i++) await new Promise((r) => setImmediate(r)); };
+const { until } = await import(new URL("./stubs/until.js", import.meta.url).href);
 
 async function open(text) {
   const files = { "/h/keys.json": text };
@@ -21,7 +21,7 @@ async function open(text) {
   const cx = { notify() {}, spawn(fn) { return Promise.resolve().then(() => fn(cx)); }, timer: { every() {} } };
   const view = new Config();
   view.init({}, cx);
-  await settle();
+  await until(() => view.keyState.size > 0, "keys.json read");
   return { view, files };
 }
 
@@ -35,13 +35,13 @@ test("flipping a switch writes the binding, backs up first, and re-reads", async
   const text = canon({ global: { "cmd-b": "layout.toggle:sidebar" } });
   const { view, files } = await open(text);
   await view.flip(SHORTCUT("newtask"));
-  await settle();
-  assert.equal(view.keyState.get("newtask").state, "on");
+  assert.equal(view.keyState.get("newtask").state, "on"); // flip() awaits the write and the re-read
   assert.equal(JSON.parse(files["/h/keys.json"]).global["cmd-shift-c"], "mod.open:drover-newtask");
   const bak = Object.keys(files).filter((k) => k.includes("keys.json.bak-"));
   assert.equal(bak.length, 1);
   assert.equal(files[bak[0]], text);
-  await new Promise((r) => setTimeout(r, 3)); // backups are named by millisecond
+  const flipped = Date.now();
+  await until(() => Date.now() > flipped, "the clock moved on"); // backups are named by millisecond
   await view.flip(SHORTCUT("newtask"));
   assert.equal(view.keyState.get("newtask").state, "off");
   assert.equal(files["/h/keys.json"], text);
