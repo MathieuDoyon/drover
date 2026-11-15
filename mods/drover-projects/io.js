@@ -2,7 +2,7 @@
 // The herdr side of the store: tasks persist in shared state (shared.json, written atomically).
 import { shared, setShared, openOverlay, exec, hc, readTextFile, writeTextFile, notify, focused, appHome, home, watchFolder, spaces, panes, agents, terminals } from "herdr";
 import * as fs from "fs/promises";
-import { KEY, SEEN_KEY, PROJECTS_KEY, firstSight, list, add, update, bySource, addCommand, applyCommand, repoOf, projectOf, projectKey, projectAddRequest, projectDiff, addProject, projectNamed, nextReport, claim, release, editSize } from "./store.js";
+import { KEY, SEEN_KEY, PROJECTS_KEY, firstSight, list, add, update, bySource, addCommand, applyCommand, repoOf, projectOf, projectKey, projectAddRequest, projectDiff, PROTOCOL, inboxGate, arrivalOf, addProject, projectNamed, nextReport, claim, release, editSize } from "./store.js";
 import { base64, httpProblem, jiraIssue, jiraKey, githubIssue, prItems } from "./sources.js";
 import { WAKE_KEY, reschedule, addWake, decide, setStatus, wakeOp } from "./wake.js";
 import { apply as applyKey } from "./keys.js";
@@ -455,20 +455,48 @@ async function projectAdd(cmd) {
   return `ok: ${r.project.id} project ${r.project.name}${warning}`;
 }
 
+// Arrival times of the pending request files, for `ttlMs`: ONE batched exec per drain pass, before any read or unlink.
+// The mod fs has no stat, so the host runs it: GNU `stat -c '%Y %n'`, else BSD `stat -f '%m %N'`, as argv (never a shell string).
+// Returns Map path -> mtime in seconds; a file it cannot stat is absent (arrivalOf then falls back to the epoch in the name).
+async function mtimesOf(paths) {
+  const want = new Set(paths), rows = new Map();
+  for (const argv of [["-c", "%Y %n"], ["-f", "%m %N"]]) { // GNU first: BSD's `-f` would print filesystem info on GNU
+    try {
+      const r = await exec("stat", [...argv, ...paths], { timeout: 10000 });
+      for (const line of String(r?.stdout ?? "").split("\n")) { const m = /^(\d+) (.+)$/.exec(line); if (m && want.has(m[2])) rows.set(m[2], Number(m[1])); }
+    } catch {}
+    if (rows.size) break;
+  }
+  return rows;
+}
+
 async function drain() {
-  for (const name of await fs.readdir(INBOX())) {
-    if (!name.endsWith(".json")) continue;
+  const names = (await fs.readdir(INBOX())).filter((n) => n.endsWith(".json"));
+  const mtimes = names.length ? await mtimesOf(names.map((n) => `${INBOX()}/${n}`)) : new Map();
+  for (const name of names) {
     const path = `${INBOX()}/${name}`;
     let text;
     try { text = await fs.readFile(path, "utf8"); await fs.unlink(path); } catch { continue; }
     // No await between check and mark: a 2nd mod that read the same file sees the name and skips.
+    // A request that is then refused (bad, expired, stale) is marked and answered like any other: once.
     const s = firstSight(shared(SEEN_KEY), name);
     if (!s.fresh) continue;
     setShared(SEEN_KEY, s.seen);
     let cmd = null;
     try { cmd = JSON.parse(text); } catch {}
     let reply;
-    if (cmd?.op === "wake") {
+    // The only await before the gate (the Jira site for `link`), so the compare and the apply below stay in one turn.
+    const jira = cmd?.op === "link" ? await jiraSite().catch(() => "") : "";
+    // ---- no await from here to the apply: bad -> expired -> stale (against the rev of the card as it is NOW) -> apply ----
+    const tasks = load();
+    const gate = cmd && typeof cmd === "object" ? inboxGate(cmd, tasks, { arrival: arrivalOf(name, mtimes.get(path)), now: Date.now() }) : null;
+    if (gate) {
+      reply = `error: ${gate.error}`;
+    } else if (cmd?.op === "protocol") {
+      // The probe. A sender must get `ok: protocol 2` before it sends ifRev or ttlMs: an OLD consumer ignores both fields and applies the
+      // request unconditionally (it answers this probe `error: Unknown drover command`). Changes no state.
+      reply = `ok: protocol ${PROTOCOL}`;
+    } else if (cmd?.op === "wake") {
       // Two open mods can read the same file before either unlinks it: the file name dedupes.
       if (loadWakes().some((w) => w.src === name)) continue;
       const r = addWake(loadWakes(), { ...cmd, source: "agent" });
@@ -492,9 +520,9 @@ async function drain() {
     } else {
       if (cmd?.op === "note" || cmd?.op === "link") cmd = { ...cmd, by: terminalName(loadRuns(), String(cmd.by ?? "")) || "you" }; // an address becomes the agent's name
       if (cmd?.op === "move") cmd = { ...cmd, fromDrover: isLiveDrover(loadRuns(), String(cmd.from ?? ""), liveState().alive) }; // always set here: a request file cannot claim it
-      if (cmd?.op === "link") cmd = { ...cmd, jiraSite: await jiraSite().catch(() => "") }; // always set here: a request file cannot claim it
+      if (cmd?.op === "link") cmd = { ...cmd, jiraSite: jira }; // always set here: a request file cannot claim it
       const pk = cmd?.op === "project" ? projectKey(loadProjects(), cmd.project) : { id: null };
-      const r = pk.error ? pk : applyCommand(load(), cmd.op === "project" ? { ...cmd, project: pk.id } : cmd);
+      const r = pk.error ? pk : applyCommand(tasks, cmd.op === "project" ? { ...cmd, project: pk.id } : cmd);
       if (!r.error) setShared(KEY, r.tasks);
       reply = r.error ? `error: ${r.error}` : cmd.op === "project" ? `ok: ${r.task.id} project ${r.task.project ?? "none"}` : cmd.op === "link" ? `ok: ${r.task.id} source ${r.task.source?.url ?? "none"}` : cmd.op === "note-edit" || cmd.op === "note-rm" ? `ok: ${r.task.id} ${cmd.noteId} ${cmd.op === "note-rm" ? "removed" : "edited"}` : cmd.op === "note" || cmd.op === "edit" ? `ok: ${r.task.id} ${cmd.op === "note" ? `note ${r.task.notes.length}` : "edited"}` : `ok: ${r.task.id} -> ${r.task.column}`;
     }

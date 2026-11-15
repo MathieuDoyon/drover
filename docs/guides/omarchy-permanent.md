@@ -121,7 +121,19 @@ Use this when only the Drover mods or the `drover` CLI changed (for example a ne
 
    Then the owner either removes `zz-probe` through the Projects data (there is no remove verb) or leaves it named `zz-probe`.
 
-Not covered yet: there are no protocol, stale-request or expiry checks. The protocol card defines them in this section when it lands, and the card that turns on laptop writes runs them live on omarchy and requires them. This redeploy is not approval for laptop writes: the laptop does not send `project-add`, or any other write, to omarchy. Keep every command's raw output in the work folder; never print an rc file or the environment (`service.env`, `env`, `printenv`).
+6. Protocol 2 checks. A request file may carry `ifRev` (the card rev the sender saw: another rev is answered `error: stale: …` and changes nothing) and `ttlMs` (a request that arrived longer ago than that is dropped, `error: expired: …`). A Drover that predates protocol 2 **ignores both fields and applies the request**, so a sender first probes and sends them only after `ok: protocol 2`. The `drover` CLI has no verb for this; write the request file the way the CLI does (`<home>` is the app home, `~/.config/herdr-app`), on omarchy:
+
+   ```sh
+   send() { d=<home>/data/drover-inbox; n=$(date +%s)-$$-$RANDOM; printf '%s' "$1" > "$d/.$n.tmp" && mv "$d/.$n.tmp" "$d/$n.json"; for i in $(seq 1 100); do [ -f "$d/$n.result" ] && { cat "$d/$n.result"; rm -f "$d/$n.result"; return; }; sleep 0.1; done; echo "no answer"; }
+   send '{"op":"protocol"}'                                   # protocol 2: "ok: protocol 2"; an older Drover: "error: Unknown drover command"
+   drover add "zz-stale-probe" --desc "throwaway"             # prints the card id <T-…>
+   send '{"op":"move","id":"<T-…>","column":"todo","ifRev":999999}'   # "error: stale: card <T-…> is at rev 0, request saw 999999 …"
+   drover task <T-…>                                          # still in backlog: the stale move changed nothing
+   ```
+
+   A card that was never written since protocol 2 has no rev and counts as 0, so `"ifRev":0` applies to it. The owner archives or leaves `zz-stale-probe`.
+
+Not covered yet: the card that turns on laptop writes runs these checks live on omarchy and requires them. This redeploy is not approval for laptop writes: the laptop does not send `project-add`, or any other write, to omarchy. Keep every command's raw output in the work folder; never print an rc file or the environment (`service.env`, `env`, `printenv`).
 
 ## Uninstall
 

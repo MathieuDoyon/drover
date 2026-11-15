@@ -137,12 +137,17 @@ export const bySource = (tasks, kind, id, url) => tasks.find((t) => t.source?.ki
 // A launch in flight (CLAIMING) stays: its run still adopts or expires the claim.
 const unstaffed = (cur, to) => cur.column === "doing" && (to === "backlog" || to === "todo") && cur.agent !== CLAIMING;
 
+// rev: a per-card change counter, never a clock. Every writer of a stored card bumps it by one, so a sender that names the rev it
+// saw (inbox `ifRev`) can tell the card changed. A card with no rev (older data, or just added) counts as 0.
+export const revOf = (t) => (Number.isSafeInteger(t?.rev) && t.rev > 0 ? t.rev : 0);
+const bumped = (t) => ({ ...t, rev: revOf(t) + 1 });
+
 export function update(tasks, id, patch, now = Date.now()) {
   const cur = tasks.find((t) => t.id === id);
   if (!cur) return { error: `Task ${id} not found` };
   const v = validate({ ...cur, ...patch });
   if (v.error) return v;
-  const task = { ...cur, ...patch, ...v.value, id: cur.id, updated: now };
+  const task = { ...cur, ...patch, ...v.value, id: cur.id, updated: now, rev: revOf(cur) + 1 };
   if (unstaffed(cur, task.column) && !("agent" in patch)) Object.assign(task, { agent: null, run: null, claimedAt: null });
   if (task.column !== cur.column) delete task.order; // the old column's number means nothing in the new one
   return { tasks: tasks.map((t) => (t.id === id ? task : t)), task };
@@ -242,7 +247,7 @@ export function reorder(tasks, id, column, beforeId, now = Date.now()) {
     if (!order.has(t.id)) return t;
     const moved = t.id === id;
     if (!moved && t.order === order.get(t.id)) return t;
-    return { ...t, order: order.get(t.id), ...(moved ? { column, updated: now, ...(unstaffed(t, column) ? { agent: null, run: null, claimedAt: null } : {}) } : {}) };
+    return { ...bumped(t), order: order.get(t.id), ...(moved ? { column, updated: now, ...(unstaffed(t, column) ? { agent: null, run: null, claimedAt: null } : {}) } : {}) };
   });
   return { tasks: next, task: next.find((t) => t.id === id) };
 }
@@ -411,6 +416,49 @@ export function firstSight(seen, name) {
   return list.includes(name) ? { fresh: false, seen: list } : { fresh: true, seen: [...list, name].slice(-200) };
 }
 
+// ---- Inbox protocol 2 (T-MWHVWQW21AG). Optional fields on a request:
+//   ifRev  the card rev the sender saw; the request is refused (`stale`) when the card is at another rev.
+//   ttlMs  the request is dropped (`expired`) when it arrived more than ttlMs ago.
+// An OLD consumer ignores both fields and applies the request unconditionally. A sender must therefore send `{op:"protocol"}` first
+// and use these fields only when the answer is `ok: protocol 2` (an old consumer answers `error: Unknown drover command`).
+export const PROTOCOL = 2;
+const REV_OPS = ["move", "edit", "note", "note-edit", "note-rm", "archive", "link", "project"]; // ops that name one card
+const whole = (v) => typeof v === "number" && Number.isSafeInteger(v) && v >= 0;
+// Pure. { ifRev, ttlMs } (each undefined when absent) or { error: "bad …" }.
+export function protocolFields(cmd) {
+  const out = {};
+  for (const f of ["ifRev", "ttlMs"]) {
+    if (cmd?.[f] === undefined) continue;
+    if (!whole(cmd[f])) return { error: `bad ${f}: ${typeof cmd[f] === "number" ? cmd[f] : JSON.stringify(cmd[f])} is not a whole number of 0 or more` };
+    if (f === "ifRev" && !REV_OPS.includes(cmd.op)) return { error: `bad ifRev: not supported for ${cmd.op}` };
+    out[f] = cmd[f];
+  }
+  return out;
+}
+// When a request file arrived, in ms: the file's mtime (seconds), else the epoch seconds a CLI file name starts with (`<epoch>-<pid>`).
+// Never the first time a mod saw it and never a time inside the body. null when neither exists.
+export function arrivalOf(name, mtimeS) {
+  if (Number.isFinite(mtimeS)) return mtimeS * 1000;
+  const m = /^(\d{9,11})-/.exec(name);
+  return m ? Number(m[1]) * 1000 : null;
+}
+// Pure and synchronous: the caller runs it and applies in the same turn (no await between). null = go on, else { error }.
+// Order: bad, expired, stale. `arrival` is arrivalOf(...). Clock skew: arrival is the file host's clock and `now` is this host's; the
+// consumer and the file's disk are the same machine in practice, so the age is one clock, but a wrong clock there skews the TTL.
+export function inboxGate(cmd, tasks, { arrival, now }) {
+  const f = protocolFields(cmd);
+  if (f.error) return f;
+  if (f.ttlMs !== undefined) {
+    if (arrival == null) return { error: "no arrival time: the file has no mtime and no epoch in its name; not applied" };
+    if (now - arrival > f.ttlMs) return { error: `expired: arrived ${Math.round((now - arrival) / 1000)}s ago, ttl ${f.ttlMs}ms; not applied` };
+  }
+  if (f.ifRev !== undefined) {
+    const cur = tasks.find((t) => t.id === cmd.id);
+    if (cur && revOf(cur) !== f.ifRev) return { error: `stale: card ${cmd.id} is at rev ${revOf(cur)}, request saw ${f.ifRev}${cur.rev === undefined ? " (card has no rev, counts as 0)" : ""}` };
+  }
+  return null;
+}
+
 // Projects: a name, its repos (first = default), loose folders and the base branch. Shared key drover.projects.
 export const PROJECTS_KEY = "drover.projects";
 const lines = (v) => (Array.isArray(v) ? v : String(v ?? "").split("\n")).map((x) => String(x?.path ?? x).trim()).filter(Boolean);
@@ -558,7 +606,7 @@ export function archiveDone(tasks, now = Date.now(), ids = null) {
   const next = tasks.map((t) => {
     if (t.column !== "done" || t.archived || (only && !only.has(t.id))) return t;
     count++;
-    return { ...t, archived: true, updated: now };
+    return { ...bumped(t), archived: true, updated: now };
   });
   return { tasks: next, count };
 }

@@ -30,9 +30,9 @@ beforeEach(() => {
   hold = null; // a promise the git calls wait for, set by a race test
   host = globalThis.__host = { appHome: home, props: {}, notified: [], state: {}, agents: [], terminals: [], watchFolder: () => new Promise(() => {}) };
   host.exec = (cmd, args) => new Promise((resolve) => {
-    gitCalls.push([cmd, ...args]);
+    if (cmd !== "stat") gitCalls.push([cmd, ...args]); // the inbox's mtime lookup (protocol 2) is not a Git call, and a race test's hold must not stall it
     const run = () => execFile(cmd, args, { encoding: "utf8" }, (e, stdout, stderr) => resolve({ code: e ? (typeof e.code === "number" ? e.code : 1) : 0, stdout, stderr }));
-    hold ? hold.then(run) : run();
+    hold && cmd !== "stat" ? hold.then(run) : run();
   });
 });
 
