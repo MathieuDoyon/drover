@@ -4,7 +4,8 @@ import { View, div } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, TextareaState, Textarea } from "gpui-base";
 import { theme, setShared, props, closeOverlay, openOverlay, exec, notify, shared } from "herdr";
 import { PROJECTS_KEY, addProject, updateProject, removeProject } from "./store.js";
-import { load, loadProjects, modSettings, remote } from "./io.js";
+import { load, loadProjects, modSettings, remote, remoteWriteState, setRemoteWrites } from "./io.js";
+import { writesToggle } from "./remote-write-ui.js";
 import { withRemote, remoteOf } from "./remote.js";
 import { bind, isEnabled, whenLoaded, ready as cfgReady } from "./config.js";
 import { gated } from "./ui.js";
@@ -79,6 +80,15 @@ export class ProjectEditor {
     cx.notify();
   }
 
+  // The freeze switch of the rollback runbook. "frozen" shows only once the writer says no send is in flight (a timer repaints until then).
+  toggleWrites(cx) {
+    const cur = remoteOf(loadProjects(), this.project?.id);
+    if (!cur) return;
+    setRemoteWrites(this.project.id, cur.writes === false);
+    if (!this.writesTimer && cx.timer?.every) { this.writesTimer = true; cx.timer.every(1000, (cx) => { if (!this.closed) cx.notify(); }); }
+    cx.notify();
+  }
+
   unbindRemote(cx) {
     const cur = remoteOf(loadProjects(), this.project?.id);
     this.bindGen++;
@@ -114,7 +124,13 @@ export class ProjectEditor {
         .child(h_flex().pt(8).gap(8).items_center()
           .child(button(t, "bind-remote", remoteOf(loadProjects(), this.project.id) ? "Rebind" : "Bind", false, (_e, cx) => cx.spawn((acx) => this.bindRemote(acx))))
           .when(Boolean(remoteOf(loadProjects(), this.project.id)), (e) => e.child(button(t, "unbind-remote", "Unbind", false, (_e, cx) => this.unbindRemote(cx))))
-          .when(Boolean(this.remoteMsg), (e) => e.child(div().flex_1().min_w(0).text_size(12).text_color(t.muted).child(this.remoteMsg)))))
+          .when(Boolean(this.remoteMsg), (e) => e.child(div().flex_1().min_w(0).text_size(12).text_color(t.muted).child(this.remoteMsg))))
+        .when(Boolean(remoteOf(loadProjects(), this.project.id)), (e) => {
+          const g = writesToggle(remoteOf(loadProjects(), this.project.id), remoteWriteState(this.project.id));
+          return e.child(h_flex().pt(8).gap(8).items_center()
+            .child(button(t, "toggle-writes", g.on ? "Turn writes off" : "Turn writes on", false, (_e, cx) => this.toggleWrites(cx)))
+            .child(div().id("writes-note").flex_1().min_w(0).text_size(12).text_color(t.muted).child(`${g.label}: ${g.note}`)));
+        }))
       .when(Boolean(this.error), (el) => el.child(div().pt(10).text_size(12).text_color(t.blocked).child(this.error)))
       .child(h_flex().pt(18).gap(8).child(div().flex_1())
         .child(button(t, "ed-cancel", "Cancel", false, () => this.close()))

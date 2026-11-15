@@ -121,19 +121,78 @@ Use this when only the Drover mods or the `drover` CLI changed (for example a ne
 
    Then the owner either removes `zz-probe` through the Projects data (there is no remove verb) or leaves it named `zz-probe`.
 
-6. Protocol 2 checks. A request file may carry `ifRev` (the card rev the sender saw: another rev is answered `error: stale: …` and changes nothing) and `ttlMs` (a request that arrived longer ago than that is dropped, `error: expired: …`). A Drover that predates protocol 2 **ignores both fields and applies the request**, so a sender first probes and sends them only after `ok: protocol 2`. The `drover` CLI has no verb for this; write the request file the way the CLI does (`<home>` is the app home, `~/.config/herdr-app`), on omarchy:
+6. Protocol 2 checks, run from the laptop the way the laptop sender delivers a request (see [Remote writes from the laptop](#remote-writes-from-the-laptop)). A request file may carry `ifRev` (the card rev the sender saw: another rev is answered `error: stale: …` and changes nothing) and `ttlMs` (a request that arrived longer ago than that is dropped, `error: expired: …`). A Drover that predates protocol 2 **ignores both fields and applies the request**, so a sender first probes and sends them only after `ok: protocol 2`. The owner approves the throwaway card first: **T-MWHY5II1Q7J** in project **P-MWHWCPE3514** on omarchy. Nothing below prints an rc file or the environment.
 
    ```sh
-   send() { d=<home>/data/drover-inbox; n=$(date +%s)-$$-$RANDOM; printf '%s' "$1" > "$d/.$n.tmp" && mv "$d/.$n.tmp" "$d/$n.json"; for i in $(seq 1 100); do [ -f "$d/$n.result" ] && { cat "$d/$n.result"; rm -f "$d/$n.result"; return; }; sleep 0.1; done; echo "no answer"; }
-   send '{"op":"protocol"}'                                   # protocol 2: "ok: protocol 2"; an older Drover: "error: Unknown drover command"
-   drover add "zz-stale-probe" --desc "throwaway"             # prints the card id <T-…>
-   send '{"op":"move","id":"<T-…>","column":"todo","ifRev":999999}'   # "error: stale: card <T-…> is at rev 0, request saw 999999 …"
-   drover task <T-…>                                          # still in backlog: the stale move changed nothing
+   D=.config/herdr-app/data/drover-inbox                       # relative to omarchy's home, as `hc file read` takes it
+   send() {                                                    # send '<json>' -> prints the answer (the result file) or "no answer"
+     n="Lprobe-$(printf '%012d' $RANDOM$RANDOM)"                # nonce: L + origin + - + 12 characters, [A-Za-z0-9-] only
+     printf '%s' "$1" | hc file write --on omarchy "$D/.$n.tmp" || return 1      # step 1: staged under a dot name, the consumer ignores it
+     f=$(hc exec --on omarchy sh -c 'd=$HOME/.config/herdr-app/data/drover-inbox; f=$(date +%s)-$0; mv "$d/.$0.tmp" "$d/$f.json" && echo "$f.json"' "$n") || return 1   # step 2: omarchy stamps the name
+     for i in 1 2 3 4 5 6 7 8 9 10; do sleep 1; hc file read --on omarchy "$D/${f%.json}.result" 2>/dev/null && return; done; echo "no answer"
+     hc exec --on omarchy sh -c 'rm -- "$HOME/.config/herdr-app/data/drover-inbox/$0"' "${f%.json}.result" 2>/dev/null   # best effort: the 24 h cleanup gets the rest
+   }
+   send '{"op":"protocol","ttlMs":30000}'      # protocol 2: "ok: protocol 2"; an older Drover: "error: Unknown drover command"
    ```
 
-   A card that was never written since protocol 2 has no rev and counts as 0, so `"ifRev":0` applies to it. The owner archives or leaves `zz-stale-probe`.
+   Then the negative probe: a move with an `ifRev` that is not the card's current rev must be refused and change nothing. Read only the card's rev (this prints one number, not the board):
 
-Not covered yet: the card that turns on laptop writes runs these checks live on omarchy and requires them. This redeploy is not approval for laptop writes: the laptop does not send `project-add`, or any other write, to omarchy. Keep every command's raw output in the work folder; never print an rc file or the environment (`service.env`, `env`, `printenv`).
+   ```sh
+   REV=$(hc file read --on omarchy .config/herdr-app/shared.json | python3 -c 'import json,sys; t=[x for x in json.load(sys.stdin)["drover.tasks"] if x["id"]=="T-MWHY5II1Q7J"][0]; print(t.get("rev",0))')
+   BAD=$(( REV > 0 ? REV - 1 : 999999 ))                      # lower than the card's rev (a card never written since protocol 2 has no rev and counts as 0)
+   send "{\"op\":\"move\",\"id\":\"T-MWHY5II1Q7J\",\"column\":\"todo\",\"ifRev\":$BAD,\"ttlMs\":120000}"   # "error: stale: card T-MWHY5II1Q7J is at rev <REV>, request saw <BAD> …"
+   hc file read --on omarchy .config/herdr-app/shared.json | python3 -c 'import json,sys; t=[x for x in json.load(sys.stdin)["drover.tasks"] if x["id"]=="T-MWHY5II1Q7J"][0]; print(t["column"], t.get("rev",0))'   # unchanged
+   ```
+
+   The owner archives or leaves the throwaway card. Keep every command's raw output in the work folder.
+
+This redeploy is not approval for laptop writes: the laptop turns them on only after its own probe answers `ok: protocol 2` (see below).
+
+## Rollback
+
+Go back to the previous mods only in this order. A protocol 2 consumer is the only one that expires or rejects a request: time passing on disk does not drop a file, and a Drover that predates protocol 2 would **apply** an old `ifRev`/`ttlMs` request unconditionally. So the protected requests must be drained while v2 is still running.
+
+1. **Freeze the senders.** On the laptop, open each remote project in the Projects editor and press **Turn writes off**. Wait until it says **frozen**: that shows only when no send from any Drover mod is still travelling (every send has finished or hit its 10 s deadline). New sends are refused from the first click. If this step is skipped, the laptop still stops writing within 60 s of step 5, because its protocol probe answer ages out.
+2. **Drain check**, with the v2 unit still running. The script fails closed: exit 0 only if the inbox was listed, there is no `.*.tmp` staging file (a delivery in flight) and no `*.json` request contains `ifRev` or `ttlMs`. Anything else, including an unreadable or missing folder, is non-zero:
+
+   ```sh
+   ssh omarchy 'bash -lc "~/.local/share/herdr-app/checkout/deploy/omarchy/drain-check.sh"'; echo "exit=$?"   # one line; exit=0 or stop here
+   ```
+
+   Non-zero: wait for the v2 consumer to answer the queued requests (each is applied, or answered `stale`/`expired`), then run it again. Never stop the unit with a non-zero result.
+3. Stop the unit (as in Update the mods, step 2).
+4. **Restore the previous mods.** Check out the previous commit on the laptop (a separate worktree), then rsync that tree and rerun the installer exactly as in step 3 of Update the mods. Start the unit (step 4).
+5. **Re-probe.** The v1 consumer answers the protocol probe `error: Unknown drover command`:
+
+   ```sh
+   send '{"op":"protocol","ttlMs":30000}'    # the send() function from Update the mods, step 6
+   ```
+
+   The laptop's own probe gets the same answer, so its write controls show "omarchy needs the update" (hc stays connected through a rollback, so this is the 60 s freshness rule at work). Leave **Turn writes off** on until the owner redeploys v2.
+
+Residual risk: a send whose owner died is counted as in flight for 240 s only, so "frozen" can show before a rename that was already on its way; that rename would then land an already-expired file.
+
+`drain-check.sh` (exit 0 required) is the authoritative gate, not the "frozen" label: never skip step 2.
+
+### Test of the rollback on a disposable copy
+
+Nothing here touches omarchy or the real inbox; both run on any machine with `node`/`bash`:
+
+- [`mods/_test/inbox-expired-add.test.js`](../../mods/_test/inbox-expired-add.test.js): an `add` whose TTL passed while the consumer was stopped creates no card and is answered `error: expired`; and the rollback order itself: with an expired `add` and an expired `move` left on disk, the drain check fails (protected requests queued), the v2 drain then drops both with `error: expired` (files gone, board byte-equal), and the drain check passes. This is the v2-before-v1 ordering: v1 never sees a file to apply.
+- [`deploy/omarchy/drain-check.test.sh`](../../deploy/omarchy/drain-check.test.sh): each case runs on its own temp inbox: a `.tmp` present fails; a missing, unreadable or non-directory inbox fails; an unreadable request file fails; a request with `ifRev` or `ttlMs` fails; an empty inbox and one with only CLI files pass.
+
+Run them with `node --test mods/_test/inbox-expired-add.test.js` and `deploy/omarchy/drain-check.test.sh`. For a hands-on copy, use a throwaway `HERDR_APP_HOME=$(mktemp -d)` and point `drain-check.sh <dir>` at its `data/drover-inbox`.
+
+## Remote writes from the laptop
+
+A project bound to omarchy (Projects editor → Remote) shows omarchy's board on the laptop. With writes on, the laptop can move, edit, note, add and archive cards there; it never starts agents, wakes or `next` on omarchy (those controls stay off: "not available for omarchy projects yet"). The project must already exist on omarchy.
+
+- **Gate.** Writes are on only while the board copy is fresh, the binding's **Writes to omarchy** setting is on, and the last protocol probe answered `ok: protocol 2` less than 60 s ago. Otherwise every write control is off and says why ("omarchy needs the update", "omarchy unreachable", "Checking omarchy…", "writes frozen"). Nothing is sent and nothing is queued for later.
+- **Each request** carries the card's version (`ifRev`, the cached card's `rev`) and a 120 s `ttlMs` (the `add` too). omarchy applies it or answers `error: stale` (the card changed there: the laptop reloads and shows "card changed on omarchy") or `error: expired` ("not applied, too old"). No answer in 10 s shows "sent, may still apply"; the late result is picked up later, and an entry older than the TTL plus 1 h shows "outcome unknown". The laptop never resends.
+- **Transport.** The mod API has no stdin, so the JSON travels as an argument of a local `sh`, which pipes it into `hc file write --on omarchy` to a dot-named `.<nonce>.tmp` in `data/drover-inbox` (the consumer ignores dot files). A second call, `hc exec --on omarchy sh -c '… mv …' <nonce>`, renames it to `<epoch>-<nonce>.json`, the epoch coming from **omarchy's** `date +%s` (that name is the arrival time the TTL is measured from). The payload is never in a remote argument or script; the nonce is `$0` only. If the second call's reply is lost the laptop finds the file by its nonce and never resends.
+- **Cleanup.** Results that nobody read and staging files from a failed rename stay on omarchy. At each reconnect the laptop removes its own (`-L<origin>-` results, `.L<origin>-*.tmp` files) once older than 24 h; other origins' files are never touched.
+- **Creating from any create modal.** The Project chip of the create modal lists local projects and omarchy-bound ones (labelled with the machine). Picking an omarchy project sends an `add` to omarchy's inbox (never a local card), and the route follows the project picked at the moment of Create. An existing card's project cannot be changed: no inbox op moves a card between projects or machines.
+- **Freeze.** **Turn writes off** in the Projects editor is the switch used by the rollback above.
 
 ## Uninstall
 

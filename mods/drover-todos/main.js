@@ -13,8 +13,9 @@ import { routeSend, liveAgent, subIssues, foldNotes, ago, initialOf, mix, noteRe
 import { age } from "./sources.js";
 import { bind, cfg, isEnabled, whenLoaded, load as loadCfg, ready as cfgReady } from "./config.js";
 import { gated } from "./ui.js";
-import { load, save, edit, loadProjects, loadConfig, launch, sendToAgent, loadRuns, loadWakes, loadContext, jiraSite, mergeContext, openUrl, HEARTBEAT_MS, startOptions, beatCreateGuard, clearCreateGuard, modSettings, loadMerged, watchRemote, retryRemote } from "./io.js";
-import { READONLY_TIP, remoteCardRows } from "./remote.js";
+import { load, save, edit, loadProjects, loadConfig, launch, sendToAgent, loadRuns, loadWakes, loadContext, jiraSite, mergeContext, openUrl, HEARTBEAT_MS, startOptions, beatCreateGuard, clearCreateGuard, modSettings, loadMerged, watchRemote, retryRemote, remoteSend, remoteWriteState, takeRemoteOutcomes } from "./io.js";
+import { controlState, statusLine, editOps, addOp, archiveOp, moveOp, outcomeText, applied, OFF_TIP } from "./remote-write-ui.js";
+import { remoteCardRows } from "./remote.js";
 
 const I = (name) => `mods/drover-todos/icons/${name}.svg`;
 const pad = (n) => String(n).padStart(2, "0");
@@ -41,8 +42,14 @@ const button = (t, id, text, primary, action) =>
 export class Editor {
   constructor(cx) {
     const p = props();
-    this.task = p.edit ? load().find((x) => x.id === p.edit) : null;
-    const t = this.task ?? { title: "", desc: "", priority: "P2", tags: [], column: p.column };
+    // A card of a project on another machine (T-MWHVWR8TIJB) uses this same dialog: no local task behind it, the writes go to the remote writer.
+    // fixedRemote: an existing card of an omarchy project (its baseline moves with each saved edit). A create is routed from the project picked NOW (get remote()).
+    this.fixedRemote = p.remoteCard && !p.remoteCard.new ? p.remoteCard : null;
+    const rc = p.remoteCard ?? null;
+    this.sent = new Map(); // nonce -> the op that is still "may still apply": a late Saved moves the baseline, any other late outcome keeps the draft
+    this.msg = "";
+    this.task = p.edit && !this.remote ? load().find((x) => x.id === p.edit) : null;
+    const t = rc ? { title: rc.title ?? "", desc: rc.desc ?? "", priority: rc.priority ?? "P2", tags: [...(rc.tags ?? [])], column: rc.column ?? p.column, project: rc.project } : this.task ?? { title: "", desc: "", priority: "P2", tags: [], column: p.column };
     this.priority = t.priority;
     this.column = t.column;
     this.project = t.project ?? null;
@@ -50,13 +57,14 @@ export class Editor {
     this.base = { title: t.title, desc: t.desc ?? "" }; // edit: the text the editor last saw stored; only a field that differs from it is the person's edit
     this.moreOpen = false; // edit: header "…" menu
     this.confirmArchive = false;
-    this.labels = [...(this.task?.tags ?? [])];
+    this.labels = [...(rc ? t.tags : this.task?.tags ?? [])];
     this.large = p.large === true;
     this.mode = "manual"; // create only: "manual" | "agent" (both drafts stay on toggle)
     const last = shared("drover.agents.last")?.runner;
     this.runner = last?.kind === "agent" && last.id !== "drover" ? last.id : "claude"; // agent mode: who creates the cards
     this.assignee = normAssignee(this.task?.assignee); // { kind, id }: saved on the card; Create also starts it with it
     this.launch = launch; // injectable for tests
+    this.remoteSender = remoteSend; // injectable for tests
     this.sendToAgent = sendToAgent; // injectable for tests
     this.subsOpen = true; // edit: Sub-issues section expanded
     this.folds = new Set(); // edit: expanded "› N activities" groups, by index of their first note
@@ -80,7 +88,7 @@ export class Editor {
     this.hi = 0;
     this.menuFocus = cx.focus_handle();
     this.trigger = { status: cx.focus_handle(), priority: cx.focus_handle(), labels: cx.focus_handle(), assignee: cx.focus_handle(), agent: cx.focus_handle(), project: cx.focus_handle(), parent: cx.focus_handle(), send: cx.focus_handle() };
-    const d = unpackDraft(p.draft); // expand/shrink reopen: the draft comes back
+    const d = rc ? null : unpackDraft(p.draft); // expand/shrink reopen: the draft comes back
     if (d && this.task) this.pasted = d.pasted;
     else if (d) {
       Object.assign(this, { mode: d.mode, labels: d.labels, assignee: d.assignee, another: d.another, pasted: d.pasted });
@@ -117,6 +125,7 @@ export class Editor {
     this.wakeError = null;
     this.title.focus();
     cx.timer.after(300, () => this.title.focus());
+    if (rc || loadProjects().some((x) => x.remote)) watchRemote(cx, () => !this.closing); // this dialog drives the probe and the result polling for its own writes
     this.ctx = null; // issue + pull requests, refreshed while the editor is open
     this.ctxRun = undefined; // the linked run id the last refresh used
     // The dialog is never gated by the screen switch, but it reads the screen's settings (shared + mod.json) before it fixes its timer.
@@ -184,7 +193,7 @@ export class Editor {
 
   // Paste with no text: save the clipboard image under the app folder, link it in the description.
   pasteImage(cx) {
-    if (this.submitting || this.closing) return;
+    if (this.remote || this.submitting || this.closing) return; // a remote card takes no image: nothing is saved on this machine
     const prev = this.pending;
     let done;
     this.pending = new Promise((r) => (done = r));
@@ -236,6 +245,8 @@ export class Editor {
 
   // A property pick. Edit: a one-field patch on the stored task. Create: the draft changes.
   setProp(field, value, cx) {
+    if (this.fixedRemote && field === "project") return true; // no inbox op
+    if (field === "project" && this.submitting && !this.task) return false; // a Create is in flight moves a card: the project is where it is
     if (this.task) return this.patch(field, value, cx);
     const key = { status: "column", priority: "priority", assignee: "assignee", project: "project", tags: "labels" }[field];
     this[key] = value;
@@ -346,7 +357,7 @@ export class Editor {
   // Saves a valid result and returns true. The caller then runs finish().
   commit(result, cx) {
     if (result.error) { this.error = result.error; cx.notify(); return false; }
-    save(result);
+    if (save(result) === null) { this.error = "Not saved: that project belongs to another machine"; cx.notify(); return false; } // the ownership guard refused: the draft stays
     return true;
   }
 
@@ -385,7 +396,7 @@ export class Editor {
   // ⤢ / ⤡: reopen the create modal bigger or smaller with the whole draft. No finish(): the pasted files stay, the new modal owns them.
   // Wait for a paste in flight so its link is in the draft. Open first, close last: closeOverlay may cancel this view's work.
   expand(cx) {
-    if (this.closing || this.submitting) return;
+    if (this.remote || this.closing || this.submitting) return; // the draft of a remote card does not travel through the local reopen
     this.closing = true;
     cx.spawn(async (acx) => {
       await this.pending;
@@ -437,8 +448,70 @@ export class Editor {
     cx.notify();
   }
 
+  // The omarchy card this dialog works on: an existing one, or a new one when the CURRENT project pick is bound to another machine (else null: local).
+  get remote() {
+    if (this.fixedRemote) return this.fixedRemote;
+    if (this.task) return null;
+    const b = this.project && loadProjects().find((x) => x.id === this.project && x.remote);
+    return b ? { new: true, id: "", title: "", desc: "", column: this.column, priority: this.priority, tags: this.labels, notes: [], project: b.id, remote: { machine: b.remote.machine } } : null;
+  }
+  get card() { return this.remote; }
+  set card(v) { if (this.fixedRemote) this.fixedRemote = v; }
+
+  // ── a remote card: Save / Create go through the writer. Each op is sent after the one before it was saved (a save re-reads the board: the next op carries the new rev).
+  wstate() { return controlState(remoteWriteState(this.card.project)); }
+  remoteOps() {
+    const c = this.card, title = this.title.value(), desc = this.desc.value();
+    if (c.new) return [addOp({ title, desc, column: this.column, priority: this.priority, tags: this.labels })];
+    const e = editOps(c, { title, desc, note: this.note.value() }), mv = moveOp(c, this.column);
+    return [...e.filter((o) => o.op === "edit"), ...(mv ? [mv] : []), ...e.filter((o) => o.op === "note")];
+  }
+  remoteSave(cx) {
+    if (this.submitting || this.closing) return;
+    const w = this.wstate();
+    if (!w.on) { this.msg = w.tip; return cx.notify(); }
+    const ops = this.remoteOps();
+    if (!ops.length || ops.some((o) => !o)) { this.msg = this.card.new ? "A title is required" : "Nothing to save"; return cx.notify(); }
+    this.remoteRun(cx, ops, Boolean(this.card.new), this.card);
+  }
+  remoteArchive(cx) { const op = archiveOp(this.card); if (op && !this.submitting && !this.closing && this.wstate().on) this.remoteRun(cx, [op], true, this.card); }
+  // `target` is the card the submission was made for, read once when it started: nothing below reads this.card / this.remote again (the pick may move meanwhile).
+  remoteRun(cx, ops, closeOnSaved, target) {
+    this.submitting = true; this.msg = "Sending…"; this.error = null; cx.notify();
+    const stay = this.another;
+    const sub = { title: this.title.value(), desc: this.desc.value() }; // what was submitted: Create another clears the draft only if it is still this
+    cx.spawn(async (acx) => {
+      let last = null, card = target, failed = null;
+      try {
+        for (const op of ops) {
+          last = await this.remoteSender(card.project, op, acx);
+          if (last.status === "pending" && last.nonce) this.sent.set(last.nonce, op);
+          if (last.status !== "saved") break;
+          card = applied(card, op); // a saved edit becomes the baseline
+          if (this.fixedRemote) this.fixedRemote = card;
+        }
+      } catch (e) { failed = e; } finally { this.submitting = false; } // the frozen picker always unfreezes
+      if (failed) { this.msg = this.error = `Not saved: ${String(failed?.message ?? failed).split("\n")[0]}`; return acx.notify(); }
+      this.msg = outcomeText(last);
+      if (last?.status === "saved") {
+        if (closeOnSaved && !stay) { this.closing = true; return this.finish(); }
+        if (card.new) { if (this.title.value() === sub.title && this.desc.value() === sub.desc) this.clear(acx); } else this.note.set_value?.("");
+      }
+      acx.notify();
+    });
+  }
+  // A result that arrived after the wait: shown, and a Saved edit moves the baseline.
+  takeLate() {
+    for (const o of takeRemoteOutcomes()) {
+      this.msg = outcomeText(o);
+      const op = this.sent.get(o.nonce);
+      if (op) { this.sent.delete(o.nonce); if (o.status === "saved") this.card = applied(this.card, op); }
+    }
+  }
+
   // Both drafts stay; the other mode's field takes the focus.
   toggleMode(cx) {
+    if (this.remote) return; // Switch to Agent needs a local agent: off for an omarchy project
     if (this.submitting || this.closing) return;
     this.mode = this.mode === "agent" ? "manual" : "agent";
     this.menu = null;
@@ -448,6 +521,7 @@ export class Editor {
 
   // The footer button: a blank title (or prompt) does nothing (no error).
   onCreate(cx) {
+    if (this.remote) return this.remoteSave(cx);
     if (this.mode === "agent" ? canCreateAgent(this.prompt.value()) : canCreate(this.title.value())) this.submit(cx);
   }
 
@@ -460,7 +534,7 @@ export class Editor {
     this.starting = true;
     this.error = null;
     cx.notify();
-    cx.spawn(async (acx) => {
+    cx.spawn(async (acx) => { try {
       await this.pending;
       const request = this.prompt.value(); // after a pending paste: the final text
       if (!canCreateAgent(request)) { this.submitting = false; this.starting = false; acx.notify(); return; }
@@ -469,7 +543,7 @@ export class Editor {
       if (run?.error) { this.error = run.error; this.submitting = false; acx.notify(); return; }
       this.pasted = (this.pasted ?? []).filter((f) => !request.includes(f)); // the agent may read these: keep them
       if (stay) { this.submitting = false; this.prompt.set_value(""); this.prompt.focus(); acx.notify(); } else { this.closing = true; await this.finish(); }
-    });
+    } catch (e) { this.error = `Not saved: ${String(e?.message ?? e).split("\n")[0]}`; } finally { if (!this.closing) { this.submitting = false; this.starting = false; } acx.notify(); } });
   }
 
   // Cmd+Enter in the note composer adds the note; it never reaches the root handler, so it never saves.
@@ -705,11 +779,13 @@ export class Editor {
 
   submit(cx) {
     if (this.submitting || this.closing) return;
+    if (this.remote) return this.remoteSave(cx);
     if (this.mode === "agent") return this.submitAgent(cx);
     const stay = this.another;
     const assignee = this.assignee;
+    const snap = this.fields(); // the target (project, column, labels, priority…) as of the press; only the text is read again after a paste wait
     const commitNow = (cx) => {
-      const f = this.fields();
+      const f = { ...snap, title: this.title.value(), desc: this.desc.value() };
       let r = add(load(), f);
       // An assignee: save the card already claimed, in the same save, so the queue cannot start it while we launch.
       if (assignee && !r.error) { const c = claim(r.tasks, r.task.id); r = c; this.prev = c.prev; }
@@ -724,7 +800,7 @@ export class Editor {
     this.submitting = true;
     this.starting = Boolean(assignee);
     cx.notify();
-    cx.spawn(async (acx) => {
+    cx.spawn(async (acx) => { try {
       await this.pending;
       if (!commitNow(acx)) { this.submitting = false; this.starting = false; acx.notify(); return; }
       // The card exists now. A failed launch leaves it in Ready and launch() notifies the error: nothing more to do here.
@@ -738,13 +814,26 @@ export class Editor {
         this.starting = false;
       }
       if (stay) { this.submitting = false; this.clear(acx); } else { this.closing = true; await this.finish(); }
-    });
+    } catch (e) {
+      const line = String(e?.message ?? e).split("\n")[0];
+      this.error = this.created ? `${this.created.id} created, but: ${line}` : `Not saved: ${line}`;
+    } finally { if (!this.closing) { this.submitting = false; this.starting = false; } acx.notify(); } });
   }
 
   render(cx) {
     const t = theme();
+    if (this.remote) this.takeLate();
     const field = (el) => el.px(10).rounded(8).border_1().border_color(t.input).bg(t.background).text_size(13).text_color(t.foreground);
-    const projects = loadProjects().filter((p) => !p.remote); // a project on another machine takes no local card
+    const projects = loadProjects(); // remote-bound ones too: a create there goes to the machine's inbox, never into a local card
+    const projLabel = (p) => (p.remote ? `${p.name} · ${p.remote.machine}` : p.name);
+    // Why a project cannot be picked (undefined: it can). Create: a remote one needs its writes. Edit: no inbox op moves a card between machines or projects.
+    const projTip = (p) => {
+      if (this.submitting && !this.task) return "creating…"; // the target of a Create in flight does not move
+      if (this.fixedRemote) return p.id === this.project ? undefined : p.id && p.remote?.machine === this.fixedRemote.remote?.machine ? "moving a card to another project comes later" : "move between machines comes later";
+      if (this.task) return p.remote ? "move between machines comes later" : undefined;
+      if (p.remote) { const c = controlState(remoteWriteState(p.id)); return c.on ? undefined : c.tip; }
+      return undefined;
+    };
     const prio = PRIORITY_COLOR(t);
     const items = {
       status: COLUMNS.map(([id, name]) => ({ key: id, glyph: STATUS_ICON[id].icon, color: t[STATUS_ICON[id].tone], text: name, current: id === this.column, on: (cx) => this.setProp("status", id, cx) })),
@@ -760,7 +849,7 @@ export class Editor {
         ...filterParents(this.task ? parentChoices(load(), this.task.id) : [], this.parentSearch.value()).map((p) => ({ key: p.id, glyph: "↑", color: t.muted, text: parentLabel(p), hint: p.id, current: p.id === this.parent, on: (cx) => this.setProp("parent", p.id, cx) }))],
       send: this.sendOptions(t),
       project: [{ id: null, name: "No project" }, ...filterProjects(projects, this.projSearch.value())]
-        .map((p) => ({ key: p.id ?? "none", glyph: p.id ? "◆" : "–", color: t.muted, text: p.name, current: p.id === this.project, on: (cx) => this.setProp("project", p.id, cx) })),
+        .map((p) => ({ key: p.id ?? "none", glyph: p.id ? "◆" : "–", color: t.muted, text: projLabel(p), current: p.id === this.project, disabled: projTip(p), on: (cx) => this.setProp("project", p.id, cx) })),
     };
     const setOpen = (name, open, cx) => {
       this.menu = open ? name : this.menu === name ? null : this.menu;
@@ -776,7 +865,7 @@ export class Editor {
       cx.notify();
     };
     // The labels list is multi-select: a pick keeps it open.
-    const pick = (name, item, cx) => { item.on(cx); if (name === "labels") cx.notify(); else setOpen(name, false, cx); };
+    const pick = (name, item, cx) => { if (item.disabled) return; item.on(cx); if (name === "labels") cx.notify(); else setOpen(name, false, cx); };
     const onKey = (name) => (e, cx) => {
       const n = items[name].length;
       if (e.key === "escape") return setOpen(name, false, cx), cx.stop_propagation();
@@ -792,11 +881,11 @@ export class Editor {
         .child(svg(I("search")).size(13).text_color(t.dim))
         .child(Input.new({ project: this.projSearch, labels: this.labelSearch, parent: this.parentSearch }[name]).flex_1().h(26))))
       .child(v_flex().id(`items-${name}`).gap(1).overflow_y_scrollbar().children(items[name].map((it, i) =>
-        h_flex().id(`${name}-${it.key}`).h(28).px(8).gap(8).items_center().rounded(6).cursor_pointer()
+        h_flex().id(`${name}-${it.key}`).h(28).px(8).gap(8).items_center().rounded(6)
           .text_size(12).text_color(t.foreground).role("list_box_option").aria_selected(it.current)
           .when(i === this.hi, (el) => el.aria_active_descendant().bg(t.selected))
-          .hover((s) => s.bg(t.hover))
-          .on_click((_e, cx) => pick(name, it, cx))
+          .when(!it.disabled, (el) => el.cursor_pointer().hover((s) => s.bg(t.hover)).on_click((_e, cx) => pick(name, it, cx)))
+          .when(Boolean(it.disabled), (el) => el.opacity(0.5).tooltip(it.disabled))
           .child(div().w(14).text_color(it.color).child(it.glyph))
           .child(div().flex_1().min_w(0).truncate().child(it.text))
           .when(Boolean(it.hint), (el) => el.child(div().flex_none().text_size(10.5).text_color(t.dim).child(it.hint)))
@@ -841,15 +930,103 @@ export class Editor {
     const curRunner = this.assignee && runnerChoices(loadConfig()).find((c) => c.kind === this.assignee.kind && c.id === this.assignee.id);
     const curAgent = agentChoices(loadConfig()).find((c) => c.id === this.runner)?.name ?? this.runner;
     const curProject = projects.find((p) => p.id === this.project);
-    const agentMode = !this.task && this.mode === "agent";
-    const images = imageLines((agentMode ? this.prompt : this.desc).value(), appHome());
+    const agentMode = !this.task && this.mode === "agent" && !this.remote; // a remote pick has no agent mode
+    const images = this.remote ? [] : imageLines((agentMode ? this.prompt : this.desc).value(), appHome()); // no image is resolved on this machine for a remote card
     const archived = this.task?.archived;
     const cardBg = mix(t.popover, t.background, 0.30), cardBorder = mix(t.popover, t.border, 0.30); // a touch darker than the dialog, a soft edge
     const avatar = (id, name, size = 22) => div().id(id).size(size).flex_none().flex().items_center().justify_center().rounded_full().bg(t.raised).border_1().border_color(t.border)
       .text_size(size < 20 ? 9.5 : 10.5).text_color(t.muted).child(initialOf(name));
     const curParent = this.task && this.parent ? load().find((x) => x.id === this.parent) ?? null : null; // a deleted parent reads as none
+    const R = this.remote, w = R ? this.wstate() : null;
+    // A control that cannot work for an omarchy card stays visible, dimmed, with the reason as its tooltip.
+    const off = (name, icon, text, tip = OFF_TIP) => h_flex().id(`trig-${name}`).h(28).px(10).gap(6).items_center().flex_none().rounded_full().border_1().border_color(t.input)
+      .opacity(0.5).text_size(12.5).text_color(t.dim).tooltip(tip).child(svg(I(icon)).size(14).text_color(t.dim)).child(div().max_w(160).truncate().child(text));
+    // Sidebar rows that cannot change here: visible, dimmed, the reason as the tooltip. Machine is read-only information, not dimmed.
+    const sideRow = (name, label, value, tip, dim = true) => h_flex().id(`prop-${name}`).h(28).gap(4).items_center().tooltip(tip).when(dim, (el) => el.opacity(0.5))
+      .child(div().w(62).flex_none().text_size(13).text_color(t.dim).child(label))
+      .child(div().flex_1().min_w(0).px(6).truncate().text_size(13).text_color(dim ? t.dim : t.foreground).child(value));
+    // The create chip row: where the picked project lives (read-only).
+    const machinePill = (where) => h_flex().id("trig-machine").h(28).px(10).gap(6).items_center().flex_none().rounded_full().border_1().border_color(t.input)
+      .tooltip("where this card lives").text_size(12.5).text_color(t.muted).child(div().max_w(160).truncate().child(where));
+    const machineRow = (where) => sideRow("machine", "Machine", where, "where this card lives", false);
+    if (R && !R.new) {
+      if (this.fixedRemote && !this.submitting) { // the board poll is the truth for the thread: a note sent from here shows once the board was re-read
+        const fresh = loadMerged().tasks.find((x) => x.id === this.fixedRemote.id && x.project === this.fixedRemote.project);
+        if (fresh && Array.isArray(fresh.notes)) this.fixedRemote = { ...this.fixedRemote, notes: fresh.notes };
+      }
+      const rows = remoteCardRows(this.remote);
+      const ro = remoteWriteState(R.project);
+      const roText = [w.on ? null : statusLine(ro), this.msg || null].filter(Boolean).join(" · "); // nothing while writes are on and there is nothing to report
+      const rnote = (n, i) => v_flex().id(`remote-note-${i}`).flex_none().gap(8).p(12).rounded(10).border_1().border_color(cardBorder).bg(cardBg)
+        .child(h_flex().flex_none().h(24).gap(8).items_center()
+          .child(avatar(`note-avatar-${i}`, n.by))
+          .child(div().text_size(13).font_medium().truncate().child(n.by))
+          .child(div().id(`note-time-${i}`).text_size(12).text_color(t.dim).tooltip(n.at ? stamp(n.at) : "").child(ago(n.at, Date.now())))
+          .child(div().flex_1())
+          .when(Boolean(n.kind), (el) => el.child(div().id(`note-kind-${i}`).px(7).h(18).flex().items_center().rounded_full().border_1().border_color(t.border).text_size(10.5).text_color(t.muted).child(n.kind)))
+          .child(h_flex().id(`note-copy-${i}`).size(24).items_center().justify_center().rounded(6).cursor_pointer().hover((s) => s.bg(t.hover)).tooltip("Copy text")
+            .on_click((_e, cx) => cx.write_to_clipboard(n.text)).child(svg(I("copy")).size(14).text_color(t.muted))))
+        .child(div().text_size(13).line_height(1.55).child(n.text)); // plain text: nothing from omarchy is resolved here
+      const noteReadyR = this.note.value().trim().length > 0 || this.remoteOps().length > 0;
+      return v_flex().id("editor").size_full().bg(t.popover).text_color(t.foreground)
+        .on_key_down((e, cx) => { if (e.key === "escape") { if (this.menu) { this.menu = null; cx.notify(); } else this.close(cx); cx.stop_propagation(); } else this.onSubmitKey(e, cx); })
+        .child(h_flex().px(24).pt(20).items_center().gap(6).text_size(14)
+          .child(div().text_color(t.dim).child("Drover"))
+          .child(svg(I("chevron-right")).size(14).text_color(t.dim))
+          .child(h_flex().id("copy-id").px(6).py(2).gap(6).items_center().rounded(6).cursor_pointer().hover((s) => s.bg(t.hover))
+            .on_click((_e, cx) => {
+              cx.write_to_clipboard(R.id);
+              this.copied = true; cx.notify();
+              cx.timer.after(1500, (cx) => { this.copied = false; cx.notify(); });
+            })
+            .child(R.id)
+            .child(div().text_size(11).font_weight(400).text_color(this.copied ? t.done : t.dim).child(this.copied ? "Copied" : "⧉ Copy")))
+          .child(div().flex_1())
+          .child(h_flex().id("ed-close").size(28).items_center().justify_center().rounded(6).cursor_pointer().hover((s) => s.bg(t.hover))
+            .on_click((_e, cx) => this.close(cx)).child(svg(I("x")).size(16).text_color(t.muted))))
+        .when(Boolean(roText), (el) => el.child(div().id("remote-ro").px(24).pt(4).text_size(12).text_color(w.on ? t.muted : t.blocked).child(roText)))
+        .child(h_flex().id("body-row").flex_1().min_h(0)
+          .child(v_flex().id("main-col").h_full().flex_1().min_w(0).min_h(0).px(24).pt(16).pb(12).gap(10)
+            .child(v_flex().id("thread").flex_1().min_h(0).overflow_y_scrollbar().gap(14)
+              .child(Input.new(this.title).h(40).flex_none().text_size(22).font_semibold())
+              .child(v_flex().id("desc-block").flex_none().w_full().child(Textarea.new(this.desc).text_size(14)))
+              .child(h_flex().id("activity-header").flex_none().h(28).gap(8).items_center().child(div().text_size(13).font_medium().child("Activity"))
+                .when(rows.notes.length > 0, (el) => el.child(div().text_size(12).text_color(t.muted).child(String(rows.notes.length)))))
+              .child(v_flex().id("notes").flex_none().gap(10).children(foldNotes(rows.notes).map((item) => {
+                if (item.type === "note") return rnote(item.note, item.index);
+                const first = item.notes[0].index, open = this.folds.has(first);
+                return v_flex().id(`fold-group-${first}`).flex_none().gap(10)
+                  .child(h_flex().id(`fold-${first}`).h(30).px(12).items_center().rounded(8).bg(t.raised).cursor_pointer().text_size(12).text_color(t.muted)
+                    .hover((x) => x.bg(t.hover)).on_click((_e, cx) => this.toggleFold(first, cx)).child(open ? `▾ ${item.count} activities` : item.label))
+                  .children(open ? item.notes.map((n) => rnote(n, n.index)) : []);
+              }))))
+            .child(v_flex().id("composer").flex_none()
+              .child(v_flex().id("remote-note-new").gap(4).p(8).rounded(10).border_1().border_color(t.input).bg(t.background)
+                .child(Textarea.new(this.note).h(64).text_size(13).border_0())
+                .child(h_flex().items_center().gap(8).child(div().flex_1())
+                  .child(w.on && !this.submitting ? button(t, "remote-archive", "Archive", false, (_e, cx) => this.remoteArchive(cx))
+                    : div().id("remote-archive").h(30).px(12).flex().items_center().rounded(7).border_1().border_color(t.input).text_color(t.dim).text_size(12.5).opacity(0.5).tooltip(w.tip ?? "Sending…").child("Archive"))
+                  .child(h_flex().id("ed-create").h(32).px(14).gap(8).items_center().rounded(8).cursor_pointer()
+                    .bg(w.on && !this.submitting ? t.solid : t.raised).text_color(w.on && !this.submitting ? t.solid_foreground : t.dim).text_size(13).font_medium()
+                    .when(!w.on, (el) => el.tooltip(w.tip))
+                    .when(w.on, (el) => el.on_click((_e, cx) => this.onCreate(cx)))
+                    .child("Save").child(keycap(t, "command", noteReadyR)).child(keycap(t, "corner-down-left", noteReadyR)))))))
+          .child(v_flex().id("ed-sidebar").w(240).flex_none().h_full().border_l_1().border_color(t.border).p(12).gap(2).overflow_y_scrollbar()
+            .child(section(t, "Properties"))
+            .child(row("status", "Status", "", t[STATUS_ICON[this.column]?.tone], COLUMN_NAME[this.column], Select, null, true, "circle"))
+            .child(sideRow("priority", "Priority", `${this.priority} ${PRIORITY_LABEL[this.priority]}`, OFF_TIP))
+            .child(sideRow("assignee", "Assignee", rows.agentText ?? "No assignee", OFF_TIP))
+            .child(sideRow("labels", "Labels", this.labels.length ? this.labels.join(", ") : "No labels", OFF_TIP))
+            .child(row("project", "Project", "", t.muted, curProject ? projLabel(curProject) : "project", Combobox, null, true, "folder"))
+            .child(machineRow(R.remote?.machine || "another machine"))
+            .child(sideRow("parent", "Parent", "No parent", OFF_TIP))
+            .child(section(t, "Run"))
+            .child(div().id("remote-run-off").text_size(12).text_color(t.dim).child(`Run: ${OFF_TIP}`))
+            .child(section(t, "Wakeups"))
+            .child(div().id("remote-wake-off").text_size(12).text_color(t.dim).child(`Wakeups: ${OFF_TIP}`))));
+    }
     if (!this.task) {
-      const ready = agentMode ? canCreateAgent(this.prompt.value()) : canCreate(this.title.value());
+      const ready = R ? w.on && !this.submitting && (!R.new || canCreate(this.title.value())) : agentMode ? canCreateAgent(this.prompt.value()) : canCreate(this.title.value());
       const knob = div().size(16).flex_none().rounded_full().bg(t.foreground).when(this.another, (el) => el.ml(14));
       return v_flex().id("editor").size_full().bg(t.popover).text_color(t.foreground)
         .on_key_down((e, cx) => {
@@ -859,9 +1036,9 @@ export class Editor {
         .child(h_flex().px(24).pt(20).items_center().gap(6).text_size(14)
           .child(div().text_color(t.dim).child("Drover"))
           .child(svg(I("chevron-right")).size(14).text_color(t.dim))
-          .child(div().flex_1().text_color(t.foreground).child(agentMode ? "Create with agent" : "Create manually"))
-          .child(h_flex().id("ed-expand").size(28).items_center().justify_center().rounded(6).cursor_pointer().hover((s) => s.bg(t.hover))
-            .on_click((_e, cx) => this.expand(cx)).child(svg(I(this.large ? "minimize-2" : "maximize-2")).size(16).text_color(t.muted)))
+          .child(div().flex_1().text_color(t.foreground).child(R && !R.new ? R.id : agentMode ? "Create with agent" : "Create manually"))
+          .when(!R, (el) => el.child(h_flex().id("ed-expand").size(28).items_center().justify_center().rounded(6).cursor_pointer().hover((s) => s.bg(t.hover))
+            .on_click((_e, cx) => this.expand(cx)).child(svg(I(this.large ? "minimize-2" : "maximize-2")).size(16).text_color(t.muted))))
           .child(h_flex().id("ed-close").size(28).items_center().justify_center().rounded(6).cursor_pointer().hover((s) => s.bg(t.hover))
             .on_click((_e, cx) => this.close(cx)).child(svg(I("x")).size(16).text_color(t.muted))))
         .child(v_flex().flex_1().min_h(0).px(24).pt(16).pb(12).gap(10)
@@ -871,30 +1048,42 @@ export class Editor {
           .when(images.length > 0, (el) => el.child(h_flex().flex_wrap().gap(6).children(images.map((p) =>
             div().rounded(6).overflow_hidden().border_1().border_color(t.input).child(image(p).h(64).max_w(160))))))
           .when(Boolean(this.error), (el) => el.child(div().text_size(12).text_color(t.blocked).child(this.error)))
+          .when(Boolean(R) && (!w.on || Boolean(this.msg)), (el) => el.child(div().id("remote-ro").text_size(12).text_color(w.on ? t.muted : t.blocked).child([w.on ? null : statusLine(remoteWriteState(R.project)), this.msg || null].filter(Boolean).join(" · "))))
+          .when(Boolean(R) && !R.new, (el) => el.children(remoteCardRows(R).notes.map((n, i) => v_flex().id(`remote-note-${i}`).p(10).gap(4).rounded(8).border_1().border_color(t.border)
+            .child(div().text_size(11.5).text_color(t.dim).child(`${n.by}${n.kind ? ` · ${n.kind}` : ""}${n.at ? ` · ${stamp(n.at)}` : ""}`))
+            .child(div().text_size(13).child(n.text)))))
+          .when(Boolean(R) && !R.new, (el) => el.child(v_flex().id("remote-note-new").p(8).rounded(8).border_1().border_color(t.input).bg(t.background).child(Textarea.new(this.note).h(64).text_size(13).border_0())))
           .when(Boolean(curRunner) && !agentMode && !this.task, (el) => el.child(div().text_size(12).text_color(t.muted).child(startHint(curRunner.name))))
-          .when(agentMode, (el) => el.child(h_flex().gap(8).items_center().child(row("project", "Project", "", t.muted, curProject?.name ?? "No project", Combobox, "folder"))))
+          .when(agentMode, (el) => el.child(h_flex().gap(8).items_center().child(row("project", "Project", "", t.muted, curProject ? projLabel(curProject) : "No project", Combobox, "folder"))))
           .when(!agentMode, (el) => el.child(h_flex().gap(8).items_center()
             .child(row("status", "Status", "", t[STATUS_ICON[this.column]?.tone], COLUMN_NAME[this.column], Select, "circle"))
-            .child(row("priority", "Priority", "", prio[this.priority], `${this.priority} ${PRIORITY_LABEL[this.priority]}`, Select, "signal"))
-            .child(row("assignee", "Assignee", "", t.muted, curRunner?.name ?? "Assignee", Select, "user"))
-            .child(row("labels", "Labels", "", t.muted, this.labels.length ? this.labels.join(", ") : "Add label", Combobox, "tag"))
-            .child(row("project", "Project", "", t.muted, curProject?.name ?? "No project", Combobox, "folder")))))
+            .child(R && !R.new ? off("priority", "signal", `${this.priority} ${PRIORITY_LABEL[this.priority]}`) : row("priority", "Priority", "", prio[this.priority], `${this.priority} ${PRIORITY_LABEL[this.priority]}`, Select, "signal"))
+            .child(R ? off("assignee", "user", "Assignee") : row("assignee", "Assignee", "", t.muted, curRunner?.name ?? "Assignee", Select, "user"))
+            .child(R && !R.new ? off("labels", "tag", this.labels.length ? this.labels.join(", ") : "Add label") : row("labels", "Labels", "", t.muted, this.labels.length ? this.labels.join(", ") : "Add label", Combobox, "tag"))
+            .child(row("project", "Project", "", t.muted, curProject ? projLabel(curProject) : "No project", Combobox, "folder"))
+            .child(machinePill(R ? R.remote?.machine || "another machine" : "Local")))))
         .child(div().w_full().h(1).flex_none().bg(t.border))
         .child(h_flex().px(24).h(60).flex_none().items_center().gap(14)
-          .child(h_flex().id("ed-attach").size(28).items_center().justify_center().rounded(6).cursor_pointer().hover((s) => s.bg(t.hover))
-            .on_click((_e, cx) => { this.pasteImage(cx); this.desc.focus(); }).child(svg(I("paperclip")).size(16).text_color(t.muted)))
-          .child(h_flex().id("ed-mode").h(28).px(10).items_center().rounded(6).cursor_pointer().bg(t.accent).opacity(0.9).text_size(12.5).text_color(t.solid_foreground)
-            .hover((s) => s.opacity(1)).on_click((_e, cx) => this.toggleMode(cx)).child(agentMode ? "⇄ Switch to Manual" : "⇄ Switch to Agent"))
+          .child(R ? h_flex().id("ed-attach").size(28).items_center().justify_center().rounded(6).opacity(0.5).tooltip(OFF_TIP).child(svg(I("paperclip")).size(16).text_color(t.dim))
+            : h_flex().id("ed-attach").size(28).items_center().justify_center().rounded(6).cursor_pointer().hover((s) => s.bg(t.hover))
+              .on_click((_e, cx) => { this.pasteImage(cx); this.desc.focus(); }).child(svg(I("paperclip")).size(16).text_color(t.muted)))
+          .child(R ? h_flex().id("ed-mode").h(28).px(10).items_center().rounded(6).bg(t.accent).opacity(0.5).text_size(12.5).text_color(t.solid_foreground).tooltip(OFF_TIP).child("⇄ Switch to Agent")
+            : h_flex().id("ed-mode").h(28).px(10).items_center().rounded(6).cursor_pointer().bg(t.accent).opacity(0.9).text_size(12.5).text_color(t.solid_foreground)
+              .hover((s) => s.opacity(1)).on_click((_e, cx) => this.toggleMode(cx)).child(agentMode ? "⇄ Switch to Manual" : "⇄ Switch to Agent"))
           .child(div().flex_1())
-          .child(h_flex().gap(8).items_center()
+          .when(Boolean(R) && !R.new, (el) => el.child(R && w.on && !this.submitting
+            ? button(t, "remote-archive", "Archive", false, (_e, cx) => this.remoteArchive(cx))
+            : div().id("remote-archive").h(30).px(12).flex().items_center().rounded(7).border_1().border_color(t.input).text_color(t.dim).text_size(12.5).opacity(0.5).tooltip(w?.tip ?? "Sending…").child("Archive")))
+          .when(!R || R.new, (el) => el.child(h_flex().gap(8).items_center()
             .child(Switch.new("create-another").w(34).h(20).p(2).flex_none().items_center().rounded_full().cursor_pointer()
               .bg(this.another ? t.solid : t.raised).border_1().border_color(this.another ? t.solid : t.input)
               .checked(this.another).on_change((v, cx) => { this.another = v; cx.notify(); }).child(knob))
-            .child(div().text_size(13).text_color(t.muted).child("Create another")))
+            .child(div().text_size(13).text_color(t.muted).child("Create another"))))
           .child(h_flex().id("ed-create").h(32).px(14).gap(8).items_center().rounded(8).cursor_pointer()
             .bg(ready ? t.solid : t.raised).text_color(ready ? t.solid_foreground : t.dim).text_size(13).font_medium()
-            .on_click((_e, cx) => this.onCreate(cx))
-            .child(this.starting ? "Starting…" : agentMode ? "Create" : "Create task").child(keycap(t, "command", ready)).child(keycap(t, "corner-down-left", ready))));
+            .when(Boolean(R) && !w.on, (el) => el.tooltip(w.tip))
+            .when(!R || w.on, (el) => el.on_click((_e, cx) => this.onCreate(cx)))
+            .child(this.starting ? "Starting…" : agentMode ? "Create" : R && !R.new ? "Save" : "Create task").child(keycap(t, "command", ready)).child(keycap(t, "corner-down-left", ready))));
     }
     // Edit: the create shell. Text on the left, a fixed empty sidebar slot on the right (properties arrive there).
     const notes = [...(load().find((x) => x.id === this.task.id)?.notes ?? [])]; // oldest first, like a thread
@@ -1147,7 +1336,8 @@ export class Editor {
           .child(row("priority", "Priority", "", prio[this.priority], `${this.priority} ${PRIORITY_LABEL[this.priority]}`, Select, null, true, "signal"))
           .child(row("assignee", "Assignee", "", t.muted, curRunner?.name ?? "No assignee", Select, null, true, "user"))
           .child(row("labels", "Labels", "", t.muted, this.labels.length ? this.labels.join(", ") : "Add label", Combobox, null, true, "tag"))
-          .child(row("project", "Project", "", t.muted, curProject?.name ?? "No project", Combobox, null, true, "folder"))
+          .child(row("project", "Project", "", t.muted, curProject ? projLabel(curProject) : "No project", Combobox, null, true, "folder"))
+          .child(machineRow("Local"))
           .child(row("parent", "Parent", "↑", t.muted, curParent ? parentLabel(curParent) : "No parent", Combobox, null, true))
           .when(Boolean(curParent), (el) => el.child(h_flex().id("parent-open").px(8).py(4).rounded(6).cursor_pointer().hover((s) => s.bg(t.hover)).text_size(11.5).text_color(t.accent)
             .on_click((_e, cx) => this.openParent(curParent.id, cx)).child(`Open ${curParent.id}`)))
@@ -1156,36 +1346,8 @@ export class Editor {
   }
 }
 
-// A card of a project on another machine: plain text, no control that writes, no image or file resolved on this machine (T-MWHVWQNL2HA).
-export class RemoteCardView {
-  render(_cx) {
-    const t = theme();
-    const v = remoteCardRows(props().remoteCard);
-    const row = (label, value) => h_flex().gap(10).text_size(12.5).child(div().w(70).flex_none().text_color(t.dim).child(label)).child(div().flex_1().min_w(0).child(value));
-    return v_flex().id("remote-card").w_full().p(18).gap(10).bg(t.popover).text_color(t.foreground)
-      .on_key_down((e, cx) => { if (e.key === "escape") { closeOverlay(props().overlay); cx.stop_propagation(); } })
-      .child(h_flex().gap(8).items_center()
-        .child(div().text_size(11).text_color(t.dim).child(v.id))
-        .child(chip(t, v.machine, t.accent))
-        .child(div().flex_1())
-        .child(div().text_size(11).text_color(t.dim).child("Esc")))
-      .child(div().id("remote-title").text_size(15).font_semibold().child(v.title))
-      .child(div().id("remote-ro").text_size(12).text_color(t.muted).tooltip(READONLY_TIP).child(READONLY_TIP))
-      .child(row("Status", COLUMN_NAME[v.column] ?? v.column))
-      .child(row("Priority", v.priority))
-      .when(v.tags.length > 0, (el) => el.child(row("Labels", v.tags.map((g) => `#${g}`).join(" "))))
-      .when(Boolean(v.agentText), (el) => el.child(row("Agent", v.agentText)))
-      .when(v.desc.trim() !== "", (el) => el.child(div().id("remote-desc").text_size(13).child(v.desc)))
-      .children(v.notes.map((n, i) => v_flex().id(`remote-note-${i}`).p(10).gap(4).rounded(8).border_1().border_color(t.border)
-        .child(div().text_size(11.5).text_color(t.dim).child(`${n.by}${n.kind ? ` · ${n.kind}` : ""}${n.at ? ` · ${stamp(n.at)}` : ""}`))
-        .child(div().text_size(13).child(n.text))))
-      .child(h_flex().pt(8).child(div().flex_1()).child(button(t, "remote-close", "Close", false, () => closeOverlay(props().overlay))));
-  }
-}
-
 export default class Todos extends View {
   init(_props, cx) {
-    if (props()?.overlay && props().remoteCard) { this.editor = new RemoteCardView(); return; }
     if (props()?.overlay && "edit" in props()) {
       bind({ shared, modSettings });
       this.editor = new Editor(cx);

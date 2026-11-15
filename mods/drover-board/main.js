@@ -6,7 +6,8 @@ import { v_flex, h_flex, InputState, Input, Popover } from "gpui-base";
 import { agents, terminals, theme, shared } from "herdr";
 import { liveAgents } from "./runs.js";
 import { COLUMNS, STATUS_ICON, projectOf, shiftVisible, reorder, matches, sorted, updatedAgo, clampText, sortCards, archiveDone, SORT_MODES, SCOPES, inScope, checklistProgress, ringGlyph, menuChange, FILTER_FIELDS, toggleFilter, clearFilters, matchesFilter, filterValues, searchFilters, filterChips, assigneeText } from "./store.js";
-import { load, loadProjects, loadRuns, loadConfig, save, edit, pick, openUrl, watchInbox, modSettings, loadMerged, watchRemote, retryRemote } from "./io.js";
+import { load, loadProjects, loadRuns, loadConfig, save, edit, pick, openUrl, watchInbox, modSettings, loadMerged, watchRemote, retryRemote, remoteSend, remoteWriteState, takeRemoteOutcomes } from "./io.js";
+import { OFF_TIP, controlState, statusLine, moveOp, shiftOp, outcomeText } from "./remote-write-ui.js";
 import { READONLY_TIP } from "./remote.js";
 import { bind, cfg, isEnabled, whenLoaded } from "./config.js";
 import { gated } from "./ui.js";
@@ -114,8 +115,27 @@ export default class Board extends View {
 
   drop(col, beforeId, cx) {
     const id = this.drag; this.drag = null; this.over = null;
-    if (id && id !== beforeId && !this.isRemote(id)) save(reorder(load(), id, col, beforeId));
+    const rc = id ? loadMerged().tasks.find((x) => x.id === id && x.remote) : null;
+    if (rc) { const op = this.wstate(rc).on ? moveOp(rc, col) : null; if (op) this.rsend(rc.project, op, cx); } // a remote card moves through omarchy's inbox, to the column only
+    else if (id && id !== beforeId) save(reorder(load(), id, col, beforeId));
     cx.notify();
+  }
+
+  // Remote write controls (T-MWHVWR8TIJB): the state comes from io.js, the ops from remote-write-ui.js; remote-write.js builds the request.
+  wstate(card) { return controlState(remoteWriteState(card.project)); }
+  async rsend(localId, op, cx) { const o = await remoteSend(localId, op, cx); this.msg = outcomeText(o); cx.notify(); return o; }
+  remoteScopeId() { return this.scope.startsWith("project:") && loadMerged().remotes.find((r) => `project:${r.localId}` === this.scope)?.localId || null; }
+  // A new card on a remote project: the read-only card view opens in "new" mode (Save sends an add).
+  newRemote(column, localId) {
+    const r = loadMerged().remotes.find((x) => x.localId === localId);
+    edit(null, column, undefined, undefined, undefined, { new: true, id: "", title: "", desc: "", column, priority: "P2", tags: [], notes: [], project: localId, remote: { machine: r?.machine ?? "" } });
+  }
+  // The "New" / "+" control: local scope opens the editor, a remote scope sends an add when writes are on, else it is off with the reason.
+  addControl(id, mk, localColumn) {
+    const rid = this.remoteScopeId();
+    if (!rid) return mk(null, () => edit(null, localColumn));
+    const w = controlState(remoteWriteState(rid));
+    return mk(w.on ? null : w.tip, w.on ? () => this.newRemote(localColumn, rid) : null);
   }
 
   isRemote(id) { return Boolean(loadMerged().tasks.find((x) => x.id === id)?.remote); }
@@ -128,9 +148,9 @@ export default class Board extends View {
     let r = c < 0 ? -1 : cols[c].cards.findIndex((x) => x.id === this.selected);
     const card = c < 0 ? null : cols[c].cards[r];
     const k = e.key;
-    if (k === "n") return this.remoteScope() ? undefined : edit(null, this.newColumn());
+    if (k === "n") { const rid = this.remoteScopeId(); return rid ? (controlState(remoteWriteState(rid)).on ? this.newRemote(this.newColumn(), rid) : undefined) : edit(null, this.newColumn()); }
     if (c < 0) { this.selected = cols.find((col) => col.cards.length)?.cards[0]?.id ?? null; return cx.notify(); }
-    if (e.modifiers.shift && (k === "left" || k === "right") && card.remote) return; // read-only: moves are off
+    if (e.modifiers.shift && (k === "left" || k === "right") && card.remote) { const op = this.wstate(card).on ? shiftOp(card, this.visibleIds(), k === "left" ? -1 : 1) : null; if (op) this.rsend(card.project, op, cx); return; }
     if (e.modifiers.shift && (k === "left" || k === "right")) save(shiftVisible(load(), card.id, k === "left" ? -1 : 1, this.visibleIds()));
     else if (k === "enter") return edit(card.id, undefined, undefined, undefined, undefined, card.remote ? card : undefined);
     else if (k === "s") return card.remote ? undefined : pick(card.id);
@@ -154,7 +174,8 @@ export default class Board extends View {
       .on_click((_e, cx) => { cx.stop_propagation(); this.dismissPops(); action(cx); }).child(svg(I(name)).size(size));
 
     // A disabled control on a remote card: dim, no action, the tooltip says why.
-    const off = (id, name) => div().id(id).w(22).h(22).flex().items_center().justify_center().rounded(5).text_color(t.dim).opacity(0.5).tooltip(READONLY_TIP).child(svg(I(name)).size(13));
+    const off = (id, name, tip = READONLY_TIP) => div().id(id).w(22).h(22).flex().items_center().justify_center().rounded(5).text_color(t.dim).opacity(0.5).tooltip(tip).child(svg(I(name)).size(13));
+    for (const o of takeRemoteOutcomes()) this.msg = outcomeText(o); // a result that arrived after the wait
     const merged = loadMerged();
     const staleNow = (x) => merged.remotes.some((r) => r.localId === x.project && r.state !== "fresh");
     const projects = loadProjects();
@@ -167,7 +188,10 @@ export default class Board extends View {
       const pill = (key, text, color, iconName) => h_flex().id(`${key}-${x.id}`).px(8).h(20).gap(4).items_center().rounded_full().bg(t.hover)
         .text_size(11).text_color(color).when(Boolean(iconName), (el) => el.child(svg(I(iconName)).size(11))).child(text);
       const ago = updatedAgo(x.updated);
-      const ro = Boolean(x.remote); // a card of a project on another machine: read-only
+      const ro = Boolean(x.remote); // a card of a project on another machine
+      const w = ro ? this.wstate(x) : null; // its write controls: on when omarchy is reachable, updated and not frozen
+      const shift = (dir) => ro ? (w.on ? icon(`${dir < 0 ? "l" : "r"}-${x.id}`, dir < 0 ? "chevron-left" : "chevron-right", (cx) => { const op = shiftOp(x, this.visibleIds(), dir); if (op) this.rsend(x.project, op, cx); }) : off(`${dir < 0 ? "l" : "r"}-${x.id}`, dir < 0 ? "chevron-left" : "chevron-right", w.tip))
+        : icon(`${dir < 0 ? "l" : "r"}-${x.id}`, dir < 0 ? "chevron-left" : "chevron-right", () => save(shiftVisible(load(), x.id, dir, this.visibleIds())));
       const dim = ro && staleNow(x) ? 0.55 : 1;
       const prog = checklistProgress(x.desc);
       return v_flex().id(`card-${x.id}`).p(12).gap(8).rounded(12).bg(t.background).cursor_pointer()
@@ -175,7 +199,7 @@ export default class Board extends View {
         .hover((s) => s.border_color(t.input))
         .relative().opacity(this.drag === x.id ? 0.4 : dim)
         .on_mouse_move((_e, cx) => { if (this.drag) { cx.stop_propagation(); this.aim(x.column, x.id, cx); } })
-        .on_mouse_down("left", (_e, cx) => { cx.stop_propagation(); if (!ro) this.drag = x.id; })
+        .on_mouse_down("left", (_e, cx) => { cx.stop_propagation(); if (!ro || w.on) this.drag = x.id; })
         .when(this.over?.before === x.id && this.drag !== x.id, (el) => el.child(div().absolute().top_0().left_0().right_0().h(2).rounded(1).bg(t.accent)))
         .on_mouse_up("left", (_e, cx) => { cx.stop_propagation(); this.drop(x.column, x.id, cx); })
         .on_click((_e, cx) => { this.selected = x.id; this.handle.focus(); edit(x.id, undefined, undefined, undefined, undefined, ro ? x : undefined); cx.notify(); })
@@ -191,9 +215,9 @@ export default class Board extends View {
           .children(x.tags.slice(0, 2).map((g) => pill(`g-${g}`, `#${g}`, t.accent)))
           .child(div().flex_1())
           .when(Boolean(x.source?.url), (el) => el.child(icon(`o-${x.id}`, "arrow-up-right", () => openUrl(x.source.url))))
-          .when(ci > 0, (el) => el.child(ro ? off(`l-${x.id}`, "chevron-left") : icon(`l-${x.id}`, "chevron-left", () => save(shiftVisible(load(), x.id, -1, this.visibleIds())))))
-          .when(!x.agent && x.column !== "done", (el) => el.child(ro ? off(`s-${x.id}`, "play") : icon(`s-${x.id}`, "play",  () => pick(x.id))))
-          .when(ci < this.visibleIds().length - 1, (el) => el.child(ro ? off(`r-${x.id}`, "chevron-right") : icon(`r-${x.id}`, "chevron-right", () => save(shiftVisible(load(), x.id, 1, this.visibleIds()))))))
+          .when(ci > 0, (el) => el.child(shift(-1)))
+          .when(!x.agent && x.column !== "done", (el) => el.child(ro ? off(`s-${x.id}`, "play", OFF_TIP) : icon(`s-${x.id}`, "play",  () => pick(x.id))))
+          .when(ci < this.visibleIds().length - 1, (el) => el.child(shift(1))))
         .child(h_flex().gap(6).items_center().text_size(11.5).text_color(t.dim)
           .child(div().flex_1().min_w(0).truncate().text_color(status && status !== "gone" ? (t[status] ?? t.blocked) : t.dim).child(ro ? (x.agentText ?? "") : footerText(x, status, cfg_)))
           .child(div().flex_none().child(ago))
@@ -272,8 +296,8 @@ export default class Board extends View {
       .when(hidden > 0, (el) => el.child(div().id("hidden-note").px(8).text_size(12).text_color(t.dim).whitespace_nowrap().child(`${hidden} hidden`)))
       .child(topBtn("view-board", "Board", (cx) => { this.view = "board"; cx.notify(); }, this.view === "board"))
       .child(topBtn("view-list", "List", (cx) => { this.view = "list"; cx.notify(); }, this.view === "list"))
-      .child(h_flex().id("new").h(28).px(12).gap(5).items_center().rounded(7).bg(t.solid).text_color(t.solid_foreground)
-        .text_size(12).when(this.remoteScope(), (el) => el.opacity(0.5).tooltip(READONLY_TIP)).when(!this.remoteScope(), (el) => el.cursor_pointer().on_click(() => edit(null, this.newColumn()))).child(svg(I("plus")).size(13)).child("New"));
+      .child(this.addControl("new", (tip, go) => h_flex().id("new").h(28).px(12).gap(5).items_center().rounded(7).bg(t.solid).text_color(t.solid_foreground)
+        .text_size(12).when(Boolean(tip), (el) => el.opacity(0.5).tooltip(tip)).when(!tip, (el) => el.cursor_pointer().on_click(() => go())).child(svg(I("plus")).size(13)).child("New"), this.newColumn()));
     // List view: the same cards under the column headers, in one scrolling list. Sort and collapse come from the column state.
     const list = () => v_flex().id("list").flex_1().min_h(0).overflow_y_scrollbar().px(12).pb(12).gap(12)
       .children(this.columns().map((col, ci) => {
@@ -286,7 +310,7 @@ export default class Board extends View {
             .child(div().text_size(12).text_color(t.dim).child(String(col.cards.length)))
             .child(div().flex_1())
             .child(svg(I(folded ? "chevron-right" : "chevron-down")).size(14).text_color(t.muted))
-            .child(this.remoteScope() ? off(`ladd-${col.id}`, "plus") : icon(`ladd-${col.id}`, "plus", () => edit(null, col.id))))
+            .child(this.addControl(`ladd-${col.id}`, (tip, go) => tip ? off(`ladd-${col.id}`, "plus", tip) : icon(`ladd-${col.id}`, "plus", go), col.id)))
           .when(!folded, (el) => el.children(col.cards.map((x) => card(x, ci))));
       }));
 
@@ -302,6 +326,8 @@ export default class Board extends View {
         .child(div().flex_1().min_w(0).truncate().child(`${r.name}: ${r.banner}`))
         .child(div().id(`retry-${r.localId}`).h(24).px(10).flex().items_center().rounded(6).bg(t.solid).text_color(t.solid_foreground).cursor_pointer()
           .on_click((_e, cx) => { cx.stop_propagation(); retryRemote(r.machine, r.projectId, cx); }).child("Retry"))))
+      .children(merged.remotes.map((r) => div().id(`wstatus-${r.localId}`).mx(12).mb(6).text_size(11.5).text_color(t.dim)
+        .child(`${r.name}: ${statusLine(remoteWriteState(r.localId))}${this.msg ? ` · ${this.msg}` : ""}`)))
       .child(this.view === "list" ? list() : h_flex().id("cols").flex_1().min_h(0).px(12).pb(12).gap(12).overflow_x_scrollbar()
         .children(this.columns().map((col, ci) => {
           const tone = t[STATUS_ICON[col.id].tone];
@@ -338,7 +364,7 @@ export default class Board extends View {
                 .trigger(div().id(`more-${col.id}`).w(22).h(22).flex().items_center().justify_center().rounded(5).cursor_pointer()
                   .text_color(this.pop === `col:${col.id}` ? t.foreground : t.muted).hover((s) => s.bg(t.hover).text_color(t.foreground)).child(svg(I("ellipsis")).size(15)))
                 .content(menu()))
-              .child(this.remoteScope() ? off(`add-${col.id}`, "plus") : icon(`add-${col.id}`, "plus", () => edit(null, col.id))))
+              .child(this.addControl(`add-${col.id}`, (tip, go) => tip ? off(`add-${col.id}`, "plus", tip) : icon(`add-${col.id}`, "plus", go), col.id)))
             .child(v_flex().id(`cards-${col.id}`).flex_1().min_h(0).overflow_y_scrollbar().px(8).pb(8).gap(8)
               .border_2().border_color(this.over?.col === col.id && this.over.before === null ? t.accent : t.surface)
               .on_mouse_move((_e, cx) => { cx.stop_propagation(); this.aim(col.id, null, cx); })

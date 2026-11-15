@@ -13,3 +13,5 @@ config.js
 keys.js
 workfolder.js
 remote.js
+remote-write.js
+remote-write-ui.js

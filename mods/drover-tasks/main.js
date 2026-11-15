@@ -6,7 +6,8 @@ import { agents, terminals, run, theme, shared, setShared } from "herdr";
 import { bind, isEnabled, whenLoaded, ready as cfgReady } from "./config.js";
 import { GROUPS, projectOf, add, update, matches, sorted, attention, menuChange, FILTER_FIELDS, toggleFilter, clearFilters, matchesFilter, filterValues, searchFilters, filterChips } from "./store.js";
 import { reviewLive, dotKind, liveStatuses, liveAgents } from "./runs.js";
-import { load, loadRuns, loadProjects, loadConfig, spaceProject, sidebarSpace, save, edit, pick, openBoard, watchInbox, watchWakes, modSettings, loadMerged, watchRemote, retryRemote } from "./io.js";
+import { load, loadRuns, loadProjects, loadConfig, spaceProject, sidebarSpace, save, edit, pick, openBoard, watchInbox, watchWakes, modSettings, loadMerged, watchRemote, retryRemote, remoteSend, remoteWriteState, takeRemoteOutcomes } from "./io.js";
+import { OFF_TIP, controlState, moveOp, outcomeText } from "./remote-write-ui.js";
 import { READONLY_TIP } from "./remote.js";
 
 const FOLD = "drover.tasks.fold";
@@ -60,6 +61,12 @@ export default class Tasks extends View {
 
   // A live agent takes the click (focus it); such a row also gets a pencil that opens the editor.
   hasLiveAgent(task) { return Boolean(task.agent) && agents().some((a) => a.address === task.agent); }
+  // ✓ on a card of another machine: moves it to Done through omarchy's inbox when writes are on, else off with the reason.
+  remoteDone(task, off, icon) {
+    const w = controlState(remoteWriteState(task.project));
+    if (!w.on) return off(`ro-done-${task.id}`, "✓", w.tip);
+    return icon(`done-${task.id}`, "✓", "Done", (cx) => { const op = moveOp(task, "done"); if (op) cx.spawn(async (acx) => { const o = await remoteSend(task.project, op, acx); this.remoteMsg = outcomeText(o); acx.notify(); }); });
+  }
   open(task) {
     if (task.remote) return edit(task.id, undefined, undefined, undefined, undefined, task); // another machine's card: the read-only view, never an agent focus
     if (this.hasLiveAgent(task)) run("agent.focus", { terminal: task.agent });
@@ -92,7 +99,7 @@ export default class Tasks extends View {
       ? div().w(9).h(9).flex_none().rounded(5).bg(t.working).border_2().border_color(t.done)
       : div().w(7).h(7).flex_none().rounded(4).bg(DOT(t)[at.group]);
     const projects = loadProjects();
-    const off = (id, text) => div().id(id).w(22).h(22).flex_none().flex().items_center().justify_center().rounded(5).text_size(12).text_color(t.dim).opacity(0.5).tooltip(READONLY_TIP).child(text);
+    const off = (id, text, tip = READONLY_TIP) => div().id(id).w(22).h(22).flex_none().flex().items_center().justify_center().rounded(5).text_size(12).text_color(t.dim).opacity(0.5).tooltip(tip).child(text);
     const stale = (task) => Boolean(task.remote) && merged.remotes.some((r) => r.localId === task.project && r.state !== "fresh");
     const row = ({ task, at }) => h_flex().id(`task-${task.id}`).min_h(40).px(8).py(4).gap(8).items_center().rounded(7).when(stale(task), (el) => el.opacity(0.55))
       .cursor_pointer().hover((s) => s.bg(t.hover)).on_click(() => this.open(task))
@@ -102,8 +109,8 @@ export default class Tasks extends View {
         .child(div().truncate().text_size(10.5).text_color(t.dim)
           .child([task.id, task.priority, projectOf(task, projects)?.name, task.remote?.machine, at.reason, ...task.tags.map((g) => `#${g}`)].filter(Boolean).join(" · "))))
       .when(this.hasLiveAgent(task), (el) => el.child(icon(`edit-${task.id}`, "✎", "Edit task", () => this.editTask(task.id))))
-      .when(at.group === "todo", (el) => el.child(task.remote ? off(`ro-start-${task.id}`, "▶") : icon(`start-${task.id}`, "▶", "Start", () => pick(task.id))))
-      .when(at.group === "review", (el) => el.child(task.remote ? off(`ro-done-${task.id}`, "✓") : icon(`done-${task.id}`, "✓", "Done", () => save(update(load(), task.id, { column: "done" })))));
+      .when(at.group === "todo", (el) => el.child(task.remote ? off(`ro-start-${task.id}`, "▶", OFF_TIP) : icon(`start-${task.id}`, "▶", "Start", () => pick(task.id))))
+      .when(at.group === "review", (el) => el.child(task.remote ? this.remoteDone(task, off, icon) : icon(`done-${task.id}`, "✓", "Done", () => save(update(load(), task.id, { column: "done" })))));
 
     const group = ([id, name]) => {
       const items = rows.filter((r) => r.at.group === id);
@@ -169,6 +176,7 @@ export default class Tasks extends View {
         .child(svg(I("list-filter")).size(14)).when(filterCount > 0, (el) => el.child(div().child(String(filterCount)))))
       .content(filterMenu());
 
+    for (const o of takeRemoteOutcomes()) this.remoteMsg = outcomeText(o); // a result that arrived after the wait
     const banners = merged.remotes.filter((r) => r.banner).map((r) => h_flex().id(`banner-${r.localId}`).mx(8).mb(6).px(8).min_h(28).gap(6).items_center().rounded(7).bg(t.hover).text_size(11.5)
       .text_color(r.state === "never" ? t.muted : t.blocked)
       .child(div().flex_1().min_w(0).child(`${r.name}: ${r.banner}`))
@@ -184,6 +192,7 @@ export default class Tasks extends View {
       .child(div().px(8).pb(6).child(Input.new(this.input).h(28).px(8).rounded(7).border_1().border_color(t.input).bg(t.background).text_size(12)))
       .when(filterCount > 0, (el) => el.child(chipsRow()))
       .children(banners)
+      .when(Boolean(this.remoteMsg), (el) => el.child(div().id("remote-msg").mx(8).mb(6).px(8).text_size(11.5).text_color(t.muted).child(this.remoteMsg)))
       .child(empty
         ? div().p(12).text_size(12).text_color(t.dim).child(empty)
         : v_flex().id("groups").flex_1().min_h(0).overflow_y_scrollbar().px(4).pb(8).gap(6).children(GROUPS.map(group).filter(Boolean)));

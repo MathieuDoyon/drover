@@ -4,7 +4,8 @@ import { shared, setShared, openOverlay, exec, hc, readTextFile, writeTextFile, 
 import * as fs from "fs/promises";
 import { KEY, SEEN_KEY, PROJECTS_KEY, firstSight, list, add, update, bySource, addCommand, applyCommand, repoOf, projectOf, projectKey, projectAddRequest, projectDiff, PROTOCOL, inboxGate, arrivalOf, addProject, projectNamed, nextReport, claim, release, editSize } from "./store.js";
 import { base64, httpProblem, jiraIssue, jiraKey, githubIssue, prItems } from "./sources.js";
-import { ownerError, createRemote, bindings as remoteBindings, mergeRemote } from "./remote.js";
+import { ownerError, createRemote, bindings as remoteBindings, mergeRemote, cacheKey } from "./remote.js";
+import { createWriter } from "./remote-write.js";
 import { WAKE_KEY, reschedule, addWake, decide, setStatus, wakeOp } from "./wake.js";
 import { apply as applyKey } from "./keys.js";
 import { resolveWorkFolder, moveOffers, parseMove } from "./workfolder.js";
@@ -143,9 +144,74 @@ export function watchRemote(cx, enabled = () => true) {
     const list = remoteBindings(loadProjects());
     remote.sync(list); // the whole binding, id included: the commit-time check compares it
     if (list.length && cx.spawn) cx.spawn(async (cx) => { if ((await remote.tick()).length) cx.notify(); });
+    driveWriter(cx, list);
   };
   cx.timer?.every?.(1000, tick);
   tick(cx);
+}
+// ---- Remote project, step 2: writes to the machine's inbox (T-MWHVWR8TIJB). remote-write.js is pure; this is its host side. ----
+// Each mod copy that polls (Board, Tasks) owns one writer; the pending list is a shared key. Origin: this laptop's stable tag in every nonce.
+const ORIGIN_KEY = "drover.remote-origin";
+let writer = null, writerCx = null;
+const remoteOutcomes = [];
+export const remoteWriter = () => {
+  if (writer) return writer;
+  let origin = shared(ORIGIN_KEY);
+  if (!/^[A-Za-z0-9]{1,16}$/.test(origin ?? "")) { origin = `D${Math.random().toString(36).slice(2, 9).padEnd(7, "0")}`; setShared(ORIGIN_KEY, origin); }
+  const bound = (machine, projectId) => loadProjects().find((p) => p.remote?.machine === machine && p.remote.projectId === projectId);
+  writer = createWriter({
+    run: (args) => hc(args), // the writer owns its deadlines (tick); hc takes argv only
+    exec: (cmd, args, opts) => exec(cmd, args, opts),
+    now: () => Date.now(), getShared: (k) => shared(k), setShared: (k, v) => setShared(k, v ?? undefined), origin,
+    writable: (machine) => loadProjects().some((p) => p.remote?.machine === machine && p.remote.writes !== false),
+    link: (machine, projectId) => ({ writes: bound(machine, projectId)?.remote.writes !== false, state: remote.view(machine, projectId).state }),
+    reload: (machine, projectId) => { void remote.retry(machine, projectId).then(() => writerCx?.notify?.()); },
+    onOutcome: (o) => { if (!o.probe) remoteOutcomes.push(o); if (remoteOutcomes.length > 20) remoteOutcomes.shift(); writerCx?.notify?.(); },
+  });
+  return writer;
+};
+// Late outcomes (a result that arrived after the wait), oldest first; the caller shows and clears them.
+export const takeRemoteOutcomes = () => remoteOutcomes.splice(0);
+const remoteBinding = (localId) => remoteBindings(loadProjects()).find((b) => b.localId === localId) ?? null;
+// What a Board/Tasks control needs: { remote, enabled, reason, frozen }.
+export function remoteWriteState(localId) {
+  const b = remoteBinding(localId);
+  if (!b) return { remote: false, enabled: false, reason: "Not a remote project", frozen: false };
+  const w = remoteWriter();
+  const g = w.canWrite(b.machine, b.projectId);
+  return { remote: true, enabled: g.ok, reason: g.ok ? null : g.reason, frozen: w.frozen(b.machine, b.projectId) };
+}
+// A card change on a remote project: only remote-write.js builds the request. The board is re-read after a save.
+export async function remoteSend(localId, op, cx) {
+  const b = remoteBinding(localId);
+  if (!b) return { status: "refused", message: "Not a remote project" };
+  if (cx) writerCx = cx;
+  const o = await remoteWriter().send(b.machine, b.projectId, op);
+  if (o.status === "saved") await remote.retry(b.machine, b.projectId);
+  cx?.notify?.();
+  return o;
+}
+// The freeze switch of the rollback runbook: remote.writes (the binding keeps its id). `frozen` is true only when no send is in flight.
+export function setRemoteWrites(localId, on) {
+  const b = remoteBinding(localId);
+  if (!b) return { error: "Not a remote project" };
+  setShared(PROJECTS_KEY, loadProjects().map((p) => (p.id === localId ? { ...p, remote: { ...p.remote, writes: Boolean(on) } } : p)));
+  return { ok: true, writes: Boolean(on), frozen: remoteWriter().frozen(b.machine, b.projectId) };
+}
+const seenState = new Map(); // binding key -> the last view state, to see stale/never -> fresh
+// Forget the writer, its probes and what it saw (a test, or a reset of the remote layer).
+export function resetRemoteWriter() { writer = null; writerCx = null; seenState.clear(); remoteOutcomes.length = 0; }
+function driveWriter(cx, list) {
+  writerCx = cx;
+  const w = remoteWriter();
+  for (const b of list) {
+    const key = cacheKey(b.machine, b.projectId);
+    const now = remote.view(b.machine, b.projectId).state;
+    if (now === "fresh" && seenState.get(key) !== "fresh") { w.reconnect(b.machine); void w.cleanup(b.machine); } // bind, or the machine came back
+    seenState.set(key, now);
+  }
+  for (const key of [...seenState.keys()]) if (!list.some((b) => cacheKey(b.machine, b.projectId) === key)) seenState.delete(key);
+  if (list.length) void w.tick().then(() => cx.notify?.());
 }
 // The Retry control: a read now, then a repaint.
 export const retryRemote = (machine, projectId, cx) => cx.spawn(async (cx) => { await remote.retry(machine, projectId); cx.notify(); });
