@@ -4,6 +4,12 @@
 
 > **drover** (n.) — a person whose job is to move herds of cattle or sheep over long distances to new pasture.
 
+https://github.com/user-attachments/assets/03bab5ca-70f4-4c66-be9d-62cd9325c43b
+
+*Drover in 100 seconds: create a task, hand it to a squad, review the result.* [Player not showing? Watch the preview.](https://github.com/user-attachments/assets/03bab5ca-70f4-4c66-be9d-62cd9325c43b)
+
+[![Drover demo preview: creating a task on the Board](docs/assets/drover-demo.gif)](https://github.com/user-attachments/assets/03bab5ca-70f4-4c66-be9d-62cd9325c43b)
+
 Drover turns [Herdr](https://herdr.dev) into a place where you drive work, not just run terminals. Your **tasks are the herd**; **squads of agents** (Claude Code, Codex) are the drives; the **pasture** is merged, verified work. The name says what it does: it keeps the herd together, keeps it moving, and loses nothing on the way. It is a set of Herdr mods plus `hc`-based orchestration.
 
 ## What it is
