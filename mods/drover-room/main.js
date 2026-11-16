@@ -6,6 +6,7 @@ import { v_flex, h_flex } from "gpui-base";
 import { agents, terminals, focused, run, theme, shared, setShared } from "herdr";
 import { WAKE_KEY, setEnabled, setStatus, isOpen, wakeOrder, until, summary } from "./wake.js";
 import { projectOf } from "./store.js";
+import { machineOf } from "./remote.js";
 import { currentRun, wakesOf, liveStatuses, memberStatus, terminalName, runTitle, lineageOf, squadRows, openCommand } from "./runs.js";
 import { section as sectionOf, toggle, openNewWakeup } from "./ui.js";
 import { age, prLabel, projectLabel } from "./sources.js";
@@ -149,6 +150,7 @@ export default class Room extends View {
         return el.child(prop("Lead", `${terminalName(loadRuns(), r.reportTo)} · ${s}`, color[s],
           s !== "gone" ? () => run("agent.focus", { terminal: r.reportTo }) : null));
       })
+      .child(prop("Machine", machineOf(loadProjects(), projectOf(task, loadProjects())?.id, leader?.address)))
       .child(prop("Column", r.task ? task?.column ?? "task deleted" : "No task"))
       .when(Boolean(r.worktree), (el) => el.child(prop("Branch", r.worktree.branch)))
       .child(prop("Run", `${r.id} · started ${age(r.started)} ago`))

@@ -72,6 +72,13 @@ export const remoteOf = (projects, projectId) => {
   const p = Array.isArray(projects) && projectId ? projects.find((x) => x.id === projectId) : null;
   return p?.remote && validMachine(p.remote.machine) ? p.remote : null;
 };
+// Where a card or run lives, as the editor and the room show it: the herdr machine name (a bound project, else a `machine/tN` terminal address), else "Local".
+export const machineOf = (projects, projectId, address) => {
+  const bound = remoteOf(projects, projectId)?.machine;
+  if (bound) return bound;
+  const m = typeof address === "string" ? /^([^/]+)\/t[A-Za-z0-9]+$/.exec(address) : null;
+  return m && validMachine(m[1]) ? m[1] : "Local";
+};
 // An error text when `projectId` is remote-owned (naming the machine), else null.
 export function ownerError(projects, projectId) {
   const r = remoteOf(projects, projectId);

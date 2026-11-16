@@ -404,3 +404,13 @@ test("F3 a detach or rebind settles the callers waiting on an in-flight read ({e
   rem.sync([{ machine: "omarchy", projectId: RID, id: "B-3" }]); // same pair, new binding
   assert.deepEqual(await Promise.race([again, new Promise((r) => setTimeout(() => r("HUNG"), 50))]), { error: "detached" });
 });
+
+test("machineOf: Local, a remote address, or a project bound to a machine (T-MWICMO38T36)", () => {
+  const projects = [{ id: "P-L", name: "l" }, { id: "P-R", name: "r", remote: { machine: "omarchy", projectId: "P-X" } }];
+  assert.equal(R.machineOf(projects, "P-L", "t4"), "Local");
+  assert.equal(R.machineOf(projects, null, undefined), "Local");
+  assert.equal(R.machineOf(projects, "P-L", "omarchy/t4"), "omarchy");
+  assert.equal(R.machineOf(projects, "P-R", "t4"), "omarchy");
+  assert.equal(R.machineOf([], "P-R", "t4"), "Local");
+  assert.equal(R.machineOf(projects, "P-L", "bad name/t4"), "Local");
+});

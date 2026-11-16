@@ -15,7 +15,7 @@ import { bind, cfg, isEnabled, whenLoaded, load as loadCfg, ready as cfgReady } 
 import { gated } from "./ui.js";
 import { load, save, edit, loadProjects, loadConfig, launch, sendToAgent, loadRuns, loadWakes, loadContext, jiraSite, mergeContext, openUrl, HEARTBEAT_MS, startOptions, beatCreateGuard, clearCreateGuard, modSettings, loadMerged, watchRemote, retryRemote, remoteSend, remoteReload, remoteWriteState, takeRemoteOutcomes } from "./io.js";
 import { controlState, fieldState, statusLine, editOps, addOp, archiveOp, moveOp, outcomeText, applied, OFF_TIP } from "./remote-write-ui.js";
-import { remoteCardRows } from "./remote.js";
+import { remoteCardRows, machineOf } from "./remote.js";
 
 const I = (name) => `mods/drover-todos/icons/${name}.svg`;
 const pad = (n) => String(n).padStart(2, "0");
@@ -1355,7 +1355,7 @@ export class Editor {
             .child(R && !fsr.on ? off("assignee", "user", "Assignee", fsr.tip) : row("assignee", "Assignee", "", t.muted, curRunner?.name ?? "Assignee", Select, "user"))
             .child(R && !R.new ? off("labels", "tag", this.labels.length ? this.labels.join(", ") : "Add label") : row("labels", "Labels", "", t.muted, this.labels.length ? this.labels.join(", ") : "Add label", Combobox, "tag"))
             .child(row("project", "Project", "", t.muted, curProject ? projLabel(curProject) : "No project", Combobox, "folder"))
-            .child(machinePill(R ? R.remote?.machine || "another machine" : "Local")))))
+            .child(machinePill(R ? R.remote?.machine || "another machine" : machineOf(projects, this.project))))))
         .child(div().w_full().h(1).flex_none().bg(t.border))
         .child(h_flex().px(24).h(60).flex_none().items_center().gap(14)
           .child(R ? h_flex().id("ed-attach").size(28).items_center().justify_center().rounded(6).opacity(0.5).tooltip(OFF_TIP).child(svg(I("paperclip")).size(16).text_color(t.dim))
@@ -1631,7 +1631,7 @@ export class Editor {
           .child(row("assignee", "Assignee", "", t.muted, curRunner?.name ?? "No assignee", Select, null, true, "user"))
           .child(row("labels", "Labels", "", t.muted, this.labels.length ? this.labels.join(", ") : "Add label", Combobox, null, true, "tag"))
           .child(row("project", "Project", "", t.muted, curProject ? projLabel(curProject) : "No project", Combobox, null, true, "folder"))
-          .child(machineRow("Local"))
+          .child(machineRow(machineOf(projects, this.project)))
           .child(row("parent", "Parent", "↑", t.muted, curParent ? parentLabel(curParent) : "No parent", Combobox, null, true))
           .when(Boolean(curParent), (el) => el.child(h_flex().id("parent-open").px(8).py(4).rounded(6).cursor_pointer().hover((s) => s.bg(t.hover)).text_size(11.5).text_color(t.accent)
             .on_click((_e, cx) => this.openParent(curParent.id, cx)).child(`Open ${curParent.id}`)))
