@@ -76,7 +76,7 @@ export class ProjectEditor {
     const now = loadProjects(); // another dialog may have saved meanwhile
     if (!now.some((x) => x.id === this.project.id) || load().some((x) => x.project === this.project.id && !x.archived)) { this.remoteMsg = "The project changed while checking: try again"; cx.notify(); return; }
     setShared(PROJECTS_KEY, withRemote(now, this.project.id, r.project.remote));
-    this.remoteMsg = `Bound to ${r.project.remote.machine}: its cards now show read-only on the Board and Tasks`;
+    this.remoteMsg = `Bound to ${r.project.remote.machine}: its cards now show on the Board and Tasks`;
     cx.notify();
   }
 
@@ -112,14 +112,23 @@ export class ProjectEditor {
     return v_flex().id("project-editor").w_full().p(18).bg(t.popover).text_color(t.foreground)
       .on_key_down((e, cx) => { if (e.key === "escape") { this.close(); cx.stop_propagation(); } })
       .child(h_flex().items_center()
-        .child(div().flex_1().text_size(15).font_semibold().child(this.project ? `Edit project ${this.project.id}` : "New project"))
+        .child(h_flex().flex_1().items_center().gap(6).text_size(15).font_semibold()
+          .child(this.project ? "Edit project" : "New project")
+          .when(Boolean(this.project), (el) => el.child(h_flex().id("copy-project-id").px(6).py(2).gap(6).items_center().rounded(6).cursor_pointer().hover((s) => s.bg(t.hover))
+            .on_click((_e, cx) => {
+              cx.write_to_clipboard(this.project.id);
+              this.copied = true; cx.notify();
+              cx.timer.after(1500, (cx) => { this.copied = false; cx.notify(); });
+            })
+            .child(this.project.id)
+            .child(div().text_size(11).font_weight(400).text_color(this.copied ? t.done : t.dim).child(this.copied ? "Copied" : "⧉ Copy")))))
         .child(div().text_size(11).text_color(t.dim).child("Esc")))
       .child(label("Name")).child(field(Input.new(this.name).h(34)))
       .child(label("Repos (git, one path per line, first is the default)")).child(field(Textarea.new(this.repos)).py(6))
       .child(label("Folders (one path per line)")).child(field(Textarea.new(this.folders)).py(6))
       .child(label("Base branch")).child(field(Input.new(this.branch).h(34)))
       .when(Boolean(this.project), (el) => el
-        .child(label("Remote: machine (hc machine ls) and the project's id there. Its cards show read-only."))
+        .child(label("Remote: machine (hc machine ls) and the project's id there. Its cards show here; with writes on you can change them from here."))
         .child(h_flex().gap(8).child(field(Input.new(this.machine).h(34).w(160))).child(field(Input.new(this.remoteId).h(34).flex_1())))
         .child(h_flex().pt(8).gap(8).items_center()
           .child(button(t, "bind-remote", remoteOf(loadProjects(), this.project.id) ? "Rebind" : "Bind", false, (_e, cx) => cx.spawn((acx) => this.bindRemote(acx))))

@@ -75,3 +75,43 @@ test("Save during the git check keeps a project another dialog saved meanwhile",
   await pending;
   assert.deepEqual(projects().map((p) => p.name).sort(), ["A2", "B"]);
 });
+
+// --- title: click the id to copy; the Remote hint no longer says the cards are read-only ---
+const NODE = Symbol.for("test.node");
+const findNode = (n, id) => (n.id === id ? n : n.kids.map((k) => findNode(k, id)).find(Boolean));
+const renderRec = (e, c) => { globalThis.__rec = { ids: [], texts: [] }; try { const root = e.render(c); return { root: root[NODE], texts: globalThis.__rec.texts }; } finally { globalThis.__rec = undefined; } };
+const editOf = async () => {
+  const state = {};
+  const a = open(null, state);
+  fill(a, { name: "Acme", repos: repo });
+  await a.save(cx);
+  return open(state["drover.projects"][0].id, state);
+};
+
+test("Edit: clicking the id in the title copies it and shows Copied, then clears", async () => {
+  const e = await editOf();
+  const id = projects()[0].id;
+  const clips = [], timers = [];
+  const c = { notify() {}, timer: { after: (_ms, fn) => timers.push(fn) }, write_to_clipboard: (x) => clips.push(x) };
+  let r = renderRec(e, c);
+  const n = findNode(r.root, "copy-project-id");
+  assert.ok(n?.args.on_click, "the id is clickable");
+  assert.ok(!r.texts.includes("Copied"));
+  n.args.on_click[0]({}, c);
+  assert.deepEqual(clips, [id]);
+  assert.ok(renderRec(e, c).texts.includes("Copied"), "feedback shown");
+  timers[0](c);
+  assert.ok(!renderRec(e, c).texts.includes("Copied"), "feedback clears");
+});
+
+test("New: the title has no copy target", () => {
+  const e = open(null);
+  assert.equal(findNode(renderRec(e, cx).root, "copy-project-id"), undefined);
+});
+
+test("Edit: the Remote hint does not claim cards are read-only", async () => {
+  const e = await editOf();
+  const t = renderRec(e, cx).texts.join(" ");
+  assert.match(t, /Remote: machine/);
+  assert.doesNotMatch(t, /read-only/i);
+});
