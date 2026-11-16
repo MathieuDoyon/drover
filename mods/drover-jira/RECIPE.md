@@ -8,7 +8,7 @@ A tab with the site and JQL line, a refresh state and a table of issues (key, su
 
 ## How it behaves
 
-- Enter runs the JQL; it also refreshes every `refresh_minutes` (default 5, checked each minute).
+- A search box of inline key:value tokens (project, status, assignee, reporter, type, label, priority, sprint, created, updated, order, raw `jql:`) builds the JQL; Enter runs it; it also refreshes every `refresh_minutes` (default 5, checked each minute).
 - `pages` (x 50 issues, 1-20, default 4) caps a load.
 - With no `site` set in Drover Config the screen asks for it and makes no request.
 - A changed site or generation stops a running load and drops its result.

@@ -67,6 +67,14 @@ function patchInput(input) {
     input.tokens.sort((a, b) => a.range.start - b.range.start);
   };
 }
+// A Jira view whose input has the host's token content model.
+function newJira() {
+  const view = new Jira();
+  const origNew = InputState.new;
+  InputState.new = function (o) { const s = origNew.call(this, o); patchInput(s); return s; };
+  try { view.init({}, cxOf()); } finally { InputState.new = origNew; }
+  return view;
+}
 async function github(opts) {
   host(opts);
   const view = new GitHub();
@@ -175,8 +183,7 @@ test("dialog model: an unusable github query is rejected and never produces a sh
 // ---- Jira ----
 async function jira(opts) {
   host(opts);
-  const view = new Jira();
-  view.init({}, cxOf());
+  const view = newJira();
   await idle();
   return view;
 }
@@ -226,12 +233,12 @@ test("jira: jql precedence saved drover.jira.jql > shared config > mod.json > de
   assert.equal(jql(), "project = J");
   const v = await jira({ config: { "drover-jira": { site: "a.b" } } });
   assert.equal(jql(), C.cfg("drover-jira", "jql"));
-  assert.match(v.input.value(), /^assignee = currentUser\(\)/);
+  assert.match(v.input.value(), /^jql:"assignee = currentUser\(\)/);
 });
 
 test("jira: pages precedence shared > mod.json > default", async () => {
   const paged = () => { globalThis.fetch = async (url, init) => { fetches.push({ url, body: JSON.parse(init.body) }); return { ok: true, url, json: async () => ({ issues: [], nextPageToken: "n" }) }; }; };
-  const run = async (o) => { host(o); paged(); const v = new Jira(); v.init({}, cxOf()); await idle(); return searches().length; };
+  const run = async (o) => { host(o); paged(); const v = newJira(); await idle(); return searches().length; };
   assert.equal(await run({ config: { "drover-jira": { site: "a.b", pages: 2 } }, settings: { "drover-jira": { pages: 3 } } }), 2);
   assert.equal(await run({ config: { "drover-jira": { site: "a.b" } }, settings: { "drover-jira": { pages: 3 } } }), 3);
   assert.equal(await run({ config: { "drover-jira": { site: "a.b" } } }), 4);
@@ -285,8 +292,7 @@ const NO_SITE = /^Set the Jira site in Drover Config\./;
 async function pending(config) {
   host({ config });
   const waiting = deferredFetch();
-  const v = new Jira();
-  v.init({}, cxOf());
+  const v = newJira();
   await until(() => waiting.length === 1, "page 1 requested (held)");
   return { v, waiting };
 }
@@ -337,8 +343,7 @@ test("jira: A -> B refresh pressed while A is still loading starts B at once", a
 
 test("jira: settled configured -> empty: the message shows on render and after a tick, with no request", async () => {
   host({ config: { "drover-jira": { site: "a.b" } } });
-  const v = new Jira();
-  v.init({}, cxOf());
+  const v = newJira();
   await idle();
   assert.equal(v.render(cxOf()) !== undefined, true);
   const before = fetches.length;
@@ -363,8 +368,7 @@ function heldCredentials() {
 test("jira: site cleared + refresh while the credential read is held -> zero fetch after it resolves", async () => {
   host({ config: { "drover-jira": { site: "a.b" } } });
   const held = heldCredentials();
-  const v = new Jira();
-  v.init({}, cxOf());
+  const v = newJira();
   await until(() => held.length === 1, "the credential read is held");
   assert.equal(held.length, 1);
   assert.equal(fetches.length, 0);
@@ -381,8 +385,7 @@ test("jira: site cleared + refresh while the credential read is held -> zero fet
 test("jira: site A -> B while the credential read is held -> only B is requested", async () => {
   host({ config: { "drover-jira": { site: "a.b" } } });
   const held = heldCredentials();
-  const v = new Jira();
-  v.init({}, cxOf());
+  const v = newJira();
   await until(() => held.length === 1, "A's credential read is held");
   globalThis.__host.state[CFG] = { "drover-jira": { site: "c.d" } };
   v.refresh(cxOf());

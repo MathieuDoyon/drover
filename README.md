@@ -62,7 +62,7 @@ The Board after the drive: the card moved to Review.
 | [`drover-room`](docs/mods/room.md) | Agents | Right panel for the run you are in: issue, PRs, wakeups, squad |
 | [`drover-reader`](docs/mods/reader.md) | Agents | Live read-only transcript of a Claude Code or Codex terminal |
 | [`drover-github`](docs/mods/github.md) | Sources | Read-only list of open issues and PRs in the orgs you add (`gh`) |
-| [`drover-jira`](docs/mods/jira.md) | Sources | Read-only list of Jira work from a saved JQL |
+| [`drover-jira`](docs/mods/jira.md) | Sources | Read-only list of Jira work, filtered with inline tokens built into JQL |
 | [`drover-tabs`](docs/mods/tabs.md) | Shell | Tab bar of the `drover` layout: capsule tabs, agent status, the Drover menu |
 | [`drover-config`](docs/mods/config.md) | Shell | Drover Config: settings, Work folder and shortcuts in one dialog |
 

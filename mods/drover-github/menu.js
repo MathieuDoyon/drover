@@ -1,4 +1,4 @@
-// GitHub filter key/value menu: pure item builders. ESM, no I/O, imports ./query.js and ./filter.js only.
+// GitHub filter key/value menu: pure item builders. ESM, no I/O, imports ./query.js, ./filter.js and ./tokenmenu.js only.
 //
 // LIMITATION: the host InputState has no caret getter (gpui-kit d.ts: only set_selected_range), so the
 // view calls menuState(content) with the caret at the END of the text. The menu therefore works at the end
@@ -30,6 +30,9 @@
 // after the space as a new word).
 import { qualToken, tokenize } from "./filter.js";
 import { outsideScope } from "./query.js";
+import { nextIndex, CLOSED, lc, rank, wordAt } from "./tokenmenu.js";
+
+export { nextIndex };
 
 export const KEYS = [
   { key: "is", label: "Is", glyph: "▦" },
@@ -65,34 +68,6 @@ const FIXED = {
   in: ["title", "body", "comments"],
 };
 
-export function nextIndex(hi, n, dir) {
-  if (n <= 0) return 0;
-  return dir === "up" ? (hi - 1 + n) % n : (hi + 1) % n;
-}
-
-const CLOSED = { open: false, stage: null, items: [] };
-const lc = (s) => String(s).toLowerCase();
-const rank = (pool, typed, names) => {
-  if (!typed) return pool;
-  const t = lc(typed);
-  const hit = (x) => names(x).map(lc);
-  return [...pool.filter((x) => hit(x).some((n) => n.startsWith(t))), ...pool.filter((x) => !hit(x).some((n) => n.startsWith(t)) && hit(x).some((n) => n.includes(t)))];
-};
-
-// The word at the caret: its range (extended to the end of the word) and the text up to the caret.
-function wordAt(content, caret) {
-  const { text, tokens } = content;
-  const at = Math.max(0, Math.min(caret, text.length));
-  if (tokens.some((s) => s.range.start < at && at < s.range.end)) return null;
-  const floor = tokens.reduce((m, s) => (s.range.end <= at ? Math.max(m, s.range.end) : m), 0);
-  let start = at;
-  while (start > floor && !/\s/.test(text[start - 1])) start--;
-  if (start === at && at > 0 && !/\s/.test(text[at - 1])) return null; // glued to a token
-  const ceil = tokens.reduce((m, s) => (s.range.start >= at ? Math.min(m, s.range.start) : m), text.length);
-  let end = at;
-  while (end < ceil && !/\s/.test(text[end])) end++;
-  return { range: { start, end }, word: text.slice(start, end) };
-}
 
 export function menuState(content, caret = content.text.length, { scopes = [], values = {}, defaultText = "is:issue state:open" } = {}) {
   const w = wordAt(content, caret);

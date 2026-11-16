@@ -42,10 +42,11 @@ export default class Reader extends View {
   ensureStarted(cx) {
     if (!isEnabled("drover-reader")) { this.stopped = this.started; return; }
     if (!cfgReady("drover-reader")) return;
-    if (this.started) { if (this.stopped) { this.stopped = false; this.load(cx); } return; }
+    // Reads start after the render: load() notifies when there is no agent, and a render must not.
+    if (this.started) { if (this.stopped) { this.stopped = false; cx.spawn(async (cx) => this.load(cx)); } return; }
     this.started = true;
     cx.timer.every(5000, (cx) => this.load(cx));
-    this.load(cx);
+    cx.spawn(async (cx) => this.load(cx));
   }
 
   select(address, cx) {

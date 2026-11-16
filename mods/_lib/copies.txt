@@ -15,3 +15,6 @@ workfolder.js
 remote.js
 remote-write.js
 remote-write-ui.js
+tokenfilter.js
+tokenmenu.js
+filterui.js
