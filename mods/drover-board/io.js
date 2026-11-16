@@ -8,6 +8,7 @@ import { ownerError, createRemote, bindings as remoteBindings, mergeRemote, cach
 import { createWriter } from "./remote-write.js";
 import { WAKE_KEY, reschedule, addWake, decide, setStatus, wakeOp } from "./wake.js";
 import { apply as applyKey } from "./keys.js";
+import * as HE from "./herd-export.js";
 import { resolveWorkFolder, moveOffers, parseMove } from "./workfolder.js";
 import { bind as bindCfg, load as loadCfg, ready as cfgReady, cfg } from "./config.js";
 import { AGENTS_KEY, RUNS_KEY, config, plan, argv, leaderPrompt, createCardsPrompt, memberPrompt, worktreeOf, terminalName, startGuard, projectOfDrover, isLiveDrover, activeFor, reconcile, runFolder, markEnded, orphanedWorkers, terminalRecord, liveStatuses, launchArgv, parseAgentEnv, envProblem, BIND_KEY, droverChoices, defaultDrover, maxRuns, keptRuns, pruneRuns } from "./runs.js";
@@ -584,6 +585,151 @@ async function mtimesOf(paths) {
   return rows;
 }
 
+// ---- agents export / import over the inbox (protocol 4, T-MWJHXZ6Q72Q). The CLI only carries text: validation, secret scan, clash rules and the
+// apply all run here, in herd-export.js. Only the safe defaults are reachable (add new, skip identical, keep mine); copy, overwrite and the
+// acknowledgements are UI-only. A confirm names a nonce, kept in shared state, so a re-delivered request answers `already applied`.
+const NONCE_KEY = "drover.agents-import-seen";
+const NONCE_RE = /^[A-Za-z0-9_-]{8,64}$/;
+const SAFE_ACTIONS = ["add", "skip", "keep"];
+
+// The soul hashes of this machine: { localSouls } or { error }. Export needs only these (it never opens an environment file).
+async function soulFacts() {
+  const dir = SOULS(), localSouls = {};
+  try {
+    const herd = await fs.readFile(`${dir}/_herd.md`, "utf8");
+    for (const f of await fs.readdir(dir)) {
+      const m = /^([a-z0-9-]{1,64})\.md$/.exec(f);
+      if (m) localSouls[m[1]] = HE.soulHash(await fs.readFile(`${dir}/${f}`, "utf8"), herd);
+    }
+  } catch (e) { logFailure("soul read", e); return { error: `Cannot read the soul files (${reasonCode(e)})` }; }
+  return { localSouls };
+}
+
+// Import facts: the soul hashes and which of the ids have an environment file. { ctx } or { error }. A failed check is an error,
+// never "absent". The message carries no id: the ids of a request are not scanned yet.
+async function importFacts(ids) {
+  const s = await soulFacts();
+  if (s.error) return s;
+  const envIds = new Set();
+  try { for (const id of ids) if (await hasAgentEnv(id)) envIds.add(id); }
+  catch (e) { return { error: `Cannot check the agent environment files (${reasonCode(e)})` }; }
+  return { ctx: { localSouls: s.localSouls, envIds, supported: HE.VERSION } };
+}
+
+// Every id the core may ask about: the ones in this config and the valid ids of the file (when it parses).
+function idsFor(text) {
+  const ids = new Set(loadConfig().agents.map((a) => a.id));
+  try {
+    const d = JSON.parse(text);
+    for (const a of Array.isArray(d?.agents) ? d.agents : []) if (typeof a?.id === "string" && /^[A-Za-z0-9_-]{1,64}$/.test(a.id)) ids.add(a.id);
+  } catch {}
+  return ids;
+}
+
+// A request the CLI could not have made: any choice other than the safe actions, any acknowledgement.
+function unsafeChoices(choices) {
+  if (choices == null) return false;
+  if (typeof choices !== "object" || Array.isArray(choices)) return true;
+  return Object.values(choices).some((c) => !c || typeof c !== "object" || Object.keys(c).some((k) => k !== "action") || !SAFE_ACTIONS.includes(c.action));
+}
+
+// Fixed words per warning code: a warning's own text may carry a soul name or a program name of the file, which no scan has seen.
+const WARN = {
+  "soul-differs": "your soul file of that name differs from the sender's; the agent will use yours",
+  "soul-dropped": "no such local soul: the agent imports without a soul and only its instructions apply",
+  "needs-env": "environment variables must be re-added after the import",
+  "home-path": "a home folder path appears in this text",
+  "unknown-harness": "the program is not claude, codex or pi: it will run on this machine when the agent starts",
+  "command-changed": "the command of an existing agent changes",
+  "instructions-changed": "the instructions of an existing agent change",
+  "name-clash": "another agent has the same name",
+};
+const rowId = (r) => r.id || `#${r.key.split("#")[1] ?? "?"}`;
+// The preview: every action, the warnings, and for each row that is not blocked the full text that would run or be read.
+function planText(p) {
+  const lines = [];
+  for (const r of p.rows) {
+    if (r.action === "blocked") { lines.push(`blocked ${r.kind} ${rowId(r)}: ${r.blocked.map((b) => [b.code, b.field, b.rule].filter((x) => /^[a-z0-9-]{1,32}$/.test(String(x ?? ""))).join(" ")).join(", ")}`); continue; }
+    lines.push(r.pendingAck?.length && ["add", "copy", "overwrite"].includes(r.action)
+      ? `held ${r.kind} ${r.id} (needs an acknowledgement in the Squads screen: ${r.pendingAck.join(", ")})`
+      : `${r.action} ${r.kind} ${r.id}`);
+    for (const w of r.warnings ?? []) lines.push(`  warning: ${WARN[w.code] ?? "see the Squads screen"}`);
+    if (r.kind === "agent") {
+      lines.push(`  command: ${r.item.command}`, `  instructions: ${JSON.stringify(r.item.instructions)}`);
+      if (r.item.soul) lines.push(`  soul: ${r.item.soul}`);
+    } else {
+      lines.push(`  leader: ${r.item.leader}; members: ${r.item.members.map((m) => `${m.agent} (${JSON.stringify(m.role)})`).join(", ") || "none"}`);
+    }
+  }
+  return lines;
+}
+
+// What the CLI token binds: the plan's own token (file, destination, choices) and the effective rows, so a change of a local fact
+// (a soul installed, an environment file removed) that turns a held or blocked row into a write is stale too.
+const cliToken = (p) => HE.sha256(`${p.token}|${HE.stableJson(p.rows)}`);
+// A confirm carries an ABSOLUTE expiry (ms since the epoch), at most a day ahead. The consumer refuses it after that moment, however the
+// file arrived (a requeue gets a fresh mtime, so a relative ttl would not do). A receipt is kept until its request's expiry plus a margin
+// for clock skew, so a nonce is always on record while its request can still be valid. Only live receipts count towards the limit.
+const EXPIRY_MAX = 86400000;
+const RECEIPT_MARGIN = 3600000;
+const RECEIPT_LIMIT = 20000;
+const liveReceipts = (now) => (Array.isArray(shared(NONCE_KEY)) ? shared(NONCE_KEY) : []).filter((e) => e && typeof e.n === "string" && Number.isFinite(e.exp) && e.exp + RECEIPT_MARGIN > now);
+
+function agentsImport(cmd, facts) {
+  const reply = agentsImportReply(cmd, facts);
+  // Last line of defense for the no-echo contract: a result is never sent with a secret-shaped value in it.
+  return HE.scanSecrets(reply).length ? "error: the result was withheld because it would contain a secret-shaped value" : reply;
+}
+
+function agentsImportReply(cmd, facts) {
+  if (typeof cmd.file !== "string" || !cmd.file) return "error: agents-import needs the file text";
+  if (unsafeChoices(cmd.choices)) return "error: copy, overwrite and acknowledgements are not available from the CLI: use the Squads screen";
+  const confirming = cmd.confirm === true;
+  const now = Date.now();
+  if (confirming) {
+    if (typeof cmd.token !== "string" || !/^[0-9a-f]{64}$/.test(cmd.token)) return "error: --confirm needs the token of a dry run";
+    if (typeof cmd.nonce !== "string" || !NONCE_RE.test(cmd.nonce)) return "error: a confirm needs a nonce (8-64 letters, digits, - or _)";
+    if (!Number.isSafeInteger(cmd.expiresAt) || cmd.expiresAt > now + EXPIRY_MAX) return `error: a confirm needs expiresAt: a time in ms, at most ${EXPIRY_MAX / 3600000} hours ahead`;
+    const receipts = liveReceipts(now); // expired receipts are pruned (not counted) before anything else
+    if (receipts.some((e) => e.n === cmd.nonce)) return "ok: already applied (this request was delivered before; nothing changed)";
+    if (cmd.expiresAt < now) return "error: expired: this confirm is past its expiry; nothing applied, run the dry run again";
+    if (receipts.length >= RECEIPT_LIMIT) return "error: too many live import receipts; nothing applied";
+  }
+  if (facts.error) return `error: ${facts.error}`;
+  // ---- no await from here to the write: the config is read now and the plan, the token and the apply see the same one ----
+  const cfg = loadConfig();
+  const p = HE.plan(cfg, cmd.file, facts.ctx, {});
+  if (!p.ok) return `error: ${p.errors.join("; ")}`;
+  const token = cliToken(p);
+  if (!confirming) {
+    return ["ok: dry run, nothing written", ...planText(p), `token: ${token}`, "confirm with the same file: drover agents import <file> --confirm <token>"].join("\n");
+  }
+  if (token !== cmd.token) return "stale: the file, the configuration or this machine's souls and environment files changed since the dry run; nothing written, run the dry run again";
+  const r = HE.apply(cfg, p, facts.ctx);
+  if (r.stale) return "stale: the configuration changed since the dry run; nothing written, run the dry run again";
+  if (r.error) return `error: ${r.error}`;
+  if (r.applied.length) setShared(AGENTS_KEY, r.config);
+  setShared(NONCE_KEY, [...liveReceipts(now), { n: cmd.nonce, exp: cmd.expiresAt }]);
+  const lines = [`ok: applied ${r.applied.length}${r.applied.length ? ` (${r.applied.map((a) => `${a.action} ${a.key.split(":")[0]} ${a.id}`).join(", ")})` : ""}`];
+  for (const k of r.held) lines.push(`held ${k.replace(":", " ")}: needs an acknowledgement in the Squads screen`);
+  if (r.applied.some((a) => a.key.startsWith("agent:"))) lines.push("added agents start with no environment");
+  return lines.join("\n");
+}
+
+// Reply: a header line, the warnings, `---`, then the file text (JSON lines never start with `---`: the strings are escaped).
+// Reads the config and the soul hashes only: never an environment file.
+function agentsExport(cmd, facts) {
+  const list = (v) => v === undefined ? undefined : Array.isArray(v) && v.every((x) => typeof x === "string") ? v : null;
+  const agents = list(cmd.agents), squads = list(cmd.squads);
+  if (agents === null || squads === null) return "error: agents and squads must be lists of ids";
+  if (facts.error) return `error: ${facts.error}`;
+  const opts = { souls: facts.localSouls, app: "", now: Date.now() };
+  if (agents !== undefined) opts.agents = agents;
+  if (squads !== undefined) opts.squads = squads;
+  const sum = HE.exportSummary(HE.exportHerd(loadConfig(), opts));
+  return sum.error ?? [...sum.header, "---", sum.file].join("\n");
+}
+
 async function drain() {
   const names = (await fs.readdir(INBOX())).filter((n) => n.endsWith(".json"));
   const mtimes = names.length ? await mtimesOf(names.map((n) => `${INBOX()}/${n}`)) : new Map();
@@ -601,6 +747,8 @@ async function drain() {
     let reply;
     // The only await before the gate (the Jira site for `link`), so the compare and the apply below stay in one turn.
     const jira = cmd?.op === "link" ? await jiraSite().catch(() => "") : "";
+    // The other await before the gate: the soul hashes and env-file checks of agents-import / agents-export (read once, the write below is synchronous).
+    const herd = cmd?.op === "agents-import" ? await importFacts(idsFor(cmd.file)) : cmd?.op === "agents-export" ? await soulFacts() : null;
     // ---- no await from here to the apply: bad -> expired -> stale (against the rev of the card as it is NOW) -> apply ----
     const tasks = load();
     const gate = cmd && typeof cmd === "object" ? inboxGate(cmd, tasks, { arrival: arrivalOf(name, mtimes.get(path)), now: Date.now() }) : null;
@@ -610,6 +758,10 @@ async function drain() {
       // The probe. A sender must get `ok: protocol 2` or more before it sends ifRev or ttlMs (3 before the edit/add fields): an OLD consumer ignores both fields and applies the
       // request unconditionally (it answers this probe `error: Unknown drover command`). Changes no state.
       reply = `ok: protocol ${PROTOCOL}`;
+    } else if (cmd?.op === "agents-import") {
+      reply = agentsImport(cmd, herd);
+    } else if (cmd?.op === "agents-export") {
+      reply = agentsExport(cmd, herd);
     } else if (cmd?.op === "wake") {
       // Two open mods can read the same file before either unlinks it: the file name dedupes.
       if (loadWakes().some((w) => w.src === name)) continue;

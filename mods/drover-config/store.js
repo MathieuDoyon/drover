@@ -471,7 +471,7 @@ export function firstSight(seen, name) {
 //   ttlMs  the request is dropped (`expired`) when it arrived more than ttlMs ago.
 // An OLD consumer ignores both fields and applies the request unconditionally. A sender must therefore send `{op:"protocol"}` first
 // and use these fields only when the answer is `ok: protocol 2` (an old consumer answers `error: Unknown drover command`).
-export const PROTOCOL = 3; // 3 = 2 + edit takes priority/tags/assignee/parent/project and add takes assignee (T-MWIA1D6HO84)
+export const PROTOCOL = 4; // 4 = 3 + ops agents-import (dry run + plan token + confirm) and agents-export (T-MWJHXZ6Q72Q); 3 = 2 + edit takes priority/tags/assignee/parent/project and add takes assignee (T-MWIA1D6HO84)
 const REV_OPS = ["move", "edit", "note", "note-edit", "note-rm", "archive", "link", "project"]; // ops that name one card
 const whole = (v) => typeof v === "number" && Number.isSafeInteger(v) && v >= 0;
 // Pure. { ifRev, ttlMs } (each undefined when absent) or { error: "bad …" }.

@@ -18,3 +18,4 @@ remote-write-ui.js
 tokenfilter.js
 tokenmenu.js
 filterui.js
+herd-export.js

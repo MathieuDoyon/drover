@@ -13,6 +13,9 @@ usage: drover tasks [tag|column] [--project <id|name>]   list tasks (id, column,
        drover task-project <T-…> <id|name|none>   put a task in a project (none clears it)
        drover link <T-…> <url|none>               link a card to its GitHub issue/PR or Jira issue (shows as Source in the task dialog); none unlinks
        drover squads                              list squads and agents you can start
+       drover agents export [--out <file>] [--agent <id>]… [--squad <id>]…   export agents and squads as JSON (stdout, or a new private file; node reads shared.json, else an open mod answers); never exports env values; a secret blocks it
+       drover agents import <file> [--confirm <token>]   dry run by default (prints the plan and a token, writes nothing); --confirm <token> applies it.
+                                                  Adds new ids, skips identical, keeps yours on a clash. Copy/overwrite: Squads screen. Needs Drover mods with protocol 4
        drover add "<title>" [--desc "<text>"] [--tag <t>]… [--column backlog|todo] [--priority P0-P3] [--project <id|name>] [--assignee <agent|squad>:<id>] [--parent <T-…>]
        drover move <T-…> <backlog|todo|doing|review|blocked|done>   (an agent cannot move to done: the owner does)
        drover next                                queue mode: free slots + Ready cards of your project (starts nothing)
@@ -96,9 +99,9 @@ elif what == "squads":
     if not cfg: print("default squads: cattle-drive, stray, scouting, dev-review (open the Squads screen once to save them)")
 PY
 }
-send() {  # body, seconds to wait for the answer
+send() {  # body, seconds to wait for the answer, optional name suffix
   dir="$home/data/drover-inbox"; mkdir -p "$dir"
-  name="$(date +%s)-$$"
+  name="$(date +%s)-$$${3:-}"
   printf '%s\n' "$1" > "$dir/.$name.tmp"
   mv "$dir/.$name.tmp" "$dir/$name.json"
   for _ in $(seq $(( $2 * 4 ))); do
@@ -110,7 +113,106 @@ send() {  # body, seconds to wait for the answer
   done
   echo "queued: no Drover Tasks, Board or Wakeups mod is open; it applies when one opens"
 }
+# Agents export/import: this script only carries text. Validation, the secret scan and the merge rules live in the consuming mod (JS).
+# The probe first: a Drover without protocol 4 is refused cleanly (an old consumer would answer the new ops with "Unknown drover command").
+# Returns 0 (protocol 4+), 1 (too old, message printed) or 2 (no mod answered).
+protocol4() {
+  r="$(send '{"op":"protocol","ttlMs":60000}' "${DROVER_AGENTS_WAIT:-5}" -probe)" || true  # send() answers, cleans up its result and prints "queued:" when nobody answers
+  case "$r" in queued:*) return 2 ;; esac
+  if [[ "$r" =~ ^ok:\ protocol\ ([0-9]+)$ ]] && [ "${BASH_REMATCH[1]}" -ge 4 ]; then return 0; fi
+  echo "error: this machine's Drover mods are too old for agents export/import (answer: ${r%%$'\n'*}); update the mods (protocol 4 needed)" >&2
+  return 1
+}
+agents_cmd() {  # the op as one JSON line, built in python from argv/file: the file never goes through a shell variable or argv
+  python3 - "$@" <<'PY'
+import json, sys, time
+op, *a = sys.argv[1:]
+if op == "import":
+    path, token, nonce = a
+    try: text = open(path, encoding="utf-8", errors="replace").read()
+    except OSError as e: sys.exit(f"error: cannot read {path}: {e.strerror}")
+    c = {"op": "agents-import", "file": text}
+    if token: c.update(confirm=True, token=token, nonce=nonce, expiresAt=int(time.time() * 1000) + 3600000)  # an absolute expiry: the confirm is void 1 hour from now, queued or not
+else:
+    c = {"op": "agents-export"}
+    for k, v in (("agents", a[0]), ("squads", a[1])):
+        if v: c[k] = v.split("\n")
+print(json.dumps(c))
+PY
+}
+agents() {
+  case "${1:-}" in
+    import)
+      [ $# -ge 2 ] || usage
+      file="$2"; shift 2; token=""
+      while [ $# -gt 0 ]; do
+        case "$1" in
+          --confirm) [ $# -ge 2 ] && [[ "$2" =~ ^[0-9a-f]{64}$ ]] || usage; token="$2"; shift 2 ;;
+          *) usage ;;
+        esac
+      done
+      [ -f "$file" ] || { echo "error: no file $file" >&2; exit 1; }
+      body="$(agents_cmd import "$file" "$token" "$(date +%s)-$$-$RANDOM$RANDOM")" || exit 1
+      rc=0; protocol4 || rc=$?
+      [ "$rc" -ne 1 ] || exit 1
+      # rc 2: no mod answered. send() then leaves the request queued (a confirm is safe: a changed file or configuration makes it stale). It is NOT applied yet.
+      send "$body" "${DROVER_AGENTS_WAIT:-10}" -import ;;
+    export)
+      shift; out="" ag="" sq=""
+      while [ $# -gt 0 ]; do
+        case "$1" in
+          --out) [ $# -ge 2 ] || usage; out="$2"; shift 2 ;;
+          --agent) [ $# -ge 2 ] || usage; ag="${ag:+$ag$'\n'}$2"; shift 2 ;;
+          --squad) [ $# -ge 2 ] || usage; sq="${sq:+$sq$'\n'}$2"; shift 2 ;;
+          *) usage ;;
+        esac
+      done
+      if [ -n "$out" ] && [ -e "$out" ]; then echo "error: $out exists; remove it or pick another name" >&2; exit 1; fi
+      # Headless first: when node is installed, the read-only export script runs the same JS core on shared.json (no mod needed, no env file opened).
+      # Otherwise the export goes through an open Drover mod (the inbox op). Either way the shell validates nothing.
+      # Follow the symlink chain of this script (an installed ~/.local/bin/drover is a link) so the helper and the core are found next to the real file.
+      # readlink without -f: it is not portable to macOS.
+      src="${BASH_SOURCE[0]}"
+      while [ -L "$src" ]; do
+        ldir="$(cd -P "$(dirname "$src")" && pwd)"; src="$(readlink "$src")"
+        case "$src" in /*) ;; *) src="$ldir/$src" ;; esac
+      done
+      here="$(cd -P "$(dirname "$src")" && pwd)"; node_bin="${DROVER_NODE:-node}"
+      res=""; nrc=9   # 9: node not used; 3: this node cannot load the core (use the inbox); else the script's own exit code
+      if command -v "$node_bin" >/dev/null 2>&1 && [ -f "$here/drover-export.mjs" ] && [ -f "$here/../herd-export.js" ]; then
+        nargs=(--home "$home")
+        while IFS= read -r x; do [ -z "$x" ] || nargs+=(--agent "$x"); done <<<"$ag"
+        while IFS= read -r x; do [ -z "$x" ] || nargs+=(--squad "$x"); done <<<"$sq"
+        nrc=0; res="$("$node_bin" "$here/drover-export.mjs" "${nargs[@]}")" || nrc=$?
+        if [ "$nrc" -ne 0 ] && [ "$nrc" -ne 3 ]; then printf '%s\n' "$res" >&2; exit 1; fi
+      fi
+      if [ "$nrc" -ne 0 ]; then
+        body="$(agents_cmd export "$ag" "$sq")" || exit 1
+        rc=0; protocol4 || rc=$?
+        if [ "$rc" -eq 2 ]; then echo "error: no node on this machine and no Drover Tasks, Board or Wakeups mod is open; an export needs one of them (nothing was exported)" >&2; exit 1; fi
+        [ "$rc" -eq 0 ] || exit 1
+        res="$(send "$body" "${DROVER_AGENTS_WAIT:-10}" -export)" || { printf '%s\n' "$res" >&2; exit 1; }
+      fi
+      case "$res" in ok:*) ;; *) printf '%s\n' "$res" >&2; exit 1 ;; esac
+      printf '%s\n' "$res" | sed '/^---$/,$d' >&2   # header and warnings
+      payload="$(printf '%s\n' "$res" | sed '1,/^---$/d')"
+      if [ -n "$out" ]; then
+        # Created exclusively with mode 0600 at the final write: an existing file or link (also one made while we waited) is never touched.
+        printf '%s\n' "$payload" | python3 -c 'import os, sys
+p = sys.argv[1]
+try: fd = os.open(p, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+except OSError as e: sys.exit("error: cannot create " + p + ": " + e.strerror + " (an existing file or link is never overwritten)")
+os.fchmod(fd, 0o600)
+with os.fdopen(fd, "wb") as f: f.write(sys.stdin.buffer.read())' "$out" || exit 1
+        echo "wrote $out" >&2
+      else
+        printf '%s\n' "$payload"
+      fi ;;
+    *) usage ;;
+  esac
+}
 case "${1:-}" in
+  agents) agents "${@:2}" ;;
   tasks) read_shared tasks "${@:2}" ;;
   task) [ $# -eq 2 ] || usage; read_shared task "$2" ;;
   squads) read_shared squads ;;

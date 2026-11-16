@@ -521,3 +521,15 @@ export function apply(cfg, p, ctx = {}) {
   if (!auth.ok || auth.token !== p.token || stableJson(auth.rows) !== stableJson(p.rows)) return { error: "The plan does not match the file, the configuration and the choices it was made from" };
   return { config: { ...cfg, agents, squads }, applied, held };
 }
+
+// ---- shared by the inbox consumer and the headless export script (T-MWJHXZ6Q72Q)
+
+// The hash an export carries and an import compares: the soul file and the shared rules file, as installed.
+export const soulHash = (soulText, herdText) => sha256(`${soulText}\n${herdText}`);
+
+// The text of an export result: { error } (one string, lines joined) or { header: [lines], file }. Names the rule, never a value.
+export function exportSummary(r) {
+  if (r.error) return { error: `error: ${r.error}` };
+  if (r.blocked) return { error: ["error: export blocked by the secret scan (edit the agent, then export again):", ...r.blocked.map((b) => `  ${b.id} · ${b.field} · ${b.rule}`)].join("\n") };
+  return { header: [`ok: exported ${r.agents} agent${r.agents === 1 ? "" : "s"}, ${r.squads} squad${r.squads === 1 ? "" : "s"}`, ...r.warnings.map((w) => `warning: ${w.id} · ${w.field} · ${w.rule}`)], file: r.file };
+}

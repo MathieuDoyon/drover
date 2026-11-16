@@ -63,9 +63,9 @@ const world = () => {
   return Object.fromEntries(t.map((x) => [x.title, x.id]));
 };
 
-test("probe answers ok: protocol 3", async () => {
-  assert.equal(S.PROTOCOL, 3);
-  assert.equal(await send({ op: "protocol" }), "ok: protocol 3");
+test("probe answers ok: protocol 4", async () => {
+  assert.equal(S.PROTOCOL, 4);
+  assert.equal(await send({ op: "protocol" }), "ok: protocol 4");
 });
 
 test("edit sets priority, tags, assignee, parent and project in ONE update (+1 rev)", async () => {
