@@ -59,7 +59,7 @@ const ENV_NAME = /^[A-Z_][A-Z0-9_]*$/;
 const ENV_DENY = /^(PATH|HOME|SHELL|USER|LOGNAME|TERM|HC_.*|HERDR_.*|LD_.*|DYLD_.*|PYTHON.*)$/;
 
 // The mod runtime has no TextEncoder: count UTF-8 bytes by hand (a lone surrogate counts 3, as U+FFFD).
-function utf8Bytes(str) {
+export function utf8Bytes(str) {
   let n = 0;
   for (let i = 0; i < str.length; i++) {
     const c = str.charCodeAt(i);
