@@ -325,10 +325,10 @@ test("g. a stale, expired or bad request marks its name in inbox-seen and writes
 });
 
 // ---- h. the probe
-test("h. op protocol answers `ok: protocol 2` and changes no state", async () => {
+test("h. op protocol answers `ok: protocol 3` and changes no state", async () => {
   seed("one");
   const before = snap(), proj = JSON.stringify(host.state["drover.projects"] ?? null);
-  assert.equal(await send({ op: "protocol" }), "ok: protocol 2");
+  assert.equal(await send({ op: "protocol" }), "ok: protocol 3");
   assert.equal(snap(), before);
   assert.equal(JSON.stringify(host.state["drover.projects"] ?? null), proj);
 });

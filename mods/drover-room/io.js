@@ -173,13 +173,13 @@ export const remoteWriter = () => {
 // Late outcomes (a result that arrived after the wait), oldest first; the caller shows and clears them.
 export const takeRemoteOutcomes = () => remoteOutcomes.splice(0);
 const remoteBinding = (localId) => remoteBindings(loadProjects()).find((b) => b.localId === localId) ?? null;
-// What a Board/Tasks control needs: { remote, enabled, reason, frozen }.
+// What a Board/Tasks control needs: { remote, enabled, reason, frozen, fields: { on, tip } } (fields: the protocol-3 controls).
 export function remoteWriteState(localId) {
   const b = remoteBinding(localId);
   if (!b) return { remote: false, enabled: false, reason: "Not a remote project", frozen: false };
   const w = remoteWriter();
   const g = w.canWrite(b.machine, b.projectId);
-  return { remote: true, enabled: g.ok, reason: g.ok ? null : g.reason, frozen: w.frozen(b.machine, b.projectId) };
+  return { remote: true, enabled: g.ok, reason: g.ok ? null : g.reason, frozen: w.frozen(b.machine, b.projectId), fields: w.fields(b.machine, b.projectId) };
 }
 // A card change on a remote project: only remote-write.js builds the request. The board is re-read after a save.
 export async function remoteSend(localId, op, cx) {
@@ -190,6 +190,11 @@ export async function remoteSend(localId, op, cx) {
   if (o.status === "saved") await remote.retry(b.machine, b.projectId);
   cx?.notify?.();
   return o;
+}
+// Re-read one remote project's board now (the destination of a move, or after a stale answer). Resolves when the read ended.
+export async function remoteReload(localId) {
+  const b = remoteBinding(localId);
+  if (b) await remote.retry(b.machine, b.projectId);
 }
 // The freeze switch of the rollback runbook: remote.writes (the binding keeps its id). `frozen` is true only when no send is in flight.
 export function setRemoteWrites(localId, on) {
@@ -602,7 +607,7 @@ async function drain() {
     if (gate) {
       reply = `error: ${gate.error}`;
     } else if (cmd?.op === "protocol") {
-      // The probe. A sender must get `ok: protocol 2` before it sends ifRev or ttlMs: an OLD consumer ignores both fields and applies the
+      // The probe. A sender must get `ok: protocol 2` or more before it sends ifRev or ttlMs (3 before the edit/add fields): an OLD consumer ignores both fields and applies the
       // request unconditionally (it answers this probe `error: Unknown drover command`). Changes no state.
       reply = `ok: protocol ${PROTOCOL}`;
     } else if (cmd?.op === "wake") {
@@ -624,23 +629,28 @@ async function drain() {
     } else if (cmd?.op === "add") {
       const pk = projectKey(loadProjects(), cmd.project);
       const owned = pk.error ? null : ownerError(loadProjects(), pk.id);
-      const r = pk.error ? pk : owned ? { error: owned } : addCommand(load(), cmd, pk.id);
+      const r = pk.error ? pk : owned ? { error: owned } : addCommand(load(), cmd, pk.id, undefined, assigneeCtx());
       if (!r.error) setShared(KEY, r.tasks);
       reply = r.error ? `error: ${r.error}` : `ok: ${r.task.id} added to ${r.task.column}`;
     } else {
       if (cmd?.op === "note" || cmd?.op === "link") cmd = { ...cmd, by: terminalName(loadRuns(), String(cmd.by ?? "")) || "you" }; // an address becomes the agent's name
       if (cmd?.op === "move") cmd = { ...cmd, fromDrover: isLiveDrover(loadRuns(), String(cmd.from ?? ""), liveState().alive) }; // always set here: a request file cannot claim it
       if (cmd?.op === "link") cmd = { ...cmd, jiraSite: jira }; // always set here: a request file cannot claim it
-      const pk = cmd?.op === "project" ? projectKey(loadProjects(), cmd.project) : { id: null };
+      // `edit` may carry a project (protocol 3): it is resolved and ownership-checked exactly like op `project` (source below, destination here).
+      const withProject = cmd?.op === "project" || (cmd?.op === "edit" && cmd.project !== undefined);
+      const pk = !withProject ? { id: null } : typeof cmd.project === "string" || cmd.op === "project" ? projectKey(loadProjects(), cmd.project) : { error: "bad project: give a project id, name or none" };
       // A retained card of a remote project is not edited here either: stored ownership counts, not only the destination.
       const owned = pk.error ? null : ownerError(loadProjects(), pk.id) ?? ownerError(loadProjects(), typeof cmd?.id === "string" ? tasks.find((x) => x.id === cmd.id)?.project : null);
-      const r = pk.error ? pk : owned ? { error: owned } : applyCommand(tasks, cmd.op === "project" ? { ...cmd, project: pk.id } : cmd);
+      const r = pk.error ? pk : owned ? { error: owned } : applyCommand(tasks, withProject ? { ...cmd, project: pk.id } : cmd, undefined, assigneeCtx());
       if (!r.error) setShared(KEY, r.tasks);
       reply = r.error ? `error: ${r.error}` : cmd.op === "project" ? `ok: ${r.task.id} project ${r.task.project ?? "none"}` : cmd.op === "link" ? `ok: ${r.task.id} source ${r.task.source?.url ?? "none"}` : cmd.op === "note-edit" || cmd.op === "note-rm" ? `ok: ${r.task.id} ${cmd.noteId} ${cmd.op === "note-rm" ? "removed" : "edited"}` : cmd.op === "note" || cmd.op === "edit" ? `ok: ${r.task.id} ${cmd.op === "note" ? `note ${r.task.notes.length}` : "edited"}` : `ok: ${r.task.id} -> ${r.task.column}`;
     }
     await fs.writeFile(path.replace(/\.json$/, ".result"), reply);
   }
 }
+
+// The agents and squads of THIS machine, for assignee checks (ids only; nothing else of the config leaves this function).
+const assigneeCtx = () => { const c = loadConfig(); return { agents: c.agents.map((a) => a.id), squads: c.squads.map((q) => q.id) }; };
 
 const liveState = () => ({ live: liveStatuses(agents(), terminals()), alive: new Set(terminals().map((x) => x.address)) });
 

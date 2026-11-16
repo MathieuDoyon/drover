@@ -122,11 +122,50 @@ export function add(tasks, fields, now = Date.now()) {
   return { tasks: [...tasks, task], task };
 }
 
-// `drover add --parent`: the parent must exist (a new card cannot be its own parent or close a cycle).
-export function addCommand(tasks, cmd, projectId, now) {
-  const parent = typeof cmd.parent === "string" && cmd.parent ? cmd.parent : null;
-  if (parent && !tasks.some((t) => t.id === parent)) return { error: `Parent ${parent} not found` };
-  return add(tasks, { title: cmd.title, desc: cmd.desc ?? "", tags: cmd.tags ?? [], column: cmd.column ?? "backlog", priority: cmd.priority ?? "P2", project: projectId, assignee: cmd.assignee, ...(parent ? { parent } : {}) }, now);
+// Protocol 3 field checks. STRICT: a value that is given is either valid or the whole request is refused; nothing is coerced
+// (validate() would turn a bad priority into P2 and drop a bad assignee). Pure; the caller passes what it knows of this machine.
+// ctx: { agents: [id], squads: [id] } of the machine that owns the card. Returns { value } or { error }.
+const ids = (v) => (Array.isArray(v) ? v : []);
+export function strictAssignee(a, ctx) {
+  if (a === "none") return { value: null };
+  if (!a || typeof a !== "object" || Array.isArray(a) || (a.kind !== "agent" && a.kind !== "squad") || typeof a.id !== "string" || !a.id)
+    return { error: 'Bad assignee: give {"kind":"agent"|"squad","id":"…"} or "none"' };
+  if (!ids(a.kind === "agent" ? ctx?.agents : ctx?.squads).includes(a.id)) return { error: `Unknown ${a.kind} ${a.id} for the assignee (see: drover squads)` };
+  return { value: { kind: a.kind, id: a.id } };
+}
+export function strictPriority(p) {
+  return PRIORITIES.includes(p) ? { value: p } : { error: `Bad priority ${typeof p === "string" ? p : JSON.stringify(p)}: use ${PRIORITIES.join(", ")}` };
+}
+// Tags replace the whole set. Same normal form as validate(): trimmed, no leading #, lower case, no duplicates.
+export function strictTags(t) {
+  if (!Array.isArray(t) || t.some((x) => typeof x !== "string")) return { error: "Bad tags: give a list of strings (it replaces all the tags)" };
+  return { value: [...new Set(t.map((s) => s.trim().replace(/^#/, "").toLowerCase()).filter(Boolean))] };
+}
+// A parent for card `id` that will sit in project `project`: it exists, is in the same project, and closes no cycle. "none" clears.
+export function strictParent(tasks, id, parent, project) {
+  if (parent === "none") return { value: null };
+  if (typeof parent !== "string" || !parent) return { error: 'Bad parent: give a task id or "none"' };
+  if (parent === id) return { error: "A task cannot be its own parent" };
+  const p = tasks.find((t) => t.id === parent);
+  if (!p) return { error: `Parent ${parent} not found` };
+  if ((p.project ?? null) !== (project ?? null)) return { error: `Parent ${parent} is in another project` };
+  const seen = new Set();
+  for (let cur = p; cur && !seen.has(cur.id); cur = tasks.find((t) => t.id === cur.parent)) {
+    if (cur.id === id) return { error: "That would make a parent cycle" };
+    seen.add(cur.id);
+  }
+  return { value: parent };
+}
+
+// `drover add`: every field that is GIVEN is valid or nothing is added. The CLI sends null / "" for "none" and always a priority and a tags list.
+export function addCommand(tasks, cmd, projectId, now, ctx) {
+  const none = (v) => v === undefined || v === null || v === "";
+  let priority = "P2", tags = [], parent = null, assignee = null;
+  if (cmd.priority !== undefined && cmd.priority !== null) { const r = strictPriority(cmd.priority); if (r.error) return r; priority = r.value; }
+  if (cmd.tags !== undefined && cmd.tags !== null) { const r = strictTags(cmd.tags); if (r.error) return r; tags = r.value; }
+  if (!none(cmd.parent)) { const r = strictParent(tasks, null, cmd.parent, projectId); if (r.error) return r; parent = r.value; }
+  if (cmd.assignee !== undefined && cmd.assignee !== null) { const r = strictAssignee(cmd.assignee, ctx); if (r.error) return r; assignee = r.value; }
+  return add(tasks, { title: cmd.title, desc: cmd.desc ?? "", tags, column: cmd.column ?? "backlog", priority, project: projectId, assignee, ...(parent ? { parent } : {}) }, now);
 }
 
 // One card per source item: "Add to Board" twice finds the first one.
@@ -278,7 +317,7 @@ export const GROUPS = [
 ];
 
 // A request from outside (the `drover` script an agent runs). Only known ops and fields.
-export function applyCommand(tasks, cmd, now) {
+export function applyCommand(tasks, cmd, now, ctx) {
   if (typeof cmd?.id !== "string") return { error: "Unknown drover command" };
   if (cmd.op === "archive") return update(tasks, cmd.id, { archived: true }, now);
   if (cmd.op === "note") {
@@ -301,16 +340,27 @@ export function applyCommand(tasks, cmd, now) {
     if (!text) return { error: "Note is empty" };
     return update(tasks, cmd.id, { notes: notes.map((n) => (n.id === cmd.noteId ? { ...n, text, edited: cmd.now ?? now ?? Date.now() } : n)) }, now);
   }
-  if (cmd.op === "edit") {
+  if (cmd.op === "edit") { // protocol 3: title, desc, priority, tags, assignee, parent, project in ONE update (one rev bump); omitted = untouched
+    const cur = tasks.find((t) => t.id === cmd.id);
+    if (!cur) return { error: `Task ${cmd.id} not found` };
     const patch = Object.fromEntries(["title", "desc"].filter((k) => typeof cmd[k] === "string").map((k) => [k, cmd[k]]));
-    const hasParent = typeof cmd.parent === "string";
-    if (!Object.keys(patch).length && !hasParent) return { error: "Nothing to edit: give a title, a description or a parent" };
-    if (hasParent) { // check the parent first so a bad one changes nothing
-      const p = setParent(tasks, cmd.id, cmd.parent === "none" ? null : cmd.parent, now);
-      if (p.error || !Object.keys(patch).length) return p;
-      tasks = p.tasks;
+    const given = (k) => cmd[k] !== undefined;
+    if (given("priority")) { const r = strictPriority(cmd.priority); if (r.error) return r; patch.priority = r.value; }
+    if (given("tags")) { const r = strictTags(cmd.tags); if (r.error) return r; patch.tags = r.value; }
+    if (given("assignee")) { const r = strictAssignee(cmd.assignee, ctx); if (r.error) return r; patch.assignee = r.value; }
+    if (given("project")) { // the caller resolved the name to an id (or null) and checked who owns it
+      if (cmd.project !== null && typeof cmd.project !== "string") return { error: "Bad project: give a project id, name or none" };
+      patch.project = cmd.project;
     }
-    return Object.keys(patch).length ? update(tasks, cmd.id, patch, now) : { error: "Nothing to edit" };
+    if ("project" in patch && (patch.project ?? null) !== (cur.project ?? null)) { // a move may not leave a parent/child pair in two projects
+      const parentCard = !given("parent") && cur.parent ? tasks.find((t) => t.id === cur.parent) : null; // a given parent is checked below against the new project
+      if (parentCard && (parentCard.project ?? null) !== (patch.project ?? null)) return { error: `${cmd.id} has parent ${parentCard.id} in another project: detach parent/children first (or send parent "none" with the move)` };
+      const kid = tasks.find((t) => t.parent === cmd.id && (t.project ?? null) !== (patch.project ?? null));
+      if (kid) return { error: `${cmd.id} has child ${kid.id}: detach parent/children first` };
+    }
+    if (given("parent")) { const r = strictParent(tasks, cmd.id, cmd.parent, "project" in patch ? patch.project : cur.project); if (r.error) return r; patch.parent = r.value; }
+    if (!Object.keys(patch).length) return { error: "Nothing to edit: give a title, a description, a priority, tags, an assignee, a parent or a project" };
+    return update(tasks, cmd.id, patch, now);
   }
   if (cmd.op === "link") { // `drover link <T-…> <url|none>`: set or clear the source, like an import
     const cur = tasks.find((t) => t.id === cmd.id);
@@ -421,7 +471,7 @@ export function firstSight(seen, name) {
 //   ttlMs  the request is dropped (`expired`) when it arrived more than ttlMs ago.
 // An OLD consumer ignores both fields and applies the request unconditionally. A sender must therefore send `{op:"protocol"}` first
 // and use these fields only when the answer is `ok: protocol 2` (an old consumer answers `error: Unknown drover command`).
-export const PROTOCOL = 2;
+export const PROTOCOL = 3; // 3 = 2 + edit takes priority/tags/assignee/parent/project and add takes assignee (T-MWIA1D6HO84)
 const REV_OPS = ["move", "edit", "note", "note-edit", "note-rm", "archive", "link", "project"]; // ops that name one card
 const whole = (v) => typeof v === "number" && Number.isSafeInteger(v) && v >= 0;
 // Pure. { ifRev, ttlMs } (each undefined when absent) or { error: "bad …" }.
@@ -556,7 +606,7 @@ export const createSize = (large) => (large ? { width: 0.9, height: 0.85 } : { w
 export const editSize = createSize;
 
 // The create draft as overlay props (JSON-safe, known keys only), and back with defaults. Bad input gives no draft or default fields.
-const DRAFT_KEYS = ["mode", "title", "desc", "prompt", "column", "priority", "labels", "assignee", "runner", "project", "another", "pasted", "note"];
+const DRAFT_KEYS = ["mode", "title", "desc", "prompt", "column", "priority", "labels", "assignee", "runner", "project", "another", "pasted", "note", "parent"];
 export const packDraft = (f) => Object.fromEntries(DRAFT_KEYS.filter((k) => f[k] !== undefined).map((k) => [k, f[k]]));
 export function unpackDraft(d) {
   if (!d || typeof d !== "object") return null;
@@ -568,6 +618,7 @@ export function unpackDraft(d) {
     assignee: d.assignee && typeof d.assignee.kind === "string" && typeof d.assignee.id === "string" ? { kind: d.assignee.kind, id: d.assignee.id } : null,
   };
   for (const k of ["column", "priority", "runner", "project"]) if (typeof d[k] === "string") out[k] = d[k];
+  if (typeof d.parent === "string" && d.parent) out.parent = d.parent; // only an omarchy card's draft uses it (a local create takes its parent from the props)
   return out;
 }
 

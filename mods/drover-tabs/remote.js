@@ -2,7 +2,9 @@
 // A project bound to another machine (omarchy): the laptop reads that machine's board, read-only (T-MWHVWQNL2HA).
 // Pure logic: the hc runner and the shared-state accessors are injected. Nothing here writes to the remote machine.
 // The remote shared.json is untrusted and holds secrets-adjacent keys (layout, runs, wakeups): only drover.tasks and
-// drover.projects are read; the cache is { at, tasks } and nothing else is stored or logged.
+// drover.projects and (ids and display names only) drover.agents are read; the cache is { at, tasks, picks } and nothing else is stored or logged.
+
+import { config } from "./runs.js";
 
 export const SHARED_PATH = ".config/herdr-app/shared.json";
 export const MAX_BYTES = 2 * 1024 * 1024;
@@ -32,7 +34,23 @@ export const validProjectId = (s) => typeof s === "string" && /^P-[A-Z0-9]+$/.te
 export const cacheKey = (machine, projectId) => `${CACHE_PREFIX}${machine}.${projectId}`;
 export const readDelay = (failures) => (failures >= SLOW_AFTER ? SLOW_MS : POLL_MS);
 
-// The text of the remote shared.json -> { tasks, projectIds } or { error }. Only the 2 keys are looked at.
+const PICK_ID = /^[A-Za-z0-9_-]{1,64}$/;
+const pickName = (v, id) => (typeof v === "string" && v.trim() ? v.trim().slice(0, 80) : id);
+// The picker data from omarchy's shared.json: who a card can be assigned to ({kind,id,name}: no command, soul, env or member list) and the
+// projects a card can move to ({id,name}: not one owned by another machine, no repos or folders). An unset drover.agents is the consumer's
+// own default herd, as config() reads it there.
+function picksOf(doc) {
+  const cfg = config(doc["drover.agents"]);
+  const assignees = [];
+  for (const [kind, list] of [["agent", cfg.agents], ["squad", cfg.squads]]) {
+    for (const x of Array.isArray(list) ? list : []) if (x && typeof x.id === "string" && PICK_ID.test(x.id)) assignees.push({ kind, id: x.id, name: pickName(x.name, x.id) });
+  }
+  const projects = (Array.isArray(doc["drover.projects"]) ? doc["drover.projects"] : [])
+    .filter((p) => p && validProjectId(p.id) && !p.remote).map((p) => ({ id: p.id, name: pickName(p.name, p.id) }));
+  return { assignees, projects };
+}
+
+// The text of the remote shared.json -> { tasks, projectIds, picks } or { error }. Only the 3 keys are looked at.
 // The error is a fixed code, never the payload.
 export function parseRemote(text, projectId) {
   if (typeof text !== "string") return { error: "empty answer" };
@@ -45,6 +63,7 @@ export function parseRemote(text, projectId) {
   return {
     tasks: tasks.filter((t) => t && typeof t === "object" && t.project === projectId && !t.archived),
     projectIds: projects.map((p) => p?.id).filter((id) => typeof id === "string"),
+    picks: picksOf(doc),
   };
 }
 
@@ -81,7 +100,7 @@ const COLUMN_IDS = ["backlog", "todo", "doing", "review", "blocked", "done"];
 // The agent of a remote card is a terminal on that machine: text only, never an address the laptop could focus or message.
 export const agentText = (task, machine) => (typeof task?.agent === "string" && /^[A-Za-z0-9_.\/-]{1,40}$/.test(task.agent) ? (task.agent.includes("/") ? task.agent : `${machine}/${task.agent}`) : null);
 // Untrusted card -> a card every view can draw. `project` is the LOCAL project id; `agent` is cleared (see agentText).
-export const normalizeRemoteCard = (t, localId, machine) => ({
+export const normalizeRemoteCard = (t, localId, machine, remoteProjectId) => ({
   ...t,
   id: String(t.id ?? ""),
   title: String(t.title ?? ""),
@@ -91,13 +110,13 @@ export const normalizeRemoteCard = (t, localId, machine) => ({
   tags: Array.isArray(t.tags) ? t.tags.map(String) : [],
   notes: Array.isArray(t.notes) ? t.notes.filter((n) => n && typeof n === "object") : [],
   archived: false,
-  assignee: null,
-  parent: null,
+  assignee: t.assignee && typeof t.assignee === "object" && (t.assignee.kind === "agent" || t.assignee.kind === "squad") && typeof t.assignee.id === "string" && t.assignee.id ? { kind: t.assignee.kind, id: t.assignee.id } : null,
+  parent: typeof t.parent === "string" && t.parent ? t.parent : null,
   source: null,
   project: localId,
   agent: null,
   agentText: agentText(t, machine),
-  remote: { machine },
+  remote: { machine, ...(remoteProjectId ? { projectId: remoteProjectId } : {}) }, // projectId: the id on that machine (a move target is another one)
 });
 // What the read-only card view shows. Everything is a string or a list of strings: plain text, nothing to resolve on this machine.
 export const remoteCardRows = (c) => ({
@@ -109,8 +128,8 @@ export function mergeRemote(local, projects, view) {
   const tasks = [...local], remotes = [];
   for (const b of bindings(projects)) {
     const v = view(b.machine, b.projectId);
-    remotes.push({ localId: b.localId, name: projects.find((p) => p.id === b.localId)?.name ?? b.localId, machine: b.machine, projectId: b.projectId, state: v.state, banner: v.banner, at: v.at ?? null });
-    for (const t of v.tasks) tasks.push(normalizeRemoteCard(t, b.localId, b.machine));
+    remotes.push({ localId: b.localId, name: projects.find((p) => p.id === b.localId)?.name ?? b.localId, machine: b.machine, projectId: b.projectId, state: v.state, banner: v.banner, at: v.at ?? null, picks: v.picks ?? { assignees: [], projects: [], tags: [] } });
+    for (const t of v.tasks) tasks.push(normalizeRemoteCard(t, b.localId, b.machine, b.projectId));
   }
   return { tasks, remotes };
 }
@@ -162,8 +181,10 @@ export function createRemote({ run, getShared, setShared, now = Date.now, log = 
   // Unbind: drop the entry (an in-flight read is dropped on arrival) and the cache.
   function detach(machine, projectId) {
     const key = cacheKey(machine, projectId);
+    const e = entries.get(key);
     entries.delete(key);
     setShared(key, null);
+    const s = e?.settle; if (e) e.settle = null; s?.({ error: "detached" }); // nobody waits forever on a read of a binding that is gone
   }
 
   function read(machine, projectId) {
@@ -185,19 +206,23 @@ export function createRemote({ run, getShared, setShared, now = Date.now, log = 
         log(`remote ${machine}/${projectId}: read failed (${parsed.error}), failures ${cur.failures}`);
         return { error: parsed.error };
       }
-      setShared(key, { at: now(), tasks: parsed.tasks });
+      cur.picks = parsed.picks; // kept in memory too: a cache write by an older mod copy (no picks) must not erase what this instance has read
+      setShared(key, { at: now(), tasks: parsed.tasks, picks: parsed.picks });
       cur.failures = 0; cur.ok = true; cur.error = null;
       cur.nextAt = now() + POLL_MS;
       log(`remote ${machine}/${projectId}: read ok, ${parsed.tasks.length} cards`);
       return { ok: true };
     })();
-    e.inflight = p;
-    return p;
+    // The promise callers wait on settles with the read, OR when the read is abandoned (timeout, switch-off): nobody waits on a read that was dropped.
+    const wait = new Promise((resolve) => { e.settle = resolve; p.then(resolve, () => resolve({ error: "read failed" })); });
+    e.inflight = wait;
+    return wait;
   }
 
   // A read past its deadline is abandoned: a new generation drops its late answer, and it counts as one failure.
   function abandon(e) {
     e.gen = ++genSeed; e.inflight = null; e.failures++; e.ok = false; e.error = "timeout";
+    const s = e.settle; e.settle = null; s?.({ error: "timeout" });
     e.nextAt = now() + readDelay(e.failures);
     log(`remote ${e.machine}/${e.projectId}: read timed out, failures ${e.failures}`);
   }
@@ -206,14 +231,14 @@ export function createRemote({ run, getShared, setShared, now = Date.now, log = 
     const want = new Map(list.map((b) => [cacheKey(b.machine, b.projectId), b]));
     for (const [key, b] of want) {
       const e = entries.get(key);
-      if (e && e.id !== b.id) { entries.delete(key); setShared(key, null); } // same pair, new binding: nothing of the old one survives
+      if (e && e.id !== b.id) { entries.delete(key); setShared(key, null); const s = e.settle; e.settle = null; s?.({ error: "detached" }); } // same pair, new binding: nothing of the old one survives
       if (!entries.has(key)) attach(b.machine, b.projectId, b.id);
     }
     for (const [key, e] of [...entries]) if (!want.has(key)) detach(e.machine, e.projectId);
   }
   // The owning screen was switched off: drop every read in flight (a new generation), start none.
   function suspend() {
-    for (const e of entries.values()) if (e.inflight) { e.gen = ++genSeed; e.inflight = null; }
+    for (const e of entries.values()) if (e.inflight) { e.gen = ++genSeed; e.inflight = null; const s = e.settle; e.settle = null; s?.({ dropped: true }); }
   }
 
   // Called by the owner's timer (every TICK_MS): abandons a read past its deadline, then reads each binding that is due.
@@ -221,7 +246,9 @@ export function createRemote({ run, getShared, setShared, now = Date.now, log = 
     const t = now();
     const timedOut = [];
     for (const e of entries.values()) if (e.inflight && t - e.startedAt > TIMEOUT_MS) { abandon(e); timedOut.push({ error: "timeout" }); }
-    return Promise.all([...timedOut, ...[...entries.values()].filter((e) => !e.inflight && t >= e.nextAt).map((e) => read(e.machine, e.projectId))]);
+    // Due by the poll, or the cache lost its picks (an older mod copy rewrote it): read now, so every copy sees them again.
+    const lost = (e) => e.ok && !(getShared(cacheKey(e.machine, e.projectId)) || {}).picks;
+    return Promise.all([...timedOut, ...[...entries.values()].filter((e) => !e.inflight && (t >= e.nextAt || lost(e))).map((e) => read(e.machine, e.projectId))]);
   }
   // The Retry control: a read now (joins one already running).
   const retry = (machine, projectId) => read(machine, projectId);
@@ -232,10 +259,13 @@ export function createRemote({ run, getShared, setShared, now = Date.now, log = 
     const e = entries.get(key);
     const c = getShared(key);
     const have = c && typeof c === "object" && Array.isArray(c.tasks);
-    if (!have) return { state: "never", tasks: [], banner: `${machine} has not answered yet`, error: e?.error ?? null };
+    if (!have) return { state: "never", tasks: [], picks: { assignees: [], projects: [], tags: [], loading: true }, banner: `${machine} has not answered yet`, error: e?.error ?? null };
     const tasks = c.tasks.map((t) => ({ ...t, remote: { machine } }));
-    if (e?.ok) return { state: "fresh", at: c.at, tasks, banner: null };
-    return { state: "stale", at: c.at, tasks, banner: `${machine} unreachable · last update ${hhmm(c.at)} · showing a saved copy`, error: e?.error ?? null };
+    const list = (v) => (Array.isArray(v) ? v : []);
+    const src = c.picks && typeof c.picks === "object" ? c.picks : e?.picks ?? null; // the cache first, else what this instance read; neither: still loading
+    const picks = { assignees: list(src?.assignees), projects: list(src?.projects), ...(src ? {} : { loading: true }), tags: [...new Set(tasks.flatMap((t) => (Array.isArray(t.tags) ? t.tags.filter((x) => typeof x === "string") : [])))].sort() };
+    if (e?.ok) return { state: "fresh", at: c.at, tasks, picks, banner: null };
+    return { state: "stale", at: c.at, tasks, picks, banner: `${machine} unreachable · last update ${hhmm(c.at)} · showing a saved copy`, error: e?.error ?? null };
   }
 
   return { bind, attach, detach, sync, suspend, read, tick, retry, view };

@@ -44,15 +44,15 @@ test("parseRemote keeps only drover.tasks and drover.projects, the bound project
   const r = R.parseRemote(JSON.stringify(board()), RID);
   assert.deepEqual(r.tasks.map((t) => t.id), ["T-A"]);
   assert.deepEqual(r.projectIds, [RID, RID2]);
-  assert.deepEqual(Object.keys(r).sort(), ["projectIds", "tasks"]);
+  assert.deepEqual(Object.keys(r).sort(), ["picks", "projectIds", "tasks"]);
 });
 
-test("2a read: the cache is { at, tasks } at drover.remote.<machine>.<projectId> and nothing else", async () => {
+test("2a read: the cache is { at, tasks, picks } at drover.remote.<machine>.<projectId> and nothing else", async () => {
   rem.attach("omarchy", RID);
   await rem.read("omarchy", RID);
   const key = `drover.remote.omarchy.${RID}`;
   assert.deepEqual(Object.keys(store), [key]);
-  assert.deepEqual(Object.keys(store[key]).sort(), ["at", "tasks"]);
+  assert.deepEqual(Object.keys(store[key]).sort(), ["at", "picks", "tasks"]); // picks: the picker data (T-MWIA1D6HO84)
   assert.deepEqual(store[key].tasks.map((t) => t.id), ["T-A"]);
   assert.deepEqual(hc.calls[0].args, ["file", "read", "--on", "omarchy", ".config/herdr-app/shared.json"]);
   assert.equal(hc.calls[0].opts.timeout, 10000);
@@ -164,7 +164,7 @@ test("2f a rebind or an unbind during an in-flight read drops that response", as
   await until(() => hc.reads() === 2, "second read started");
   rem.detach("omarchy", RID);
   release();
-  assert.deepEqual(await p2, { dropped: true });
+  assert.deepEqual(await p2, { error: "detached" }, "the waiter is settled at the unbind, not left hanging");
   assert.deepEqual(store, {});
 });
 
@@ -257,7 +257,7 @@ test("bindings() lists only projects with a valid remote; mergeRemote swaps in t
   assert.deepEqual(m.tasks.map((t) => t.id), ["T-LOCAL", "T-A"]);
   const r = m.tasks[1];
   assert.equal(r.project, "P-R", "mapped to the local project, so scope and filters work");
-  assert.deepEqual(r.remote, { machine: "omarchy" });
+  assert.deepEqual(r.remote, { machine: "omarchy", projectId: RID });
   assert.deepEqual(m.remotes.map((x) => [x.localId, x.state, x.banner]), [["P-R", "fresh", null]]);
   const odd = R.normalizeRemoteCard({ id: "T-Z", title: 5, column: "weird", priority: "P9", tags: "x", notes: null, agent: "t7" }, "P-R", "omarchy");
   assert.deepEqual([odd.column, odd.priority, odd.tags, odd.notes, odd.title, odd.agentText], ["backlog", "P2", [], [], "5", "omarchy/t7"]);
@@ -306,4 +306,101 @@ test("review H2: through io.js's real adapter, a hung hc read is abandoned at 10
   await r2.retry("omarchy", RID);
   assert.equal(r2.view("omarchy", RID).state, "fresh");
   assert.equal(host.calls.length, 2);
+});
+
+// ---- T-MWIA1D6HO84: the card keeps its fields, the cache carries the picker data (and nothing else of omarchy's config) ----
+const cfgBoard = () => board({
+  "drover.agents": {
+    agents: [{ id: "wrangler", name: "Wrangler", command: `claude --token ${SENTINEL}`, instructions: SENTINEL, env: { K: SENTINEL }, version: 1 }, { id: "bad id!", name: "x" }],
+    squads: [{ id: "cattle-drive", name: "Cattle Drive", leader: "wrangler", members: [{ agent: "wrangler", role: SENTINEL }], version: 1 }],
+  },
+  "drover.projects": [{ id: RID, name: "r1" }, { id: RID2, name: "r2", repos: [{ path: `/x/${SENTINEL}` }] }, { id: "P-REMOTEX", name: "owned", remote: { machine: "elsewhere", projectId: "P-9" } }],
+  "drover.tasks": [card("T-A", RID, { tags: ["x", "y"], parent: "T-P", assignee: { kind: "agent", id: "wrangler" }, rev: 4 }), card("T-P", RID, { tags: ["y", "z"] }), card("T-C", RID2)],
+});
+test("parseRemote picks: assignee catalogue {kind,id,name}, omarchy projects {id,name}; never commands, env, souls, paths", () => {
+  const r = R.parseRemote(JSON.stringify(cfgBoard()), RID);
+  assert.deepEqual(r.picks.assignees, [{ kind: "agent", id: "wrangler", name: "Wrangler" }, { kind: "squad", id: "cattle-drive", name: "Cattle Drive" }]);
+  assert.deepEqual(r.picks.projects, [{ id: RID, name: "r1" }, { id: RID2, name: "r2" }], "a project owned by another machine is not a target");
+  assert.ok(!JSON.stringify(r.picks).includes(SENTINEL));
+});
+test("parseRemote picks: no drover.agents on omarchy -> its default herd (the consumer's own default)", () => {
+  const r = R.parseRemote(JSON.stringify(board()), RID);
+  assert.ok(r.picks.assignees.some((a) => a.kind === "agent" && a.id === "wrangler"));
+  assert.ok(r.picks.assignees.some((a) => a.kind === "squad" && a.id === "cattle-drive"));
+  assert.ok(!JSON.stringify(r.picks).includes("command"));
+});
+test("the cache holds picks only; view() returns tasks with their fields, picks and tags from the remote tasks", async () => {
+  hc.file = JSON.stringify(cfgBoard());
+  rem.attach("omarchy", RID);
+  await rem.read("omarchy", RID);
+  const key = `drover.remote.omarchy.${RID}`;
+  assert.ok(!JSON.stringify(store[key]).includes(SENTINEL));
+  const v = rem.view("omarchy", RID);
+  assert.deepEqual(v.picks.tags, ["x", "y", "z"]);
+  assert.equal(v.tasks.find((t) => t.id === "T-A").parent, "T-P");
+  assert.deepEqual(v.picks.assignees.map((a) => a.id), ["wrangler", "cattle-drive"]);
+  hc.file = "nope"; await rem.read("omarchy", RID); // stale copy keeps its picks
+  assert.deepEqual(rem.view("omarchy", RID).picks.projects.map((p) => p.id), [RID, RID2]);
+  assert.deepEqual(R.createRemote({ run: hc.run, getShared: () => undefined, setShared() {} }).view("omarchy", RID).picks, { assignees: [], projects: [], tags: [], loading: true });
+});
+test("normalizeRemoteCard keeps parent and a valid assignee, and the remote project id; the project stays the local binding", () => {
+  const n = R.normalizeRemoteCard({ id: "T-A", title: "t", project: RID, parent: "T-P", assignee: { kind: "squad", id: "cattle-drive", extra: 1 } }, "P-LOCAL", "omarchy", RID);
+  assert.equal(n.parent, "T-P"); assert.deepEqual(n.assignee, { kind: "squad", id: "cattle-drive" });
+  assert.equal(n.project, "P-LOCAL"); assert.deepEqual(n.remote, { machine: "omarchy", projectId: RID });
+  const bad = R.normalizeRemoteCard({ id: "T-B", parent: 5, assignee: { kind: "robot", id: "x" } }, "P-LOCAL", "omarchy", RID);
+  assert.equal(bad.parent, null); assert.equal(bad.assignee, null);
+});
+test("mergeRemote passes the remote project id and the picks of each binding", () => {
+  const view = () => ({ state: "fresh", tasks: [{ id: "T-A", title: "t" }], picks: { assignees: [], projects: [], tags: ["q"] }, banner: null });
+  const m = R.mergeRemote([], [{ id: "P-LOCAL", name: "n", remote: { machine: "omarchy", projectId: RID } }], view);
+  assert.deepEqual(m.tasks[0].remote, { machine: "omarchy", projectId: RID });
+  assert.deepEqual(m.remotes[0].picks.tags, ["q"]);
+});
+
+// ---- Job E: a cache without picks (an older mod copy wrote it) is "loading", never "not a project" ----
+test("E(c) view(): a cache without picks is loading; a re-read fills it; a later cache write without picks does not erase the picks this instance holds", async () => {
+  const key = `drover.remote.omarchy.${RID}`;
+  store[key] = { at: 1, tasks: [card("T-A", RID)] };
+  rem.attach("omarchy", RID);
+  assert.equal(rem.view("omarchy", RID).picks.loading, true);
+  hc.file = JSON.stringify(cfgBoard());
+  await rem.read("omarchy", RID);
+  const ok = rem.view("omarchy", RID).picks;
+  assert.ok(!ok.loading); assert.ok(ok.assignees.length && ok.projects.length);
+  store[key] = { at: 2, tasks: store[key].tasks }; // an older copy overwrites without picks
+  const again = rem.view("omarchy", RID).picks;
+  assert.ok(!again.loading, "this instance still has the lists it read"); assert.deepEqual(again.projects, ok.projects);
+});
+test("E(c) tick() re-reads at once when the cache lost its picks, without waiting for the poll", async () => {
+  rem.attach("omarchy", RID);
+  await rem.read("omarchy", RID);
+  const n = hc.reads();
+  const key = `drover.remote.omarchy.${RID}`;
+  store[key] = { at: 5, tasks: store[key].tasks };
+  rem.attach; clock += 1000; // well inside the 15 s poll
+  await rem.tick();
+  assert.equal(hc.reads(), n + 1);
+});
+
+test("E3 an abandoned read settles the callers waiting on it (retry / join) with a timeout, never hangs them", async () => {
+  rem.attach("omarchy", RID);
+  let release; hc.hold = new Promise((r) => (release = r));
+  const waiting = rem.retry("omarchy", RID);
+  clock += 11000;
+  await rem.tick();
+  const got = await Promise.race([waiting, new Promise((r) => setTimeout(() => r("HUNG"), 50))]);
+  assert.deepEqual(got, { error: "timeout" });
+  release();
+});
+
+test("F3 a detach or rebind settles the callers waiting on an in-flight read ({error:'detached'})", async () => {
+  rem.attach("omarchy", RID, "B-1");
+  hc.hold = new Promise(() => {});
+  const waiting = rem.retry("omarchy", RID);
+  rem.sync([]);
+  assert.deepEqual(await Promise.race([waiting, new Promise((r) => setTimeout(() => r("HUNG"), 50))]), { error: "detached" });
+  rem.attach("omarchy", RID, "B-2");
+  const again = rem.retry("omarchy", RID);
+  rem.sync([{ machine: "omarchy", projectId: RID, id: "B-3" }]); // same pair, new binding
+  assert.deepEqual(await Promise.race([again, new Promise((r) => setTimeout(() => r("HUNG"), 50))]), { error: "detached" });
 });

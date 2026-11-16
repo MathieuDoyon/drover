@@ -13,13 +13,14 @@ import { routeSend, liveAgent, subIssues, foldNotes, ago, initialOf, mix, noteRe
 import { age } from "./sources.js";
 import { bind, cfg, isEnabled, whenLoaded, load as loadCfg, ready as cfgReady } from "./config.js";
 import { gated } from "./ui.js";
-import { load, save, edit, loadProjects, loadConfig, launch, sendToAgent, loadRuns, loadWakes, loadContext, jiraSite, mergeContext, openUrl, HEARTBEAT_MS, startOptions, beatCreateGuard, clearCreateGuard, modSettings, loadMerged, watchRemote, retryRemote, remoteSend, remoteWriteState, takeRemoteOutcomes } from "./io.js";
-import { controlState, statusLine, editOps, addOp, archiveOp, moveOp, outcomeText, applied, OFF_TIP } from "./remote-write-ui.js";
+import { load, save, edit, loadProjects, loadConfig, launch, sendToAgent, loadRuns, loadWakes, loadContext, jiraSite, mergeContext, openUrl, HEARTBEAT_MS, startOptions, beatCreateGuard, clearCreateGuard, modSettings, loadMerged, watchRemote, retryRemote, remoteSend, remoteReload, remoteWriteState, takeRemoteOutcomes } from "./io.js";
+import { controlState, fieldState, statusLine, editOps, addOp, archiveOp, moveOp, outcomeText, applied, OFF_TIP } from "./remote-write-ui.js";
 import { remoteCardRows } from "./remote.js";
 
 const I = (name) => `mods/drover-todos/icons/${name}.svg`;
 const pad = (n) => String(n).padStart(2, "0");
 const stamp = (ms) => { const d = new Date(ms); return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`; };
+const RELOAD_WAIT_MS = 8000; // an editor never waits longer than this for a board reload (the reader's own read deadline is 10 s)
 const COLUMN_NAME = Object.fromEntries(COLUMNS);
 
 const chip = (t, text, color) =>
@@ -46,6 +47,8 @@ export class Editor {
     // fixedRemote: an existing card of an omarchy project (its baseline moves with each saved edit). A create is routed from the project picked NOW (get remote()).
     this.fixedRemote = p.remoteCard && !p.remoteCard.new ? p.remoteCard : null;
     const rc = p.remoteCard ?? null;
+    this.picking = false; // omarchy card: a property pick saves at once, ONE in flight; it counts as submitting (close, expand, Save, archive wait)
+    this.rebaseGen = 0; // bumped by every Save, route change and rebase: an async rebase commits only while its number is current
     this.sent = new Map(); // nonce -> the op that is still "may still apply": a late Saved moves the baseline, any other late outcome keeps the draft
     this.msg = "";
     this.task = p.edit && !this.remote ? load().find((x) => x.id === p.edit) : null;
@@ -53,7 +56,7 @@ export class Editor {
     this.priority = t.priority;
     this.column = t.column;
     this.project = t.project ?? null;
-    this.parent = this.task?.parent ?? p.parent ?? null; // edit: the stored parent; create: the sub-issue preset (props.parent)
+    this.parent = this.task?.parent ?? (this.fixedRemote ? this.fixedRemote.parent ?? null : p.parent ?? null); // edit: the stored parent; create: the sub-issue preset (props.parent)
     this.base = { title: t.title, desc: t.desc ?? "" }; // edit: the text the editor last saw stored; only a field that differs from it is the person's edit
     this.moreOpen = false; // edit: header "…" menu
     this.confirmArchive = false;
@@ -62,9 +65,10 @@ export class Editor {
     this.mode = "manual"; // create only: "manual" | "agent" (both drafts stay on toggle)
     const last = shared("drover.agents.last")?.runner;
     this.runner = last?.kind === "agent" && last.id !== "drover" ? last.id : "claude"; // agent mode: who creates the cards
-    this.assignee = normAssignee(this.task?.assignee); // { kind, id }: saved on the card; Create also starts it with it
+    this.assignee = normAssignee((this.task ?? this.fixedRemote)?.assignee); // { kind, id }: saved on the card; Create also starts it with it
     this.launch = launch; // injectable for tests
     this.remoteSender = remoteSend; // injectable for tests
+    this.remoteReload = remoteReload; // injectable for tests
     this.sendToAgent = sendToAgent; // injectable for tests
     this.subsOpen = true; // edit: Sub-issues section expanded
     this.folds = new Set(); // edit: expanded "› N activities" groups, by index of their first note
@@ -88,10 +92,11 @@ export class Editor {
     this.hi = 0;
     this.menuFocus = cx.focus_handle();
     this.trigger = { status: cx.focus_handle(), priority: cx.focus_handle(), labels: cx.focus_handle(), assignee: cx.focus_handle(), agent: cx.focus_handle(), project: cx.focus_handle(), parent: cx.focus_handle(), send: cx.focus_handle() };
-    const d = rc ? null : unpackDraft(p.draft); // expand/shrink reopen: the draft comes back
+    const d = unpackDraft(p.draft); // expand/shrink reopen: the draft comes back (an omarchy card carries it too)
     if (d && this.task) this.pasted = d.pasted;
     else if (d) {
       Object.assign(this, { mode: d.mode, labels: d.labels, assignee: d.assignee, another: d.another, pasted: d.pasted });
+      if (rc) this.parent = d.parent ?? null;
       for (const k of ["column", "priority", "runner", "project"]) if (k in d) this[k] = d[k];
     }
     this.title = InputState.new({ placeholder: this.task ? "What needs doing?" : "Task title", value: d?.title ?? t.title });
@@ -125,7 +130,7 @@ export class Editor {
     this.wakeError = null;
     this.title.focus();
     cx.timer.after(300, () => this.title.focus());
-    if (rc || loadProjects().some((x) => x.remote)) watchRemote(cx, () => !this.closing); // this dialog drives the probe and the result polling for its own writes
+    if (rc || loadProjects().some((x) => x.remote)) watchRemote(cx, () => !this.closing || this.leaving); // `leaving`: a close/expand flush in progress still needs its reads (the next request's rev) // this dialog drives the probe and the result polling for its own writes
     this.ctx = null; // issue + pull requests, refreshed while the editor is open
     this.ctxRun = undefined; // the linked run id the last refresh used
     // The dialog is never gated by the screen switch, but it reads the screen's settings (shared + mod.json) before it fixes its timer.
@@ -234,21 +239,22 @@ export class Editor {
   }
 
   // Saved tags plus the draft's own: a new tag stays pickable (and removable) before the task exists.
-  labelChoices() { return allTags([...load(), { tags: this.labels }]); }
+  labelChoices() { return this.remote ? allTags([{ tags: this.remoteChoices().tags }, { tags: this.labels }]) : allTags([...load(), { tags: this.labels }]); }
 
   // Edit: a label pick saves at once as a tags patch. Create: it only changes the draft.
   toggleLabel(tag, cx) {
     const next = toggleTag(this.labels, tag);
-    if (this.task && cx) this.patch("tags", next, cx);
+    if (this.fixedRemote) this.setProp("tags", next, cx);
+    else if (this.task && cx) this.patch("tags", next, cx);
     else this.labels = next;
   }
 
   // A property pick. Edit: a one-field patch on the stored task. Create: the draft changes.
   setProp(field, value, cx) {
-    if (this.fixedRemote && field === "project") return true; // no inbox op
+    if (this.fixedRemote) return this.remotePick(field, value, cx); // an omarchy card: a pick saves at once, like the local editor
     if (field === "project" && this.submitting && !this.task) return false; // a Create is in flight moves a card: the project is where it is
     if (this.task) return this.patch(field, value, cx);
-    const key = { status: "column", priority: "priority", assignee: "assignee", project: "project", tags: "labels" }[field];
+    const key = { status: "column", priority: "priority", assignee: "assignee", project: "project", tags: "labels", parent: "parent" }[field];
     this[key] = value;
     return true;
   }
@@ -265,22 +271,24 @@ export class Editor {
   // Autosave (edit only): title/description save as field patches 500 ms after the last keystroke. A newer keystroke
   // bumps saveGen, so an older timer finds a stale generation and does nothing.
   autosave(cx) {
-    if (!this.task || this.closing) return;
+    if ((!this.task && !this.fixedRemote) || this.closing) return; // an omarchy card autosaves its text the same way (one edit request per flush)
+    this.closeForced = false; // new typing: a Close tries to send it again before it discards anything
     const gen = this.saveGen = (this.saveGen ?? 0) + 1;
     cx.timer.after(this.saveDelay ?? 500, (acx) => (gen === this.saveGen ? this.flushSave(acx) : undefined));
   }
 
   // An event handler's cx dies at the first await: the flush runs in a spawn with its own live context.
   flushInBackground(cx) {
-    if (this.task) cx.spawn((acx) => this.flushSave(acx));
+    if (this.task || this.fixedRemote) cx.spawn((acx) => this.flushSave(acx));
   }
 
   // Write the pending title/description now (waits for pastes in flight; cancels the timer). Resolves true when the
   // stored task has the text. A failed save sets this.error and keeps the text in the fields. Flushes run one at a time.
   flushSave(cx) {
     this.saveGen = (this.saveGen ?? 0) + 1;
-    if (!this.task) return Promise.resolve(true);
+    if (!this.task && !this.fixedRemote) return Promise.resolve(true);
     const run = async () => {
+      if (!this.task) return this.flushRemoteText(cx); // an omarchy card: one inbox edit with the changed text
       await this.pending;
       const id = this.task.id;
       const stored = load().find((x) => x.id === id);
@@ -301,6 +309,67 @@ export class Editor {
       return true;
     };
     return (this.flushing = (this.flushing ?? Promise.resolve()).then(run, run));
+  }
+
+  // Remote flush: ONE inbox edit with only the changed title and/or description, ifRev = the baseline rev (rebased after every saved request), through the
+  // same one-request-at-a-time lock as the sidebar picks: it waits for a pick in flight (bounded), and the rows are off while it saves. Stale or refused:
+  // the banner shows, the typed text is KEPT, the rev and the other rows come from omarchy's reloaded card, and the next autosave retries.
+  // Resolves true when the text is saved, unchanged, or sent with an unknown outcome (the writer reconciles it); false = stay open like a failed local save.
+  flushRemoteText(cx) {
+    const card = this.fixedRemote;
+    if (!card) return Promise.resolve(true);
+    if (!editOps(card, { title: this.title.value(), desc: this.desc.value() }).length) { this.textDeferred = false; this.closeForced = false; return Promise.resolve(true); } // nothing typed
+    this.textOps = (this.textOps ?? 0) + 1; // the rows are off from the moment a flush is queued
+    const tok = { started: false, cancelled: false, done: false };
+    const run = this.runExclusive(() => { if (tok.cancelled) return true; tok.started = true; return this.flushRemoteNow(cx); })
+      .finally(() => { tok.done = true; this.textOps--; if (!this.closing || this.leaving) cx.notify?.(); if (tok.cancelled) this.retryDeferredText(cx); }); // a closed view's context is not used; a cancelled flush is replaced by a fresh one
+    // The wait to ENTER the serializer is bounded: past the bound the flush is cancelled (it will not run later) and reported as deferred, so Close is never
+    // trapped behind a request that does not settle. A flush that has started is already bounded by the writer's and the reload's own deadlines.
+    const bound = new Promise((resolve) => cx?.timer?.after?.(this.reloadWaitMs ?? RELOAD_WAIT_MS, () => {
+      if (tok.started || tok.done) return;
+      tok.cancelled = true; this.textDeferred = true; resolve(false);
+    }));
+    return Promise.race([run, bound]);
+  }
+  // Runs in its turn: sends what differs NOW (so text typed while an earlier request was in flight is sent too), until the input equals the acknowledged card.
+  async flushRemoteNow(cx) {
+    for (let i = 0; i < 10; i++) {
+      const base = this.fixedRemote;
+      if (!base) return true;
+      const op = editOps(base, { title: this.title.value(), desc: this.desc.value() })[0];
+      if (!op) { this.textDeferred = false; this.closeForced = false; this.error = null; return true; }
+      const snap = { title: this.title.value().trim(), desc: this.desc.value() };
+      const pend = [...this.sent.values()].find((x) => x.pick || x.text);
+      if (pend) { // an outcome is unknown: the rev is uncertain. The same text is already on its way; a different one waits for it.
+        if (pend.text && pend.text.title === snap.title && pend.text.desc === snap.desc) { this.textDeferred = false; return true; }
+        this.textDeferred = true; return false;
+      }
+      this.textDeferred = false;
+      const w = this.wstate();
+      if (!w.on) { this.msg = w.tip; this.textDeferred = true; return false; } // never sent: a later op retries it
+      const last = await this.remoteSender(base.project, op, cx);
+      if (last.status === "pending" && last.nonce) this.sent.set(last.nonce, { op, destLocal: base.project, text: snap });
+      if (last.status === "saved") {
+        this.reloadFailed = false;
+        const next = await this.settleSaved(base, op, base.project, cx);
+        ++this.rebaseGen;
+        this.adopt(next);
+        this.msg = this.reloadFailed ? "saved, but could not reload omarchy: reopen the card" : ""; this.error = null;
+        continue; // the input may have changed while the request was in flight
+      }
+      this.msg = outcomeText(last);
+      if (last.status === "pending") { // sent, outcome unknown. Only the exact submitted text counts as on its way; newer typing stays a deferred draft
+        if (this.title.value().trim() === snap.title && this.desc.value() === snap.desc) { this.closeForced = false; return true; }
+        this.textDeferred = true; return false;
+      }
+      this.reloadFailed = false;
+      await this.reloadBounded(base.project, cx); // stale or refused: omarchy's card gives the rev and the rows; the typed text stays
+      const fresh = loadMerged().tasks.find((x) => x.id === base.id && x.project === base.project);
+      if (fresh) { this.adopt({ ...fresh }); this.rowsFrom(this.fixedRemote); }
+      if (this.reloadFailed) this.msg += " · could not reload omarchy: reopen the card";
+      return false;
+    }
+    return false; // still typing faster than it saves: stay open
   }
 
   // Notes save at once: the note goes to the stored task, the editor fields stay as typed.
@@ -396,7 +465,20 @@ export class Editor {
   // ⤢ / ⤡: reopen the create modal bigger or smaller with the whole draft. No finish(): the pasted files stay, the new modal owns them.
   // Wait for a paste in flight so its link is in the draft. Open first, close last: closeOverlay may cancel this view's work.
   expand(cx) {
-    if (this.remote || this.closing || this.submitting) return; // the draft of a remote card does not travel through the local reopen
+    if (this.fixedRemote && !this.closing && !this.pickBusy()) { // an omarchy card reopens as the same remote card, bigger or smaller, with the whole draft; text is flushed first
+      this.closing = true;
+      cx.spawn(async (acx) => {
+        this.leaving = true;
+        const flushed = await this.flushSave(acx);
+        this.leaving = false;
+        if (!flushed) { this.closing = false; acx.notify(); return; }
+        const draft = packDraft({ title: this.title.value(), desc: this.desc.value(), note: this.note.value(), priority: this.priority, column: this.column, labels: this.labels, assignee: this.assignee, parent: this.parent, project: this.project });
+        edit(this.fixedRemote.id, this.column, draft, !this.large, null, this.fixedRemote);
+        closeOverlay(props().overlay);
+      });
+      return;
+    }
+    if (this.remote || this.closing || this.submitting) return; // a create on an omarchy project does not travel through the local reopen
     this.closing = true;
     cx.spawn(async (acx) => {
       await this.pending;
@@ -431,10 +513,20 @@ export class Editor {
 
   // One close action only: a second click during the close does nothing. Edit: flush first; a failed save stays open with the error.
   close(cx) {
-    if (this.closing || this.submitting) return;
+    if (this.closing || this.submitting) return; // never blocked by a pick in flight: the writer keeps reconciling it, a late outcome after the close is dropped
     this.closing = true;
     cx.spawn(async (acx) => {
-      if (this.task && !(await this.flushSave(acx))) { this.closing = false; acx.notify(); return; }
+      this.leaving = true;
+      const flushed = !(this.task || this.fixedRemote) || (this.fixedRemote && this.closeForced) || (await this.flushSave(acx)); // forced: the second Close does not wait for anything
+      this.leaving = false;
+      if (!flushed) {
+        // A text that could not be sent (an outcome is unknown) is not a saved text: stay open and say so; a second close discards it.
+        if (!(this.fixedRemote && this.textDeferred && this.closeForced)) {
+          this.closing = false;
+          if (this.fixedRemote && this.textDeferred) { this.closeForced = true; this.msg = "Not sent yet: waiting for omarchy. Close again to discard your last edit."; }
+          acx.notify(); return;
+        }
+      }
       await this.finish();
     });
   }
@@ -460,53 +552,235 @@ export class Editor {
 
   // ── a remote card: Save / Create go through the writer. Each op is sent after the one before it was saved (a save re-reads the board: the next op carries the new rev).
   wstate() { return controlState(remoteWriteState(this.card.project)); }
+  fstate() { return fieldState(remoteWriteState(this.card.project)); } // { on, tip }: priority, labels, assignee, parent, project
+  // The options of the field pickers: ONLY what omarchy's board carries (its assignees, its same-project cards, its tags, this machine's bound projects).
+  remoteChoices() {
+    const c = this.card, none = { assignees: [], parents: [], projects: [], tags: [] };
+    if (!c) return none;
+    const m = loadMerged(), picks = m.remotes.find((r) => r.localId === c.project)?.picks ?? { assignees: [], projects: [], tags: [] };
+    const same = m.tasks.filter((x) => x.remote && x.project === c.project);
+    if (picks.loading && !this.picksAsked) { this.picksAsked = true; void this.remoteReload(c.project); } // the cache has no lists yet (older mod copy): read them
+    if (!picks.loading) this.picksAsked = false;
+    return {
+      loading: Boolean(picks.loading),
+      assignees: picks.assignees,
+      parents: c.new ? [] : parentChoices(same, c.id),
+      projects: loadProjects().filter((p) => p.remote?.machine === c.remote?.machine && picks.projects.some((x) => x.id === p.remote.projectId)),
+      tags: picks.tags,
+    };
+  }
   remoteOps() {
-    const c = this.card, title = this.title.value(), desc = this.desc.value();
-    if (c.new) return [addOp({ title, desc, column: this.column, priority: this.priority, tags: this.labels })];
-    const e = editOps(c, { title, desc, note: this.note.value() }), mv = moveOp(c, this.column);
-    return [...e.filter((o) => o.op === "edit"), ...(mv ? [mv] : []), ...e.filter((o) => o.op === "note")];
+    const c = this.card, title = this.title.value(), desc = this.desc.value(), fs = this.fstate().on;
+    if (c.new) return [addOp({ title, desc, column: this.column, priority: this.priority, tags: this.labels, ...(fs && this.assignee ? { assignee: this.assignee } : {}) })]; // an assignment only: nothing starts
+    return editOps(c, { note: this.note.value() }); // an existing card: Save is the NOTE composer's button; text autosaves and every pick saves at once
+  }
+  // ── an omarchy card's property picks (status, priority, labels, assignee, parent, project) save at once, ONE inbox request each, with ifRev = the
+  // editor's baseline rev. One pick in flight at a time: the rows are disabled ("saving…") until it settles, and close, Escape, expand, archive and Save
+  // wait like for a Save. After every outcome the rows come from omarchy's card (reloaded), so a stale or refused pick shows omarchy's value.
+  // Title, description and notes keep the Save button (the local editor autosaves its text; a request per pause is not worth it here).
+  pickPending() { return [...(this.sent?.values() ?? [])].some((x) => x.pick || x.text); } // a pick or a text edit whose outcome is not known yet (the baseline rev is uncertain)
+  // ONE remote operation in flight per editor: a text flush, a pick and a note/archive all run through this chain. An op builds its request (rev, changed
+  // fields) only when its turn starts, after its predecessor settled and the baseline was rebased; a wait never lets two overlap.
+  runExclusive(fn) {
+    const p = (this.opTail ?? Promise.resolve()).then(fn);
+    this.opTail = p.then(() => {}, () => {});
+    return p;
+  }
+  inflight() { return this.picking || this.submitting || this.textOps > 0 || this.pickPending(); }
+  pickBusy() { return this.picking || this.submitting || this.pickPending(); } // a pick or a Save is in flight (a text flush is queued behind it, not refused)
+  inflightTip() { return this.pickPending() && !this.picking && !this.submitting ? "waiting for omarchy…" : "saving…"; }
+  remotePick(field, value, cx) {
+    const key = { status: "column", priority: "priority", assignee: "assignee", project: "project", tags: "labels", parent: "parent" }[field];
+    if (!key || this.closing || this.inflight()) return false;
+    if (field === "status" ? !this.wstate().on : !this.fstate().on) return false; // the control is dead: it says why
+    this[key] = value;
+    this.startPick(); this.msg = "Sending…"; cx.notify();
+    cx.spawn(async (acx) => {
+      try { await this.runExclusive(() => this.sendRemotePick(field, value, acx)); }
+      catch (e) { if (this.closing) return; this.msg = this.error = `Not saved: ${String(e?.message ?? e).split("\n")[0]}`; if (this.fixedRemote) this.rowsFrom(this.fixedRemote); }
+      finally { this.endPick(); this.retryDeferredText(acx); if (!this.closing) acx.notify(); }
+    });
+    return true;
+  }
+  // A text flush that was deferred behind an unknown outcome is tried again when the outcome is settled.
+  // After a serializer op settles: a text draft that was DEFERRED or CANCELLED before it was ever sent (textDeferred) gets a FRESH flush; a cancelled one is
+  // never revived. A text request that was sent and came back stale, refused or in error is never re-sent by itself: the text stays, the banner shows, and the
+  // next keystroke (or the blur/close flush after one) is the retry.
+  retryDeferredText(cx) {
+    const card = this.fixedRemote;
+    if (!card || this.closing || this.pickPending() || this.textOps > 0 || !this.textDeferred) return; // ONLY a draft that was deferred or cancelled before it was ever sent
+    if (!editOps(card, { title: this.title.value(), desc: this.desc.value() }).length) return;
+    void this.flushSave(cx);
+  }
+  startPick() { this.picking = true; this.pickDone = new Promise((r) => (this.pickRelease = r)); }
+  endPick() { this.picking = false; this.pickRelease?.(); }
+  rowsFrom(card) { // the pickers show this card's values
+    Object.assign(this, { priority: card.priority ?? "P2", labels: [...(card.tags ?? [])], assignee: normAssignee(card.assignee), parent: card.parent ?? null, column: card.column, project: card.project });
+  }
+  // The card omarchy has now becomes the baseline. An input the person did not touch (still equal to the OLD baseline text) follows the incoming text,
+  // so a property reload never turns it into an edit; an edited one is kept.
+  adopt(card) {
+    const old = this.fixedRemote;
+    if (old && card && card.id === old.id) {
+      if (this.title.value().trim() === String(old.title ?? "").trim() && card.title !== old.title) this.title.set_value(card.title);
+      if (this.desc.value() === (old.desc ?? "") && (card.desc ?? "") !== (old.desc ?? "")) this.desc.set_value(card.desc ?? "");
+    }
+    this.fixedRemote = card;
+  }
+  // A reload of omarchy's board, bounded: past RELOAD_WAIT_MS the wait ends (the lock is released) and `reloadFailed` says so. The read itself goes on
+  // in the reader and its answer is used by the next render.
+  async reloadBounded(localId, acx) {
+    let timer = false;
+    const fin = await new Promise((resolve) => {
+      Promise.resolve(this.remoteReload(localId)).then(() => resolve(true), () => resolve(true));
+      acx?.timer?.after?.(this.reloadWaitMs ?? RELOAD_WAIT_MS, () => { timer = true; resolve(false); });
+    });
+    if (!fin && timer) this.reloadFailed = true;
+    return fin;
+  }
+  // One request for one pick; rows and baseline end up as omarchy's card says.
+  async sendRemotePick(field, value, acx) {
+    const card = this.fixedRemote;
+    if (!card) return;
+    const rev = Number.isSafeInteger(card.rev) && card.rev > 0 ? card.rev : 0;
+    let op = null, destLocal = card.project;
+    if (field === "status") { const mv = moveOp(card, value); op = mv && { ...mv, ifRev: rev }; }
+    else if (field === "project") {
+      const dest = loadProjects().find((x) => x.id === value)?.remote;
+      if (dest && dest.machine === card.remote?.machine && value !== card.project) { op = editOps(card, { project: dest.projectId })[0]; destLocal = value; }
+    } else op = editOps(card, { [field]: value })[0];
+    if (!op) { this.rowsFrom(card); return; }
+    ++this.rebaseGen;
+    const last = await this.remoteSender(card.project, op, acx);
+    if (last.status === "pending" && last.nonce) this.sent.set(last.nonce, { op, destLocal, pick: true });
+    if (this.closing) return; // closed while it was in flight: the writer reconciles it, nothing is shown
+    this.msg = outcomeText(last);
+    if (last.status === "saved") {
+      this.reloadFailed = false;
+      const next = await this.settleSaved(card, op, destLocal, acx);
+      ++this.rebaseGen;
+      if (this.closing) return; // closed meanwhile: the late outcome is dropped
+      if (this.reloadFailed) this.msg = "saved, but could not reload omarchy: reopen the card";
+      this.adopt(next);
+      this.rowsFrom(next);
+      return;
+    }
+    if (last.status === "pending") { this.rowsFrom(applied(card, op)); if (field === "project") this.project = destLocal; return; } // shown as asked; the late outcome sets it right
+    await this.revertTo(card, acx);
+  }
+  // Not saved (stale, refused, error, or a late failure): reload and show omarchy's card.
+  async revertTo(card, acx) {
+    this.reloadFailed = false;
+    await this.reloadBounded(card.project, acx);
+    if (this.closing) return;
+    if (this.reloadFailed) this.msg = `${this.msg ? this.msg + " · " : ""}could not reload omarchy: reopen the card`;
+    const fresh = loadMerged().tasks.find((x) => x.id === card.id && x.project === card.project);
+    this.adopt(fresh ? { ...fresh } : card);
+    this.rowsFrom(this.fixedRemote);
   }
   remoteSave(cx) {
-    if (this.submitting || this.closing) return;
+    if (this.closing) return;
+    if (this.inflight()) { if (!this.submitting) this.msg = "Saving a change…"; return cx.notify(); }
     const w = this.wstate();
     if (!w.on) { this.msg = w.tip; return cx.notify(); }
     const ops = this.remoteOps();
     if (!ops.length || ops.some((o) => !o)) { this.msg = this.card.new ? "A title is required" : "Nothing to save"; return cx.notify(); }
     this.remoteRun(cx, ops, Boolean(this.card.new), this.card);
   }
-  remoteArchive(cx) { const op = archiveOp(this.card); if (op && !this.submitting && !this.closing && this.wstate().on) this.remoteRun(cx, [op], true, this.card); }
+  remoteArchive(cx) {
+    const op = archiveOp(this.card);
+    if (!op || this.pickBusy() || this.closing || !this.wstate().on) return;
+    cx.spawn(async (acx) => { // typed text is flushed first, as local does
+      if (!(await this.flushSave(acx))) return;
+      if (!this.closing && !this.pickBusy()) this.remoteRun(acx, [archiveOp(this.card)], true, this.card);
+    });
+  }
   // `target` is the card the submission was made for, read once when it started: nothing below reads this.card / this.remote again (the pick may move meanwhile).
   remoteRun(cx, ops, closeOnSaved, target) {
     this.submitting = true; this.msg = "Sending…"; this.error = null; cx.notify();
     const stay = this.another;
     const sub = { title: this.title.value(), desc: this.desc.value() }; // what was submitted: Create another clears the draft only if it is still this
-    cx.spawn(async (acx) => {
+    const destLocal = this.project; // where a project change in this Save lands (a local binding id)
+    ++this.rebaseGen; // a Save supersedes every late rebase still waiting on a read
+    cx.spawn((acx) => this.runExclusive(async () => {
       let last = null, card = target, failed = null;
+      if (!target.new && this.fixedRemote && ops[0]?.op === "note") { card = this.fixedRemote; ops = this.remoteOps(); } // a note is built when its turn starts: the rev after any earlier request
       try {
         for (const op of ops) {
           last = await this.remoteSender(card.project, op, acx);
-          if (last.status === "pending" && last.nonce) this.sent.set(last.nonce, op);
+          if (last.status === "pending" && last.nonce) this.sent.set(last.nonce, { op, destLocal });
           if (last.status !== "saved") break;
-          card = applied(card, op); // a saved edit becomes the baseline
-          if (this.fixedRemote) this.fixedRemote = card;
+          card = await this.settleSaved(card, op, destLocal, acx); // a saved edit becomes the baseline (a move: the card on the destination board)
+          ++this.rebaseGen;
+          if (this.fixedRemote) this.adopt(card);
         }
       } catch (e) { failed = e; } finally { this.submitting = false; } // the frozen picker always unfreezes
       if (failed) { this.msg = this.error = `Not saved: ${String(failed?.message ?? failed).split("\n")[0]}`; return acx.notify(); }
       this.msg = outcomeText(last);
+      if (last?.status === "stale" && this.fixedRemote) { // the draft stays; the baseline rev follows the reloaded card so the next Save is not stale again
+        await this.reloadBounded(card.project, acx);
+        const fresh = loadMerged().tasks.find((x) => x.id === card.id && x.project === card.project);
+        if (fresh && this.fixedRemote) this.fixedRemote = { ...this.fixedRemote, rev: fresh.rev };
+      }
       if (last?.status === "saved") {
         if (closeOnSaved && !stay) { this.closing = true; return this.finish(); }
         if (card.new) { if (this.title.value() === sub.title && this.desc.value() === sub.desc) this.clear(acx); } else this.note.set_value?.("");
       }
       acx.notify();
-    });
+    }).finally(() => this.retryDeferredText(acx)));
   }
   // A result that arrived after the wait: shown, and a Saved edit moves the baseline.
-  takeLate() {
+  takeLate(cx) {
     for (const o of takeRemoteOutcomes()) {
       this.msg = outcomeText(o);
-      const op = this.sent.get(o.nonce);
-      if (op) { this.sent.delete(o.nonce); if (o.status === "saved") this.card = applied(this.card, op); }
+      const sent = this.sent.get(o.nonce);
+      if (!sent) continue;
+      this.sent.delete(o.nonce);
+      if (!this.fixedRemote) continue;
+      if (o.status === "saved") void this.lateRebase(this.fixedRemote, sent.op, sent.destLocal, cx, Boolean(sent.pick));
+      else if (sent.pick || sent.text) { // a pick or text edit that did not apply: the rows go back to omarchy's card (the rows stay off until they do)
+        this.startPick();
+        const run = async (acx) => { try { await this.revertTo(this.fixedRemote, acx); } finally { this.endPick(); this.retryDeferredText(acx); if (!this.closing) acx?.notify?.(); } };
+        void (typeof cx?.spawn === "function" ? cx.spawn(run) : run(cx));
+      }
     }
+  }
+  // A late Saved: the route follows at once; the reload and rev rebase then commit only if nothing newer (a Save, another move, another rebase) happened meanwhile.
+  // The route is set before the first await (so the next render already sits on the destination); the awaits run in a spawn with its OWN live
+  // context, because the event/render cx dies at the first await.
+  lateRebase(before, op, destLocal, cx, pick = false) {
+    const gen = ++this.rebaseGen;
+    if (pick) this.startPick(); // the rows stay off until the card is reloaded
+    this.fixedRemote = applied(before, op);
+    if (op.op === "edit" && op.project !== undefined) this.fixedRemote = { ...this.fixedRemote, project: destLocal };
+    const rest = async (acx) => {
+      try {
+        const card = await this.settleSaved(before, op, destLocal, acx, true);
+        if (this.closing || gen !== this.rebaseGen || !this.fixedRemote || this.fixedRemote.id !== card.id) return; // an older result never undoes a newer route
+        this.adopt({ ...card, notes: this.fixedRemote.notes });
+        this.rowsFrom(this.fixedRemote); // the pickers show omarchy's card (a moved card: the destination)
+      } finally { if (pick) this.endPick(); this.retryDeferredText(acx); if (!this.closing) acx?.notify?.(); } // a closed view's context is not used
+    };
+    return typeof cx?.spawn === "function" ? cx.spawn(rest) : rest(cx);
+  }
+
+  // An op of this editor was saved on omarchy: the card as it is now. A project move reads the destination board and sits on the card there; any other
+  // op takes the new rev from the re-read board (our own save moved it).
+  async settleSaved(card, op, destLocal, acx, reloadSource = false) { // reloadSource: a LATE result (nobody re-read the board after it)
+    let next = applied(card, op);
+    const same = (x, project) => x.id === next.id && x.project === project;
+    if (op.op === "edit" && op.project !== undefined) {
+      next = { ...next, project: destLocal };
+      await this.reloadBounded(card.project, acx);
+      await this.reloadBounded(destLocal, acx);
+      const there = loadMerged().tasks.find((x) => same(x, destLocal));
+      if (there) next = there;
+    } else if (!next.new) {
+      if (reloadSource) await this.reloadBounded(card.project, acx);
+      const fresh = loadMerged().tasks.find((x) => same(x, next.project));
+      if (fresh) next = { ...next, rev: fresh.rev };
+    }
+    return next;
   }
 
   // Both drafts stay; the other mode's field takes the focus.
@@ -822,19 +1096,29 @@ export class Editor {
 
   render(cx) {
     const t = theme();
-    if (this.remote) this.takeLate();
+    if (this.remote) this.takeLate(cx);
     const field = (el) => el.px(10).rounded(8).border_1().border_color(t.input).bg(t.background).text_size(13).text_color(t.foreground);
     const projects = loadProjects(); // remote-bound ones too: a create there goes to the machine's inbox, never into a local card
     const projLabel = (p) => (p.remote ? `${p.name} · ${p.remote.machine}` : p.name);
     // Why a project cannot be picked (undefined: it can). Create: a remote one needs its writes. Edit: no inbox op moves a card between machines or projects.
     const projTip = (p) => {
       if (this.submitting && !this.task) return "creating…"; // the target of a Create in flight does not move
-      if (this.fixedRemote) return p.id === this.project ? undefined : p.id && p.remote?.machine === this.fixedRemote.remote?.machine ? "moving a card to another project comes later" : "move between machines comes later";
+      if (this.fixedRemote) {
+        if (p.id === this.fixedRemote.project) return undefined; // where the card is now: always pickable (a revert)
+        if (!p.id) return "an omarchy card needs a project";
+        if (p.remote?.machine !== this.fixedRemote.remote?.machine) return "move between machines comes later";
+        if (RC.loading) return "loading omarchy's lists, try again"; // a cache with no lists is not "not a project on omarchy"
+        const f = this.fstate();
+        if (!f.on) return f.tip;
+        return RC.projects.some((x) => x.id === p.id) ? undefined : `not a project on ${p.remote.machine}`;
+      }
       if (this.task) return p.remote ? "move between machines comes later" : undefined;
       if (p.remote) { const c = controlState(remoteWriteState(p.id)); return c.on ? undefined : c.tip; }
       return undefined;
     };
     const prio = PRIORITY_COLOR(t);
+    const RC = this.remote ? this.remoteChoices() : null; // an omarchy card: the pickers read omarchy's data only
+    const assigneeChoices = RC ? RC.assignees : runnerChoices(loadConfig());
     const items = {
       status: COLUMNS.map(([id, name]) => ({ key: id, glyph: STATUS_ICON[id].icon, color: t[STATUS_ICON[id].tone], text: name, current: id === this.column, on: (cx) => this.setProp("status", id, cx) })),
       priority: Object.keys(PRIORITY_LABEL).map((p) => ({ key: p, glyph: "●", color: prio[p], text: PRIORITY_LABEL[p], current: p === this.priority, on: (cx) => this.setProp("priority", p, cx) })),
@@ -842,11 +1126,11 @@ export class Editor {
         ...this.labelChoices().filter((g) => g.includes(this.labelSearch.value().trim().replace(/^#/, "").toLowerCase()))
           .map((g) => ({ key: g, glyph: "#", color: t.muted, text: g, current: this.labels.includes(g), on: (cx) => this.toggleLabel(g, cx) }))],
       assignee: [{ key: "none", glyph: "–", color: t.muted, text: "No assignee", current: !this.assignee, on: (cx) => this.setProp("assignee", null, cx) },
-        ...runnerChoices(loadConfig()).map((c) => ({ key: `${c.kind}-${c.id}`, glyph: c.kind === "squad" ? "◈" : "●", color: t.muted, text: c.name,
+        ...assigneeChoices.map((c) => ({ key: `${c.kind}-${c.id}`, glyph: c.kind === "squad" ? "◈" : "●", color: t.muted, text: c.name,
           current: this.assignee?.kind === c.kind && this.assignee.id === c.id, on: (cx) => this.setProp("assignee", { kind: c.kind, id: c.id }, cx) }))],
       agent: agentChoices(loadConfig()).map((c) => ({ key: c.id, glyph: "●", color: t.muted, text: c.name, current: c.id === this.runner, on: () => (this.runner = c.id) })),
       parent: [{ key: "none", glyph: "–", color: t.muted, text: "Clear parent", current: !this.parent, on: (cx) => this.setProp("parent", null, cx) },
-        ...filterParents(this.task ? parentChoices(load(), this.task.id) : [], this.parentSearch.value()).map((p) => ({ key: p.id, glyph: "↑", color: t.muted, text: parentLabel(p), hint: p.id, current: p.id === this.parent, on: (cx) => this.setProp("parent", p.id, cx) }))],
+        ...filterParents(RC ? RC.parents : this.task ? parentChoices(load(), this.task.id) : [], this.parentSearch.value()).map((p) => ({ key: p.id, glyph: "↑", color: t.muted, text: parentLabel(p), hint: p.id, current: p.id === this.parent, on: (cx) => this.setProp("parent", p.id, cx) }))],
       send: this.sendOptions(t),
       project: [{ id: null, name: "No project" }, ...filterProjects(projects, this.projSearch.value())]
         .map((p) => ({ key: p.id ?? "none", glyph: p.id ? "◆" : "–", color: t.muted, text: projLabel(p), current: p.id === this.project, disabled: projTip(p), on: (cx) => this.setProp("project", p.id, cx) })),
@@ -927,7 +1211,7 @@ export class Editor {
         .child(div().w(70).text_size(11.5).text_color(t.dim).child(text))
         .child(select);
     };
-    const curRunner = this.assignee && runnerChoices(loadConfig()).find((c) => c.kind === this.assignee.kind && c.id === this.assignee.id);
+    const curRunner = this.assignee && (assigneeChoices.find((c) => c.kind === this.assignee.kind && c.id === this.assignee.id) ?? (RC ? { kind: this.assignee.kind, id: this.assignee.id, name: this.assignee.id } : undefined));
     const curAgent = agentChoices(loadConfig()).find((c) => c.id === this.runner)?.name ?? this.runner;
     const curProject = projects.find((p) => p.id === this.project);
     const agentMode = !this.task && this.mode === "agent" && !this.remote; // a remote pick has no agent mode
@@ -938,6 +1222,7 @@ export class Editor {
       .text_size(size < 20 ? 9.5 : 10.5).text_color(t.muted).child(initialOf(name));
     const curParent = this.task && this.parent ? load().find((x) => x.id === this.parent) ?? null : null; // a deleted parent reads as none
     const R = this.remote, w = R ? this.wstate() : null;
+    const fsr = R ? (!R.new && this.inflight() ? { on: false, tip: this.inflightTip() } : this.fstate()) : null; // the field controls: on only when omarchy's probe said protocol 3
     // A control that cannot work for an omarchy card stays visible, dimmed, with the reason as its tooltip.
     const off = (name, icon, text, tip = OFF_TIP) => h_flex().id(`trig-${name}`).h(28).px(10).gap(6).items_center().flex_none().rounded_full().border_1().border_color(t.input)
       .opacity(0.5).text_size(12.5).text_color(t.dim).tooltip(tip).child(svg(I(icon)).size(14).text_color(t.dim)).child(div().max_w(160).truncate().child(text));
@@ -955,6 +1240,9 @@ export class Editor {
         if (fresh && Array.isArray(fresh.notes)) this.fixedRemote = { ...this.fixedRemote, notes: fresh.notes };
       }
       const rows = remoteCardRows(this.remote);
+      const lock = this.inflight(), lockTip = this.inflightTip(); // a pick or a Save is in flight: the property rows are off
+      const parentCard = this.parent ? loadMerged().tasks.find((x) => x.id === this.parent && x.project === R.project) : null;
+      const curParentText = this.parent ? (parentCard ? parentLabel(parentCard) : this.parent) : "No parent";
       const ro = remoteWriteState(R.project);
       const roText = [w.on ? null : statusLine(ro), this.msg || null].filter(Boolean).join(" · "); // nothing while writes are on and there is nothing to report
       const rnote = (n, i) => v_flex().id(`remote-note-${i}`).flex_none().gap(8).p(12).rounded(10).border_1().border_color(cardBorder).bg(cardBg)
@@ -982,6 +1270,8 @@ export class Editor {
             .child(R.id)
             .child(div().text_size(11).font_weight(400).text_color(this.copied ? t.done : t.dim).child(this.copied ? "Copied" : "⧉ Copy")))
           .child(div().flex_1())
+          .child(h_flex().id("ed-expand").size(28).items_center().justify_center().rounded(6).cursor_pointer().hover((s) => s.bg(t.hover))
+            .on_click((_e, cx) => this.expand(cx)).child(svg(I(this.large ? "minimize-2" : "maximize-2")).size(16).text_color(t.muted)))
           .child(h_flex().id("ed-close").size(28).items_center().justify_center().rounded(6).cursor_pointer().hover((s) => s.bg(t.hover))
             .on_click((_e, cx) => this.close(cx)).child(svg(I("x")).size(16).text_color(t.muted))))
         .when(Boolean(roText), (el) => el.child(div().id("remote-ro").px(24).pt(4).text_size(12).text_color(w.on ? t.muted : t.blocked).child(roText)))
@@ -1010,16 +1300,20 @@ export class Editor {
                     .bg(w.on && !this.submitting ? t.solid : t.raised).text_color(w.on && !this.submitting ? t.solid_foreground : t.dim).text_size(13).font_medium()
                     .when(!w.on, (el) => el.tooltip(w.tip))
                     .when(w.on, (el) => el.on_click((_e, cx) => this.onCreate(cx)))
-                    .child("Save").child(keycap(t, "command", noteReadyR)).child(keycap(t, "corner-down-left", noteReadyR)))))))
+                    .child("Send").child(keycap(t, "command", noteReadyR)).child(keycap(t, "corner-down-left", noteReadyR)))))))
           .child(v_flex().id("ed-sidebar").w(240).flex_none().h_full().border_l_1().border_color(t.border).p(12).gap(2).overflow_y_scrollbar()
             .child(section(t, "Properties"))
-            .child(row("status", "Status", "", t[STATUS_ICON[this.column]?.tone], COLUMN_NAME[this.column], Select, null, true, "circle"))
-            .child(sideRow("priority", "Priority", `${this.priority} ${PRIORITY_LABEL[this.priority]}`, OFF_TIP))
-            .child(sideRow("assignee", "Assignee", rows.agentText ?? "No assignee", OFF_TIP))
-            .child(sideRow("labels", "Labels", this.labels.length ? this.labels.join(", ") : "No labels", OFF_TIP))
-            .child(row("project", "Project", "", t.muted, curProject ? projLabel(curProject) : "project", Combobox, null, true, "folder"))
+            .child(lock ? sideRow("status", "Status", COLUMN_NAME[this.column], lockTip) : row("status", "Status", "", t[STATUS_ICON[this.column]?.tone], COLUMN_NAME[this.column], Select, null, true, "circle"))
+            .child(fsr.on ? row("priority", "Priority", "", prio[this.priority], `${this.priority} ${PRIORITY_LABEL[this.priority]}`, Select, null, true, "signal")
+              : sideRow("priority", "Priority", `${this.priority} ${PRIORITY_LABEL[this.priority]}`, fsr.tip))
+            .child(fsr.on ? row("assignee", "Assignee", "", t.muted, curRunner?.name ?? "No assignee", Select, null, true, "user")
+              : sideRow("assignee", "Assignee", curRunner?.name ?? rows.agentText ?? "No assignee", fsr.tip))
+            .child(fsr.on ? row("labels", "Labels", "", t.muted, this.labels.length ? this.labels.join(", ") : "Add label", Combobox, null, true, "tag")
+              : sideRow("labels", "Labels", this.labels.length ? this.labels.join(", ") : "No labels", fsr.tip))
+            .child(lock ? sideRow("project", "Project", curProject ? projLabel(curProject) : "project", lockTip) : row("project", "Project", "", t.muted, curProject ? projLabel(curProject) : "project", Combobox, null, true, "folder"))
             .child(machineRow(R.remote?.machine || "another machine"))
-            .child(sideRow("parent", "Parent", "No parent", OFF_TIP))
+            .child(fsr.on ? row("parent", "Parent", "↑", t.muted, curParentText, Combobox, null, true)
+              : sideRow("parent", "Parent", curParentText, fsr.tip))
             .child(section(t, "Run"))
             .child(div().id("remote-run-off").text_size(12).text_color(t.dim).child(`Run: ${OFF_TIP}`))
             .child(section(t, "Wakeups"))
@@ -1053,12 +1347,12 @@ export class Editor {
             .child(div().text_size(11.5).text_color(t.dim).child(`${n.by}${n.kind ? ` · ${n.kind}` : ""}${n.at ? ` · ${stamp(n.at)}` : ""}`))
             .child(div().text_size(13).child(n.text)))))
           .when(Boolean(R) && !R.new, (el) => el.child(v_flex().id("remote-note-new").p(8).rounded(8).border_1().border_color(t.input).bg(t.background).child(Textarea.new(this.note).h(64).text_size(13).border_0())))
-          .when(Boolean(curRunner) && !agentMode && !this.task, (el) => el.child(div().text_size(12).text_color(t.muted).child(startHint(curRunner.name))))
+          .when(Boolean(curRunner) && !agentMode && !this.task && !R, (el) => el.child(div().text_size(12).text_color(t.muted).child(startHint(curRunner.name))))
           .when(agentMode, (el) => el.child(h_flex().gap(8).items_center().child(row("project", "Project", "", t.muted, curProject ? projLabel(curProject) : "No project", Combobox, "folder"))))
           .when(!agentMode, (el) => el.child(h_flex().gap(8).items_center()
             .child(row("status", "Status", "", t[STATUS_ICON[this.column]?.tone], COLUMN_NAME[this.column], Select, "circle"))
             .child(R && !R.new ? off("priority", "signal", `${this.priority} ${PRIORITY_LABEL[this.priority]}`) : row("priority", "Priority", "", prio[this.priority], `${this.priority} ${PRIORITY_LABEL[this.priority]}`, Select, "signal"))
-            .child(R ? off("assignee", "user", "Assignee") : row("assignee", "Assignee", "", t.muted, curRunner?.name ?? "Assignee", Select, "user"))
+            .child(R && !fsr.on ? off("assignee", "user", "Assignee", fsr.tip) : row("assignee", "Assignee", "", t.muted, curRunner?.name ?? "Assignee", Select, "user"))
             .child(R && !R.new ? off("labels", "tag", this.labels.length ? this.labels.join(", ") : "Add label") : row("labels", "Labels", "", t.muted, this.labels.length ? this.labels.join(", ") : "Add label", Combobox, "tag"))
             .child(row("project", "Project", "", t.muted, curProject ? projLabel(curProject) : "No project", Combobox, "folder"))
             .child(machinePill(R ? R.remote?.machine || "another machine" : "Local")))))

@@ -11,6 +11,12 @@ export function controlState(ws) {
   if (ws?.frozen) return { on: false, tip: "writes frozen" };
   return { on: false, tip: ws?.reason || "writes are off" };
 }
+// { on, tip } for the field controls (priority, labels, assignee, parent, project): writes on AND the probe allows fields.
+export function fieldState(ws) {
+  const c = controlState(ws);
+  if (!c.on) return c;
+  return ws?.fields?.on ? { on: true, tip: null } : { on: false, tip: ws?.fields?.tip || "needs the update for priority, labels, assignee, parent and project" };
+}
 export const statusLine = (ws) => (ws?.enabled ? "writes on" : controlState(ws).tip);
 
 export function moveOp(card, column) {
@@ -23,22 +29,32 @@ export function shiftOp(card, columnIds, dir) {
   return i < 0 ? null : moveOp(card, columnIds[i + dir]);
 }
 export const archiveOp = (card) => (card?.id ? { op: "archive", id: card.id } : null);
-export function addOp({ title, desc, column, priority, tags } = {}) {
+export function addOp({ title, desc, column, priority, tags, assignee, parent } = {}) {
   const t = String(title ?? "").trim();
   if (!t) return null;
-  return { op: "add", title: t, desc: String(desc ?? ""), tags: Array.isArray(tags) ? tags : [], column: column ?? "backlog", priority: priority ?? "P2" };
+  return { op: "add", title: t, desc: String(desc ?? ""), tags: Array.isArray(tags) ? tags : [], column: column ?? "backlog", priority: priority ?? "P2", ...(assignee ? { assignee } : {}), ...(parent ? { parent } : {}) };
 }
-// The editor's Save: an edit of the changed fields, then a note. Sent in this order, one after the other (a save re-reads the board, so
-// the note carries the card's new rev).
-export function editOps(card, { title, desc, note }) {
+// The editor's Save: one edit of the changed fields (text, priority, labels, assignee, parent), then the note, then the project change LAST (the
+// card leaves this project's board, so nothing can follow it). Sent in this order, one after the other (a save re-reads the board, so each
+// later op carries the card's new rev; a card with no rev counts as 0). Only the first op names ifRev: the rev the editor OPENED the card at; the ops after it follow our own save.
+// A draft of undefined leaves the field alone; null clears assignee/parent ("none"); tags [] clears the labels.
+const sameSet = (a, b) => a.length === b.length && [...a].sort().every((x, i) => x === [...b].sort()[i]);
+const sameAssignee = (a, b) => (a?.kind ?? null) === (b?.kind ?? null) && (a?.id ?? null) === (b?.id ?? null);
+export function editOps(card, { title, desc, note, priority, tags, assignee, parent, project }) {
   const ops = [];
   const fields = {};
   const nt = String(title ?? "").trim();
   if (nt && nt !== card.title) fields.title = nt;
   if (desc !== undefined && String(desc) !== (card.desc ?? "")) fields.desc = String(desc);
+  if (priority !== undefined && priority !== card.priority) fields.priority = priority;
+  if (Array.isArray(tags) && !sameSet(tags, card.tags ?? [])) fields.tags = tags;
+  if (assignee !== undefined && !sameAssignee(assignee, card.assignee)) fields.assignee = assignee ? { kind: assignee.kind, id: assignee.id } : "none";
+  if (parent !== undefined && (parent || null) !== (card.parent || null)) fields.parent = parent || "none";
   if (Object.keys(fields).length) ops.push({ op: "edit", id: card.id, ...fields });
   const n = String(note ?? "").trim();
   if (n) ops.push({ op: "note", id: card.id, text: n });
+  if (typeof project === "string" && project && project !== card.remote?.projectId) ops.push({ op: "edit", id: card.id, project });
+  if (ops.length) ops[0] = { ...ops[0], ifRev: Number.isSafeInteger(card.rev) && card.rev > 0 ? card.rev : 0 }; // a card with no rev is version 0, never "no baseline"
   return ops;
 }
 
@@ -46,7 +62,14 @@ export function editOps(card, { title, desc, note }) {
 export function applied(card, op) {
   if (op?.op === "move") return { ...card, column: op.column };
   if (op?.op !== "edit") return card;
-  return { ...card, ...(op.title !== undefined ? { title: op.title } : {}), ...(op.desc !== undefined ? { desc: op.desc } : {}) };
+  return {
+    ...card,
+    ...(op.title !== undefined ? { title: op.title } : {}), ...(op.desc !== undefined ? { desc: op.desc } : {}),
+    ...(op.priority !== undefined ? { priority: op.priority } : {}), ...(op.tags !== undefined ? { tags: op.tags } : {}),
+    ...(op.assignee !== undefined ? { assignee: op.assignee === "none" ? null : op.assignee } : {}),
+    ...(op.parent !== undefined ? { parent: op.parent === "none" ? null : op.parent } : {}),
+    ...(op.project !== undefined ? { remote: { ...card.remote, projectId: op.project } } : {}),
+  };
 }
 
 // A writer outcome -> the text the person reads.

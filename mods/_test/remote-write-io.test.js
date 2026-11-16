@@ -46,13 +46,13 @@ beforeEach(() => {
 });
 const fire = () => { for (const t of timers) t(); };
 // Board read, then the probe on stale -> fresh, answered ok; returns when writes are enabled.
-async function ready() {
+async function ready(level = 2) {
   const cx = mkCx();
   IO.watchRemote(cx, () => true);
   await until(() => host.state[CKEY], "first board read");
   fire();
   await until(() => om.step1.length >= 1 && IO.remoteWriter().inflight(M) === 0, "probe staged and renamed");
-  om.consume((cmd) => (cmd.op === "protocol" ? "ok: protocol 2" : "ok: x"));
+  om.consume((cmd) => (cmd.op === "protocol" ? `ok: protocol ${level}` : "ok: x"));
   await until(async () => { fire(); await drain(2); return IO.remoteWriteState(LID).enabled; }, "writes enabled");
   om.sawList = om.remote.some((a) => a[a.indexOf("-c") + 1] === 'ls "$HOME/.config/herdr-app/data/drover-inbox"');
   om.step1.length = 0; om.remote.length = 0;
@@ -68,7 +68,11 @@ test("remoteWriteState: a local project is not remote; a remote one is disabled 
 
 test("the probe is sent when the board first turns fresh and answers enable writes", async () => {
   await ready();
-  assert.deepEqual(IO.remoteWriteState(LID), { remote: true, enabled: true, reason: null, frozen: false });
+  assert.deepEqual(IO.remoteWriteState(LID), { remote: true, enabled: true, reason: null, frozen: false, fields: { on: false, tip: `${M} needs the update for priority, labels, assignee, parent and project` } });
+});
+test("remoteWriteState: protocol 3 turns the field controls on", async () => {
+  await ready(3);
+  assert.deepEqual(IO.remoteWriteState(LID).fields, { on: true, tip: null });
 });
 
 test("remoteSend: a move carries the cached rev, the outcome is saved, and the board is re-read", async () => {

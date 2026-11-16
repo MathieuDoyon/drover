@@ -622,3 +622,90 @@ test("re-review 2.5 writes:false sends nothing, not even the protocol probe; tur
   await until(() => hc.sends().length === 1, "a probe as soon as writes are on");
   assert.equal(bodyOf(hc.sends()[0]).op, "protocol");
 });
+
+// ---- T-MWIA1D6HO84: protocol levels. 2 = basic writes; 3 = priority, tags, assignee, parent, project (edit) and assignee (add). ----
+async function enableAt(level) {
+  const p = w.probe(M);
+  await until(() => delivered(), "probe delivered");
+  hc.consume((cmd) => (cmd.op === "protocol" ? `ok: protocol ${level}` : "ok: x"));
+  clock += 1000; await w.tick(); await p;
+  hc.calls.length = 0;
+}
+const FIELD_OPS = [
+  { op: "edit", id: "T-AB1", priority: "P0" }, { op: "edit", id: "T-AB1", tags: ["a"] }, { op: "edit", id: "T-AB1", assignee: { kind: "agent", id: "wrangler" } },
+  { op: "edit", id: "T-AB1", assignee: "none" }, { op: "edit", id: "T-AB1", parent: "T-AB2" }, { op: "edit", id: "T-AB1", parent: "none" }, { op: "edit", id: "T-AB1", project: "P-OTHER" },
+  { op: "edit", id: "T-AB1", title: "new", priority: "P1" }, { op: "add", title: "x", assignee: { kind: "squad", id: "cattle-drive" } },
+];
+const TIP = "omarchy needs the update for priority, labels, assignee, parent and project";
+
+test("T3 level 3: fields are on; the exact JSON of each new field", async () => {
+  await enableAt(3);
+  assert.deepEqual(w.fields(M, PID), { on: true, tip: null });
+  const cases = [
+    [{ op: "edit", id: "T-AB1", priority: "P0", tags: ["a", "b"], assignee: { kind: "agent", id: "wrangler", junk: 1 }, parent: "T-AB2", project: "P-OTHER", title: "n" },
+      { op: "edit", id: "T-AB1", title: "n", priority: "P0", tags: ["a", "b"], assignee: { kind: "agent", id: "wrangler" }, parent: "T-AB2", project: "P-OTHER", ifRev: 7, ttlMs: 120000 }],
+    [{ op: "edit", id: "T-AB1", assignee: "none", parent: "none" }, { op: "edit", id: "T-AB1", assignee: "none", parent: "none", ifRev: 7, ttlMs: 120000 }],
+    [{ op: "add", title: "x", assignee: { kind: "squad", id: "cattle-drive" }, parent: "T-AB1" }, { op: "add", title: "x", desc: "", tags: [], column: "backlog", priority: "P2", project: PID, assignee: { kind: "squad", id: "cattle-drive" }, parent: "T-AB1", ttlMs: 120000 }],
+  ];
+  for (const [op, want] of cases) { assert.equal((await sendAndAnswer(op, "ok: done")).status, "saved"); assert.deepEqual(bodyOf(lastSend()), want); }
+});
+test("T3 ifRev is the editor's opened baseline when it gives one, else the saved copy's rev", async () => {
+  await enableAt(3);
+  await sendAndAnswer({ op: "edit", id: "T-AB1", priority: "P0", ifRev: 3 }, "ok: done");
+  assert.equal(bodyOf(lastSend()).ifRev, 3);
+  await sendAndAnswer({ op: "edit", id: "T-AB1", priority: "P0" }, "ok: done");
+  assert.equal(bodyOf(lastSend()).ifRev, 7);
+  const bad = await w.send(M, PID, { op: "edit", id: "T-AB1", priority: "P0", ifRev: -1 });
+  assert.equal(bad.status, "refused");
+});
+test("T3 strict payloads: bad priority, tags, assignee, parent, project are refused and nothing is sent", async () => {
+  await enableAt(3);
+  for (const bad of [{ priority: "P9" }, { tags: "a" }, { tags: [1] }, { assignee: { kind: "robot", id: "x" } }, { assignee: "x" }, { assignee: null }, { parent: "nope" }, { parent: 5 }, { project: "x y" }, { project: 5 }]) {
+    assert.equal((await w.send(M, PID, { op: "edit", id: "T-AB1", ...bad })).status, "refused", JSON.stringify(bad));
+  }
+  assert.equal((await w.send(M, PID, { op: "add", title: "x", assignee: { kind: "agent" } })).status, "refused");
+  assert.equal(hc.sends().length, 0);
+});
+test("T3 level 2: basic writes work, field controls are off with the reason, and send() refuses every protocol-3-only field", async () => {
+  await enableAt(2);
+  assert.equal(w.canWrite(M, PID).ok, true);
+  assert.deepEqual(w.fields(M, PID), { on: false, tip: TIP });
+  assert.equal((await sendAndAnswer({ op: "edit", id: "T-AB1", title: "t2", desc: "d" }, "ok: done")).status, "saved");
+  assert.equal((await sendAndAnswer({ op: "move", id: "T-AB1", column: "doing" }, "ok: done")).status, "saved");
+  assert.equal((await sendAndAnswer({ op: "add", title: "plain" }, "ok: done")).status, "saved");
+  const n = hc.sends().length;
+  for (const op of FIELD_OPS) {
+    const o = await w.send(M, PID, op);
+    assert.equal(o.status, "refused", JSON.stringify(op)); assert.equal(o.message, TIP);
+  }
+  assert.equal(hc.sends().length, n, "nothing reached the wire");
+});
+test("T3 a downgrade (3 -> 2) after a reconnect refuses the fields again; an upgrade turns them on", async () => {
+  await enableAt(3);
+  assert.equal(w.fields(M, PID).on, true);
+  w.reconnect(M);
+  await until(() => delivered(), "probe delivered");
+  hc.consume((cmd) => (cmd.op === "protocol" ? "ok: protocol 2" : "ok: x"));
+  clock += 1000; await w.tick();
+  await until(() => w.canWrite(M, PID).ok, "probe answered");
+  assert.equal(w.fields(M, PID).on, false);
+  assert.equal((await w.send(M, PID, { op: "edit", id: "T-AB1", title: "t", priority: "P0" })).message, TIP, "mixed title + field");
+  w.reconnect(M);
+  await until(() => hc.sends().length >= 1 && w.inflight(M) === 0, "probe delivered");
+  hc.consume((cmd) => (cmd.op === "protocol" ? "ok: protocol 3" : "ok: x"));
+  clock += 1000; await w.tick();
+  await until(() => w.fields(M, PID).on, "fields on after the upgrade");
+});
+test("T3 while the probe is stale or unanswered, fields are off with the generic reason, and a field send is refused", async () => {
+  assert.equal(w.fields(M, PID).on, false);
+  assert.match(w.fields(M, PID).tip, /Checking omarchy|needs the update/);
+  assert.equal((await w.send(M, PID, { op: "edit", id: "T-AB1", priority: "P0" })).status, "refused");
+});
+test("T3 an answer that is not 'ok: protocol N' (N>=2) keeps writes off", async () => {
+  for (const text of ["ok: protocol 1", "ok: protocol x", "error: Unknown drover command"]) {
+    const p = w.probe(M); await until(() => delivered(), "probe delivered");
+    hc.consume((cmd) => (cmd.op === "protocol" ? text : "ok: x")); clock += 1000; await w.tick(); await p;
+    assert.equal(w.canWrite(M, PID).ok, false, text); assert.equal(w.fields(M, PID).on, false, text);
+    hc.calls.length = 0;
+  }
+});

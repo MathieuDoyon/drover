@@ -7,7 +7,7 @@ import { validMachine, cacheKey } from "./remote.js";
 
 export const TTL_MS = 120000; // every op, including add
 export const PROBE_TTL_MS = 30000;
-export const PROBE_FRESH_MS = 60000; // writes are on only while the last `ok: protocol 2` is younger than this
+export const PROBE_FRESH_MS = 60000; // writes are on only while the last `ok: protocol N` (N >= 2) is younger than this
 export const PROBE_REFRESH_MS = 45000; // re-probe before it goes stale, so the controls do not blink off every minute
 export const PROBE_RETRY_MS = 15000;
 export const WAIT_MS = 10000; // how long send() waits for the result
@@ -35,6 +35,13 @@ const COLUMNS = ["backlog", "todo", "doing", "review", "blocked", "done"];
 const validId = (s) => typeof s === "string" && /^T-[A-Z0-9]+$/.test(s);
 const validOrigin = (s) => typeof s === "string" && /^[A-Za-z0-9]{1,16}$/.test(s);
 export const validNonce = (s) => typeof s === "string" && /^L[A-Za-z0-9]{1,16}-[A-Za-z0-9]{12}$/.test(s);
+const PRIORITY_IDS = ["P0", "P1", "P2", "P3"];
+const validRemoteProject = (s) => typeof s === "string" && /^P-[A-Z0-9]+$/.test(s);
+// Strict, like the consumer: a value is valid or the whole request is not sent. {kind,id} is copied, never the caller's object.
+const assigneeOf = (a) => (a === "none" ? { value: "none" } : a && typeof a === "object" && (a.kind === "agent" || a.kind === "squad") && typeof a.id === "string" && /^[A-Za-z0-9_-]{1,64}$/.test(a.id) ? { value: { kind: a.kind, id: a.id } } : { error: "Bad assignee" });
+// Fields only a protocol-3 consumer understands: an older one ignores them and still answers `ok`.
+export const FIELDS_TIP = (machine) => `${machine} needs the update for priority, labels, assignee, parent and project`;
+export const needsFields = (op) => (op?.op === "edit" ? ["priority", "tags", "assignee", "parent", "project"].some((k) => op[k] !== undefined) : op?.op === "add" ? op.assignee !== undefined || op.parent !== undefined : false);
 const str = (v, max = 20000) => typeof v === "string" && v.length <= max;
 
 // The op the UI asks for -> the inbox JSON, or { error }. Only op fields: nothing else from the caller is copied.
@@ -46,7 +53,10 @@ export function buildPayload(op, { projectId, rev }) {
     if (op.column !== undefined && !COLUMNS.includes(op.column)) return { error: "Bad column" };
     if (op.priority !== undefined && !["P0", "P1", "P2", "P3"].includes(op.priority)) return { error: "Bad priority" };
     if (op.tags !== undefined && !(Array.isArray(op.tags) && op.tags.every((t) => str(t, 100)))) return { error: "Bad tags" };
-    return { json: { op: "add", title: op.title, desc: op.desc ?? "", tags: op.tags ?? [], column: op.column ?? "backlog", priority: op.priority ?? "P2", project: projectId, ttlMs: TTL_MS } };
+    const extra = {};
+    if (op.assignee !== undefined) { const a = assigneeOf(op.assignee); if (a.error) return a; extra.assignee = a.value; }
+    if (op.parent !== undefined) { if (!validId(op.parent)) return { error: "Bad parent" }; extra.parent = op.parent; }
+    return { json: { op: "add", title: op.title, desc: op.desc ?? "", tags: op.tags ?? [], column: op.column ?? "backlog", priority: op.priority ?? "P2", project: projectId, ...extra, ttlMs: TTL_MS } };
   }
   if (!validId(op.id)) return { error: "Bad card id" };
   const head = { op: op.op, id: op.id };
@@ -58,9 +68,14 @@ export function buildPayload(op, { projectId, rev }) {
     head.text = op.text;
     if (op.kind !== undefined) { if (!["decision", "log", "blocker", "pr", "handoff"].includes(op.kind)) return { error: "Bad note kind" }; head.kind = op.kind; }
   } else if (op.op === "edit") {
-    if (op.title === undefined && op.desc === undefined) return { error: "Nothing to change" };
+    if (!["title", "desc", "priority", "tags", "assignee", "parent", "project"].some((k) => op[k] !== undefined)) return { error: "Nothing to change" };
     if (op.title !== undefined) { if (!str(op.title, 500) || !op.title.trim()) return { error: "Bad title" }; head.title = op.title; }
     if (op.desc !== undefined) { if (!str(op.desc)) return { error: "Bad description" }; head.desc = op.desc; }
+    if (op.priority !== undefined) { if (!PRIORITY_IDS.includes(op.priority)) return { error: "Bad priority" }; head.priority = op.priority; }
+    if (op.tags !== undefined) { if (!(Array.isArray(op.tags) && op.tags.every((t) => str(t, 100)))) return { error: "Bad tags" }; head.tags = op.tags; }
+    if (op.assignee !== undefined) { const a = assigneeOf(op.assignee); if (a.error) return a; head.assignee = a.value; }
+    if (op.parent !== undefined) { if (op.parent !== "none" && !validId(op.parent)) return { error: "Bad parent" }; head.parent = op.parent; }
+    if (op.project !== undefined) { if (op.project !== "none" && !validRemoteProject(op.project)) return { error: "Bad project" }; head.project = op.project; }
   }
   return { json: { ...head, ifRev: rev, ttlMs: TTL_MS } };
 }
@@ -100,7 +115,7 @@ export function createWriter({ run, exec, getShared, setShared, now = Date.now, 
   const patch = (nonce, fields) => save(pending().map((e) => (e.nonce === nonce ? { ...e, ...fields } : e)));
   const drop = (nonce) => save(pending().filter((e) => e.nonce !== nonce));
   const mine = (e) => e.owner === instance;
-  const probeOf = (machine) => { let p = probes.get(machine); if (!p) probes.set(machine, (p = { ok: false, at: null, reason: null, inflight: false, tryAt: null, gen: 0, seq: 0, cur: 0, wasWritable: true })); return p; };
+  const probeOf = (machine) => { let p = probes.get(machine); if (!p) probes.set(machine, (p = { ok: false, level: 0, at: null, reason: null, inflight: false, tryAt: null, gen: 0, seq: 0, cur: 0, wasWritable: true })); return p; };
   // A send that may still reach the rename (any copy's): its owner is beating and its hc call has not returned (an abandoned call counts, with no
   // age cut-off), or the owner went silent and another writer adopted it: that one counts for 2 x ttl after the adoption (`inflightUntil`), since
   // adoption moves the reconciliation, it does not prove the call ended. This status serves the freeze switch; deploy/omarchy/drain-check.sh stays
@@ -138,6 +153,12 @@ export function createWriter({ run, exec, getShared, setShared, now = Date.now, 
     if (p.at !== null && !p.ok) return { ok: false, reason: p.reason ?? `${machine} needs the update` };
     if (!p.ok || p.at === null || now() - p.at >= PROBE_FRESH_MS) { if (!p.inflight) void probe(machine); return { ok: false, reason: `Checking ${machine}, try again in a moment` }; }
     return { ok: true };
+  }
+  // The field controls (Priority, Labels, Assignee, Parent, Project): { on, tip }. On only while writes are on AND the fresh probe said protocol 3.
+  function fields(machine, projectId) {
+    const g = canWrite(machine, projectId);
+    if (!g.ok) return { on: false, tip: g.reason };
+    return probeOf(machine).level >= 3 ? { on: true, tip: null } : { on: false, tip: FIELDS_TIP(machine) };
   }
   // Frozen: writes are off AND no send from any copy is still travelling (read from the shared pending list).
   const frozen = (machine, projectId) => link(machine, projectId).writes === false && sending(machine) === 0;
@@ -182,12 +203,17 @@ export function createWriter({ run, exec, getShared, setShared, now = Date.now, 
     if (!OPS.includes(op?.op)) return refuse(`${op?.op ?? "That op"} is not allowed from here`);
     const g = canWrite(machine, projectId);
     if (!g.ok) return refuse(g.reason);
+    if (needsFields(op) && probeOf(machine).level < 3) return refuse(FIELDS_TIP(machine)); // an older consumer would answer ok and ignore them
     let rev = 0;
     if (op.op !== "add") {
       const c = getShared(cacheKey(machine, projectId));
       const t = c && Array.isArray(c.tasks) ? c.tasks.find((x) => x?.id === op.id) : null;
       if (!t) return refuse("That card is not in the saved copy: reload the board");
       rev = Number.isSafeInteger(t.rev) && t.rev >= 0 ? t.rev : 0;
+      if (op.ifRev !== undefined) { // the rev the editor opened the card at: a change since then is stale, not only a change since the last poll
+        if (!(Number.isSafeInteger(op.ifRev) && op.ifRev >= 0)) return refuse("Bad revision");
+        rev = op.ifRev;
+      }
     }
     const b = buildPayload(op, { projectId, rev });
     if (b.error) return refuse(b.error);
@@ -222,7 +248,9 @@ export function createWriter({ run, exec, getShared, setShared, now = Date.now, 
     if (p.gen !== gen) return; // an answer from a previous connection proves nothing about this one
     if (o.status === "pending" || o.status === "failed") { p.ok = false; p.reason = `${machine} did not answer the check`; return; } // not an answer: `at` stays
     p.at = now();
-    p.ok = o.text === "ok: protocol 2";
+    const m = /^ok: protocol (\d{1,3})$/.exec(String(o.text ?? ""));
+    p.level = m ? Number(m[1]) : 0; // 2 = basic writes, 3 = also priority, tags, assignee, parent, project
+    p.ok = p.level >= 2;
     p.reason = p.ok ? null : `${machine} needs the update`;
   }
   async function probe(machine) {
@@ -235,7 +263,7 @@ export function createWriter({ run, exec, getShared, setShared, now = Date.now, 
   function reconnect(machine) {
     if (!validMachine(machine)) return;
     const p = probeOf(machine);
-    p.gen++; p.ok = false; p.at = null; p.reason = null;
+    p.gen++; p.ok = false; p.level = 0; p.at = null; p.reason = null;
     if (writable(machine)) void runProbe(machine, p); else p.wasWritable = false; // read-only: sends nothing; probes the moment writes are on
   }
 
@@ -341,7 +369,7 @@ export function createWriter({ run, exec, getShared, setShared, now = Date.now, 
     return { removed };
   }
 
-  return { send, canWrite, probe, reconnect, tick, cleanup, frozen, inflight: sending, pending };
+  return { send, canWrite, fields, probe, reconnect, tick, cleanup, frozen, inflight: sending, pending };
 }
 
 function defaultRand() {
