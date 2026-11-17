@@ -11,6 +11,7 @@ Squads → **Add default herd** adds these (it never changes yours). ▶ on any 
 | Drover | `drover.md` | Claude Opus, high effort | Coordinator: plans a group of tasks, starts drives with `drover start`, watches, unblocks, reports. Writes no product code |
 | Trail Boss | `trail-boss.md` | Claude Sonnet | Leads a Cattle Drive: plan, relay, run the checks, gate the review, babysit the PR |
 | Wrangler | `wrangler.md` | Claude Sonnet | Writes the code, test first. Leads a Stray Roundup |
+| Wrangler 2 | `wrangler.md` | Codex (gpt-6.1-sol, medium) | A second Wrangler on another model: a rival lane in an arena, or a swap-in |
 | Inspector | `inspector.md` | Codex | Reviews code or plans. Never edits |
 | Scout | `scout.md` | Claude Sonnet | Leads a Scouting Party: turns a task that is not ready into ready tasks |
 | PM, Architect, QA, Security, Writer | `pm.md`, `architect.md`, `qa.md`, `security.md`, `writer.md` | Claude / Codex | The Scoping squad |

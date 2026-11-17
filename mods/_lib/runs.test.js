@@ -34,6 +34,12 @@ test("defaults: Scoping squad has pm leader and its members exist as agents", ()
   assert.ok(ids.has(sq.leader) && sq.members.every((m) => ids.has(m.agent)));
 });
 
+test("defaults: Wrangler 2 is a Codex Sol wrangler with the wrangler soul", () => {
+  const w2 = DEFAULT_CONFIG.agents.find((a) => a.id === "wrangler-2");
+  assert.equal(w2?.soul, "wrangler");
+  assert.equal(w2.command, "codex --no-daemon --model gpt-6.1-sol -c model_reasoning_effort=medium");
+});
+
 test("addDefaults: adds scoping to an old config, keeps user edits", () => {
   const old = { agents: [{ id: "scout", name: "Mine", command: "x", version: 9 }], squads: [] };
   const { config, added } = addDefaults(old);

@@ -23,7 +23,7 @@ The Start picker (460px wide, 75% tall) lists agents and squads, optionally with
 - Mod `drover-agents`, `place: none`, `main.js` (about 340 lines), `bin/` (the `drover-workfolder` helper) and `souls/` (Markdown souls for the default herd plus `_herd.md`, the shared rules).
 - `herdr` imports: `props`, `closeOverlay`, `openOverlay`, `theme`, `shared`, `setShared`, `notify`, `exec`, `appHome`, `hc`, `focused`.
 - Programs it runs: `hc` (start terminals), the profile's own command (`claude`, `codex`), `open` (Open ↗).
-- Default herd (`_lib/runs.js` `DEFAULT_AGENTS`, `DEFAULT_SQUADS`): Drover, Trail Boss, Wrangler, Inspector, Scout, PM, Architect, QA, Security, Writer, Claude, Codex; squads Cattle Drive, Stray Roundup, Scouting Party, Scoping, Dev + Reviewer.
+- Default herd (`_lib/runs.js` `DEFAULT_AGENTS`, `DEFAULT_SQUADS`): Drover, Trail Boss, Wrangler, Wrangler 2, Inspector, Scout, PM, Architect, QA, Security, Writer, Claude, Codex; squads Cattle Drive, Stray Roundup, Scouting Party, Scoping, Dev + Reviewer.
 
 ## Watch out
 

@@ -75,6 +75,7 @@ Every mod and the layout also has a `RECIPE.md` (a brief to rebuild it).
 | Drover | Coordinator: plans a group of tasks, starts drives, watches, reports. Writes no product code |
 | Trail Boss | Leads a Cattle Drive: plan, relay, checks, review gate, PR |
 | Wrangler | Writes the code, test first. Leads a Stray Roundup |
+| Wrangler 2 | The same job on Codex: a rival lane in an arena |
 | Inspector | Reviews code or plans. Never edits |
 | Scout | Turns a task that is not ready into ready tasks |
 

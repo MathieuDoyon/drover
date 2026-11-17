@@ -14,6 +14,7 @@ export const DEFAULT_AGENTS = [
   { id: "drover", name: "Drover", soul: "drover", command: "claude --model claude-opus-5-5 --effort high --permission-mode auto", instructions: "", version: 1 },
   { id: "trail-boss", name: "Trail Boss", soul: "trail-boss", command: SONNET, instructions: "", version: 1 },
   { id: "wrangler", name: "Wrangler", soul: "wrangler", command: SONNET, instructions: "", version: 1 },
+  { id: "wrangler-2", name: "Wrangler 2", soul: "wrangler", command: SOL, instructions: "", version: 1 },
   { id: "inspector", name: "Inspector", soul: "inspector", command: SOL, instructions: "", version: 1 },
   { id: "scout", name: "Scout", soul: "scout", command: SONNET, instructions: "", version: 1 },
   { id: "pm", name: "PM", soul: "pm", command: SONNET, instructions: "", version: 1 },

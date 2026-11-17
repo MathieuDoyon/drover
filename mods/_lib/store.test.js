@@ -113,7 +113,7 @@ import * as R from "./runs.js";
 
 test("agents and squads: validate, version, refuse removing a used agent", () => {
   let cfg = R.config(null);
-  assert.equal(cfg.agents.length, 12);
+  assert.equal(cfg.agents.length, 13);
   assert.ok(R.saveAgent(cfg, { name: "", command: "x" }).error);
   assert.ok(R.saveAgent(cfg, { name: "X", command: "  " }).error);
   const a = R.saveAgent(cfg, { name: "Opus Dev", command: "claude --model claude-opus-5-5" });
