@@ -25,7 +25,7 @@ Clone this repository (the command is in the [README](../README.md#install)) and
 
 ## 4. Install all the mods
 
-`install.sh` replaces only its own symlinks. If `~/.config/herdr-app/mods/drover-*` is a real folder, the script skips it: move that folder away first.
+`install.sh` touches only what differs, so a running Herdr reloads a mod only when its files really changed. Run it from the main checkout: from a linked git worktree it refuses (a link into a worktree breaks the mods when the worktree is deleted). To look at a worktree on purpose, run `./install.sh --from-worktree`, then run `install.sh` from the main checkout again before you delete the worktree. `install.sh` replaces only its own symlinks. If `~/.config/herdr-app/mods/drover-*` is a real folder, the script skips it: move that folder away first.
 
 ```sh
 cd mods && ./install.sh
