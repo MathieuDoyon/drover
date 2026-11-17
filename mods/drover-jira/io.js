@@ -166,6 +166,7 @@ export const remoteWriter = () => {
     run: (args) => hc(args), // the writer owns its deadlines (tick); hc takes argv only
     exec: (cmd, args, opts) => exec(cmd, args, opts),
     now: () => Date.now(), getShared: (k) => shared(k), setShared: (k, v) => setShared(k, v ?? undefined), origin,
+    log: (m) => globalThis.console?.log?.(m), // one payload-free line per failed delivery step
     writable: (machine) => loadProjects().some((p) => p.remote?.machine === machine && p.remote.writes !== false),
     link: (machine, projectId) => ({ writes: bound(machine, projectId)?.remote.writes !== false, state: remote.view(machine, projectId).state }),
     reload: (machine, projectId) => { void remote.retry(machine, projectId).then(() => writerCx?.notify?.()); },

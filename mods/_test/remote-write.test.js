@@ -31,6 +31,7 @@ function fakeHc() {
   f.exec = async (cmd, args, opts = {}) => { // step 1: sh -c 'printf %s "$1" | hc file write --on "$2" "$3"' drover-send <json> <machine> <path>
     f.calls.push({ cmd, args, opts, stdin: args[3], step: 1 });
     if (f.mode === "stage-fail") throw new Error("hc file write failed");
+    if (f.mode === "stage-landed-fail") { f.inbox[args[5].split("/").pop()] = args[3]; return { code: 255, stdout: "", stderr: "timed out" }; } // the file landed, the call still failed
     f.inbox[args[5].split("/").pop()] = args[3];
     return { code: 0, stdout: "", stderr: "" };
   };
@@ -422,7 +423,7 @@ test("5 payloads hold only op fields plus ifRev and ttlMs; a sentinel in the cac
   assert.ok(!JSON.stringify(hc.calls).includes(SENTINEL));
 });
 
-test("1g step 1 leftovers: an own-origin `.L<origin>-*.tmp` older than 24 h is removed; foreign, young and still-pending ones are kept", async () => {
+test("1g step 1 leftovers: an own-origin `.L<origin>-*.tmp` the server reports as old (-mmin +10) is removed; foreign, young and still-pending ones are kept", async () => {
   const p = w.probe(M); await until(() => delivered(), "probe"); // a pending entry with its own staging name
   const live = `.${shared[W.PENDING_KEY][0].nonce}.tmp`;
   Object.assign(hc.inbox, { ".LLAPTOP1-000000000091.tmp": "{}", ".LLAPTOP1-000000000092.tmp": "{}", ".LOTHER-000000000093.tmp": "{}", ".4242.tmp": "{}", ".LLAPTOP1-0000000000$x.tmp": "{}" });
@@ -434,6 +435,95 @@ test("1g step 1 leftovers: an own-origin `.L<origin>-*.tmp` older than 24 h is r
   assert.equal(hc.rms().length, 1);
   assert.match(arg(hc.rms()[0].args), /^\.LLAPTOP1-\d{12}\.tmp$/);
   void p;
+});
+
+// ---- T-MWKX74YE6RM: a staging file that is never renamed must not sit in omarchy's inbox ----
+test("1h step 1 fails although the file landed: the own staging file is removed at once, nothing is renamed", async () => {
+  await enable();
+  hc.mode = "stage-landed-fail";
+  const out = await w.send(M, PID, { op: "move", id: "T-AB1", column: "doing" });
+  assert.equal(out.status, "failed");
+  await until(() => hc.rms().length === 1, "rm of the staging file");
+  assert.match(arg(hc.rms()[0].args), /^\.LLAPTOP1-\d{12}\.tmp$/);
+  assert.deepEqual(Object.keys(hc.inbox).filter((n) => n.endsWith(".tmp")), []);
+  assert.equal(hc.remoteSends().length, 0);
+});
+
+test("1h step 2 never ran (link dropped before the rename) and the entry settles unknown: the staging file is removed", async () => {
+  await enable();
+  hc.mode = "before";
+  const p = w.send(M, PID, { op: "move", id: "T-AB1", column: "doing" });
+  await until(() => hc.remoteSends().length === 1, "step 2 tried");
+  await drain();
+  hc.mode = "ok"; // the link is back; the request was never renamed
+  clock += W.TTL_MS + 3600000 + 1000;
+  await w.tick(); await p;
+  await until(() => hc.rms().length >= 1, "rm of the staging file");
+  assert.deepEqual(Object.keys(hc.inbox).filter((n) => n.endsWith(".tmp")), []);
+});
+
+test("1h the staging sweep is short (not 24 h) and runs from tick(), not only at reconnect", async () => {
+  await enable();
+  hc.calls.length = 0;
+  clock += W.SWEEP_MS + 1000;
+  await w.tick();
+  await until(() => hc.calls.some((c) => c.args[0] === "exec" && sc(c.args)?.startsWith("find ")), "a sweep from tick");
+  assert.match(W.FIND_TMP_SCRIPT, /-mmin \+(\d+)/);
+  assert.ok(Number(/-mmin \+(\d+)/.exec(W.FIND_TMP_SCRIPT)[1]) <= 15, "a stale staging file is reaped within minutes");
+});
+
+test("1h a failed rm leaves the file; the next sweep retries it. With writes off no sweep runs (documented limit)", async () => {
+  await enable();
+  hc.inbox[".LLAPTOP1-000000000777.tmp"] = "{}"; hc.old = new Set([".LLAPTOP1-000000000777.tmp"]);
+  const realRun = hc.run; let failRm = true;
+  w = mk({ run: async (a, o) => (failRm && sc(a)?.startsWith("rm ") ? { code: 1, stdout: "", stderr: "x" } : realRun(a, o)) });
+  await w.cleanup(M);
+  assert.ok(".LLAPTOP1-000000000777.tmp" in hc.inbox, "rm failed: still there");
+  failRm = false; await w.cleanup(M);
+  assert.ok(!(".LLAPTOP1-000000000777.tmp" in hc.inbox), "retried");
+  hc.inbox[".LLAPTOP1-000000000778.tmp"] = "{}"; hc.old.add(".LLAPTOP1-000000000778.tmp");
+  linkState.writes = false; hc.calls.length = 0; clock += W.SWEEP_MS + 1000; await w.tick();
+  assert.equal(hc.calls.filter((c) => sc(c.args)?.startsWith("find ")).length, 0);
+});
+
+test("1h a failed step logs one payload-free line: step, code, ms, short stderr", async () => {
+  const lines = []; w = mk({ log: (m) => lines.push(m) });
+  await enable();
+  hc.mode = "stage-landed-fail";
+  await w.send(M, PID, { op: "note", id: "T-AB1", text: SENTINEL });
+  assert.equal(lines.length, 1);
+  assert.match(lines[0], /^remote-write stage failed: code:255 ms=\d+$/);
+  assert.ok(!lines[0].includes(SENTINEL) && !lines[0].includes("timed out"), "no stderr in the log");
+});
+
+test("1h thrown errors log an allowlisted code only, never the message; a stderr sentinel never reaches the log", async () => {
+  const lines = []; let next = null;
+  w = mk({ log: (m) => lines.push(m), exec: (...a) => (next ? next() : hc.exec(...a)) });
+  await enable();
+  next = async () => { const e = new Error(SENTINEL); e.code = "ETIMEDOUT"; throw e; };
+  await w.send(M, PID, { op: "note", id: "T-AB1", text: "x" });
+  next = async () => { throw new Error(SENTINEL); };
+  await w.send(M, PID, { op: "note", id: "T-AB1", text: "y" });
+  next = async () => ({ code: 1, stdout: "", stderr: SENTINEL });
+  await w.send(M, PID, { op: "note", id: "T-AB1", text: "z" });
+  assert.match(lines[0], /stage failed: threw:ETIMEDOUT ms=\d+$/);
+  assert.match(lines[1], /stage failed: threw:other ms=\d+$/);
+  assert.match(lines[2], /stage failed: code:1 ms=\d+$/);
+  assert.ok(!lines.join("\n").includes(SENTINEL));
+});
+
+test("1h the timed sweep retries a failed rm even when every probe fails (writes on, reader fresh)", async () => {
+  await enable();
+  hc.inbox[".LLAPTOP1-000000000888.tmp"] = "{}"; hc.old = new Set([".LLAPTOP1-000000000888.tmp"]);
+  const realRun = hc.run; let failRm = true, rmTries = 0;
+  w = mk({ run: async (a, o) => (failRm && sc(a)?.startsWith("rm ") ? (rmTries++, { code: 1, stdout: "", stderr: "x" }) : realRun(a, o)) });
+  w.reconnect(M); // registers the machine; its probe is never answered
+  await until(() => hc.sends().length >= 1, "probe sent");
+  clock += W.SWEEP_MS + 1000; await w.tick();
+  await until(() => rmTries >= 1, "first rm");
+  assert.ok(".LLAPTOP1-000000000888.tmp" in hc.inbox, "rm failed");
+  failRm = false; clock += W.SWEEP_MS + 1000; await w.tick();
+  await until(() => !(".LLAPTOP1-000000000888.tmp" in hc.inbox), "retried by the timer");
 });
 
 // ---- Inspector review 1 (Job 5): several writers on one pending list, shared freeze, probe generations, deadlines ----

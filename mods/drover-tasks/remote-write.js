@@ -17,6 +17,7 @@ export const ADOPT_MS = 30000; // another writer takes over an entry whose owner
 export const BEAT_MS = 10000; // how often an owner refreshes its entries
 export const UNKNOWN_AFTER_MS = TTL_MS + 3600000;
 export const CLEAN_AFTER_MS = 24 * 3600000;
+export const SWEEP_MS = 600000; // how often an own staging file that was never renamed is looked for (while writes are on)
 export const PENDING_KEY = "drover.remote-writes";
 export const INBOX = ".config/herdr-app/data/drover-inbox";
 export const OPS = ["move", "note", "edit", "add", "archive"];
@@ -28,7 +29,7 @@ export const STAGE_SCRIPT = 'printf %s "$1" | hc file write --on "$2" "$3"';
 export const SEND_SCRIPT = 'd=$HOME/.config/herdr-app/data/drover-inbox; f=$(date +%s)-$0; mv "$d/.$0.tmp" "$d/$f.json" && echo "$f.json"';
 export const FIND_SCRIPT = 'l=$(ls "$HOME/.config/herdr-app/data/drover-inbox") || exit 3; printf \'%s\\n\' "$l" | grep -F -- "-$0."'; // exit 3 = the listing failed, 1 = listed and absent
 export const LIST_SCRIPT = 'ls "$HOME/.config/herdr-app/data/drover-inbox"';
-export const FIND_TMP_SCRIPT = 'find "$HOME/.config/herdr-app/data/drover-inbox" -maxdepth 1 -name ".L$0-*.tmp" -mmin +1440 -printf "%f\\n"'; // $0 = our origin
+export const FIND_TMP_SCRIPT = 'find "$HOME/.config/herdr-app/data/drover-inbox" -maxdepth 1 -name ".L$0-*.tmp" -mmin +10 -printf "%f\\n"'; // $0 = our origin
 export const RM_SCRIPT = 'rm -- "$HOME/.config/herdr-app/data/drover-inbox/$0"';
 
 const COLUMNS = ["backlog", "todo", "doing", "review", "blocked", "done"];
@@ -166,21 +167,32 @@ export function createWriter({ run, exec, getShared, setShared, now = Date.now, 
   // ---- one delivery ----
   // Records the nonce in pending BEFORE the exec. Resolves { nonce, sent } | { failed } (step 1 failed: the only proof nothing applied) |
   // { abandoned } (SEND_TIMEOUT_MS passed with hc still running: the flow goes on in the background and patches the entry when it returns).
+  // One payload-free line per failed step (which step, exit code, how long, the first 80 chars of stderr): it names the cause of an orphan next time.
+  // No stderr and no message (external free text): the exit code (a number) or an allowlisted error code of a thrown error.
+  const CAUSES = new Set(["ETIMEDOUT", "ECONNRESET", "ECONNREFUSED", "EPIPE", "ENOENT", "EHOSTUNREACH", "ENETUNREACH", "ABORT_ERR"]);
+  const causeOf = (r, err) => (err !== undefined ? `threw:${CAUSES.has(String(err?.code ?? "").toUpperCase()) ? String(err.code).toUpperCase() : "other"}` : Number.isInteger(r?.code) ? `code:${r.code}` : "none");
+  const failLog = (step, r, since, err) => { try { log(`remote-write ${step} failed: ${causeOf(r, err)} ms=${now() - since}`); } catch {} };
   function deliver(machine, projectId, json, meta) {
     const nonce = newNonce();
     const t0 = now();
     save([...pending(), { nonce, machine, projectId, op: json.op, id: json.id ?? null, at: t0, beat: t0, owner: instance, ttlMs: json.ttlMs, name: null, state: "sending", next: 0, ...meta }]);
     const flow = (async () => {
       let st = null;
-      try { st = await exec("sh", ["-c", STAGE_SCRIPT, "drover-send", JSON.stringify(json), machine, `${INBOX}/.${nonce}.tmp`], { timeout: SEND_TIMEOUT_MS }); } catch { st = null; }
-      if (st?.code !== 0) { // step 1 failed: nothing was renamed, so nothing can be applied. The staging file, if any, is cleaned after 24 h.
+      let err;
+      try { st = await exec("sh", ["-c", STAGE_SCRIPT, "drover-send", JSON.stringify(json), machine, `${INBOX}/.${nonce}.tmp`], { timeout: SEND_TIMEOUT_MS }); } catch (e) { st = null; err = e ?? {}; }
+      if (st?.code !== 0) { // step 1 failed: nothing was renamed, so nothing can be applied. The file may still have landed: remove it now, the sweep gets what this misses.
+        failLog("stage", st, t0, err);
         const e = entryOf(nonce);
         drop(nonce);
+        void removeResult(machine, `.${nonce}.tmp`);
         if (e?.abandoned) finish(nonce, { nonce, machine, projectId, op: e.op, id: e.id, probe: Boolean(e.probe), status: "failed", message: "not sent: nothing was applied" }, e.probe);
         return { nonce, sent: false, failed: true };
       }
       let r = null;
-      try { r = await run(["exec", "--on", machine, "sh", "-c", SEND_SCRIPT, nonce], { timeout: SEND_TIMEOUT_MS }); } catch { r = null; }
+      const t1 = now();
+      let err2;
+      try { r = await run(["exec", "--on", machine, "sh", "-c", SEND_SCRIPT, nonce], { timeout: SEND_TIMEOUT_MS }); } catch (e) { r = null; err2 = e ?? {}; }
+      if (r?.code !== 0) failLog("rename", r, t1, err2);
       const name = r?.code === 0 ? String(r.stdout ?? "").trim() : "";
       if (nameRe(nonce).test(name) && name.endsWith(".json")) { patch(nonce, { name: name.replace(/\.json$/, ""), state: "sent", abandoned: false, inflightUntil: 0 }); return { nonce, sent: true }; }
       patch(nonce, { state: "unsure", abandoned: false, inflightUntil: 0 }); // the reply is missing: the rename may or may not have happened
@@ -295,6 +307,7 @@ export function createWriter({ run, exec, getShared, setShared, now = Date.now, 
     try {
       if (now() - e.at > (e.ttlMs ?? TTL_MS) + (e.probe ? 60000 : 3600000)) {
         drop(e.nonce); finish(e.nonce, gone(e, "unknown", "outcome unknown: check the card on omarchy"), e.probe);
+        void removeResult(e.machine, `.${e.nonce}.tmp`); // a rename that never ran left its staging file
         return true;
       }
       let name = e.name;
@@ -340,6 +353,11 @@ export function createWriter({ run, exec, getShared, setShared, now = Date.now, 
       if (!p.wasWritable) { p.wasWritable = true; if (!p.inflight) { void runProbe(machine, p); continue; } } // writes just turned on: probe now
       if (!p.inflight && (old || retry)) void probe(machine); // its answer comes on a later tick: never awaited here
     }
+    for (const [machine] of probes) { // a staging file left by a failed step: reaped within minutes, not only at a reconnect
+      if (!writable(machine) || now() - (swept.get(machine) ?? 0) < SWEEP_MS) continue;
+      swept.set(machine, now());
+      jobs.push(sweepTmp(machine));
+    }
     await Promise.all(jobs);
   }
 
@@ -356,7 +374,13 @@ export function createWriter({ run, exec, getShared, setShared, now = Date.now, 
       if (!m || keep.has(m[2]) || now() - Number(m[1]) * 1000 <= CLEAN_AFTER_MS) continue;
       await removeResult(machine, n); removed++;
     }
-    // Staging files of a step 1 that never got renamed: only our own origin, only past 24 h (server-side -mmin), never one still pending.
+    return sweepTmp(machine, removed);
+  }
+  const swept = new Map(); // machine -> last sweep start
+  // Staging files that never got renamed: only our own origin, only past 10 min (server-side -mmin), never one still pending.
+  async function sweepTmp(machine, removed = 0) {
+    swept.set(machine, now());
+    const keep = new Set(pending().map((e) => e.nonce));
     const t = await lookRun(["exec", "--on", machine, "sh", "-c", FIND_TMP_SCRIPT, origin]);
     if (t?.code === 0) {
       const tmp = new RegExp(`^\\.L${origin}-([A-Za-z0-9]{12})\\.tmp$`);
