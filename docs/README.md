@@ -36,6 +36,7 @@ Each mod has a page: what it does, how to open it, its settings, the data it tou
 
 - [Jira setup](guides/jira-setup.md): create the private credential file for `drover-jira`.
 - [Agent identity](guides/agent-identity.md): let an agent act as its own GitHub account.
+- [Share a herd](guides/share-a-herd.md): export agents and squads, import them on another machine.
 - [Permanent Drover on a Linux box](guides/omarchy-permanent.md): run Drover as a service (the scripts are in `deploy/omarchy/`).
 
 ## Recipes

@@ -29,6 +29,31 @@ The souls live in `mods/drover-agents/souls/`; `_herd.md` holds the rules shared
 
 Edit or add agents and squads in the Squads screen. Profiles are versioned on save. Agent environment variables are masked: their values go to a private file, never into shared state.
 
+## Share a herd and move it to a new machine
+
+Squads → **Export…** and **Import…**, or `drover agents export` and `drover agents import`. A short walk-through: [Share a herd](guides/share-a-herd.md).
+
+**What is exported** (one file, `drover-herdr-agents-<date>.json`): for each agent its `id`, `name`, `soul` (a name), `command` (harness, model and effort) and `instructions`; for each squad its leader and members with roles. A squad brings its agents.
+
+**What is never exported:**
+
+- Environment values and names. The file only says how many variables an agent needs; re-add them on the new machine.
+- Soul text. See the limit below.
+- Run history, tasks, projects, wakeups, notes.
+- Your home folder, where it can be rewritten: a standalone path in a command is written as `~`. Other home paths (for example inside `--config=/home/you/x.json`, or in instructions) can stay in the file with a warning. Read the JSON before you share it.
+
+**Secrets block the export.** The scan looks at `command`, `instructions`, `name` and roles for token, key and private-key shapes (plus `--api-key`/`--token` flags, `AKIA…` and long `Bearer` values). A hit shows the agent, field and rule, never the value, and no file is made: edit the agent and export again. The scan is best effort, so read the text before you share it. Import runs the same scan on a friend's file and blocks only the rows that hit.
+
+**Soul limitation.** A soul travels as a name plus a hash, not its text. The soul files are the ones installed with the mod on each machine (`mods/drover-agents/souls/`). On import, a soul name you do not have becomes "no soul" (only the instructions apply, and you must tick the warning). A soul with the same name but different text keeps your file and shows a warning. So an export means same agents, same commands, same instructions, not the same soul text.
+
+**Import merges, it never replaces.** The preview lists `add`, `skip` (identical), `copy` (new id `<id>-2`) or `overwrite` per row, and nothing is written until Apply. A clash defaults to keep yours. An overwrite of an agent that has an environment needs a tick, and an id that already has an orphan environment file blocks the row. Added and copied agents start with no environment. An overwrite keeps the agent's existing environment, so the imported command and instructions run with it. The preview shows every command in full: an imported agent runs it on your machine, so read it first.
+
+**CLI.** `drover agents import <file>` is a dry run that prints the plan and a token. `--confirm <token>` applies it, only if the file and your herd are unchanged. The CLI adds, skips and keeps yours; copy and overwrite are in the Squads screen. It needs Drover mods with protocol 4.
+
+**`queued` is not restored.** When no Tasks, Board or Wakeups mod is open (a headless machine), an import answers `queued:` and applies later, when a mod opens, and not at all after 1 hour or if the herd changed. Check `drover squads` before you call it done.
+
+**A headless machine** (for example a Linux box over `hc`): see [Headless machine over hc](guides/share-a-herd.md#headless-machine-over-hc). The permanent omarchy box is not on protocol 4 yet, so that recipe is not verified there.
+
 ## The `drover` command-line tool
 
 `~/.config/herdr-app/mods/drover-tasks/bin/drover` (no arguments prints help):
@@ -42,6 +67,7 @@ Edit or add agents and squads in the Squads screen. Profiles are versioned on sa
 | `note <T-…> [--kind decision\|log\|blocker\|pr\|handoff] "<text>"`, `edit`, `link`, `archive`, `task-project` | Notes and edits |
 | `project add "<name>" --repo <abs path> [--branch <b>] [--folder <abs path>]…` | Create a project (for a headless Drover); same request again answers `exists` |
 | `start <T-…\|-> <squad\|agent> [--worktree]` | Open a squad on a task; its leader reports to `$HC_TERMINAL_ID` |
+| `agents export [--out <file>] [--agent <id>]… [--squad <id>]…`, `agents import <file> [--confirm <token>]` | Export or import the herd (import is a dry run until `--confirm`; protocol 4) |
 | `wake <t\|T-…> <when> "<msg>"`, `wake … every <30m\|2h\|1d> "<msg>"`, `wakes`, `wake off\|on\|rm <W-…>` | Wakeups |
 
 Reads come from `shared.json`. Writes go to `<home>/data/drover-inbox`; an open Tasks, Board or Wakeups mod applies them (otherwise: `queued`).
