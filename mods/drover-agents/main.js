@@ -2,15 +2,16 @@
 // Dialog modes: props.pick (▶ on a task), props.agent / props.squad (editors).
 import { View, div } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, TextareaState, Textarea, Popover } from "gpui-base";
-import { props, closeOverlay, openOverlay, theme, shared, setShared, notify, exec, appHome, hc, focused } from "herdr";
+import { props, closeOverlay, openOverlay, theme, shared, setShared, notify, exec, appHome, home, hc, focused } from "herdr";
 import { AGENTS_KEY, START_IN_KEY, saveAgent, saveSquad, removeFrom, addDefaults, defaultDrover, droverLabel, envProblem } from "./runs.js";
 import { bind, isEnabled, whenLoaded, ready as cfgReady } from "./config.js";
 import { gated } from "./ui.js";
-import { load, loadConfig, loadRuns, loadProjects, launch, startFromSquads, droverList, startDefaults, observeEnded, readEnvNames, writeAgentEnv, deleteAgentEnv, envCounts, modSettings } from "./io.js";
+import { toChoices as toChoicesOf, allTicked, toggle, lockedAgents, exportView, previewImport, applyImport, settleFacts, soulNames, labelOf } from "./herd-share.js";
+import { localSoulHashes, envIdsFor, saveExport, readImportFile, exportsDir, load, loadConfig, loadRuns, loadProjects, launch, startFromSquads, droverList, startDefaults, observeEnded, readEnvNames, writeAgentEnv, deleteAgentEnv, envCounts, modSettings } from "./io.js";
 
 const LAST = "drover.agents.last";
 const close = () => closeOverlay(props().overlay);
-const dialog = (p) => openOverlay({ mod: "drover-agents", kind: "dialog", width: 520, props: p });
+const dialog = (p, wide) => openOverlay({ mod: "drover-agents", kind: "dialog", width: wide ? 680 : 520, ...(wide ? { height: 0.8 } : {}), props: p });
 
 function commit(result, cx, self) {
   if (result.error) { self.error = result.error; return cx.notify(); }
@@ -187,6 +188,184 @@ class SquadEditor {
   }
 }
 
+// Text with its line breaks, in a box that scrolls. Long text is capped at LINES for the screen only.
+const CHUNK = 2000;
+// Draws CHUNK lines at a time; "Show more" adds the next CHUNK, so every line can be read. shown: lines drawn now; more: click handler.
+const textBox = (t, id, text, max, shown, more) => {
+  const lines = String(text).split("\n"), n = shown ?? CHUNK;
+  return v_flex().id(id).max_h(max).min_h(0).overflow_y_scrollbar().p(8).rounded(6).border_1().border_color(t.input).bg(t.background).text_size(11.5).text_color(t.foreground)
+    .children(lines.slice(0, n).map((l) => div().child(l === "" ? " " : l)))
+    .children(lines.length > n ? [div().id(`${id}-more`).py(4).cursor_pointer().text_color(t.accent).on_click(more).child(`Show ${Math.min(CHUNK, lines.length - n)} more lines (${lines.length - n} not shown yet)`)] : []);
+};
+const tick = (u, id, on, text, action, locked) => u.chip(id, `${on ? "☑" : "☐"} ${text}${locked ? " (in a squad)" : ""}`, on, locked ? () => {} : action);
+const btn = (t, u, id, text, primary, enabled, action) => enabled ? u.button(id, text, primary, action) : u.button(id, text, false, () => {}).text_color(t.dim).border_color(t.border);
+
+// Export: pick agents and squads, see the scan and the full text, then copy it or save it under the exports folder. Nothing leaves the machine.
+class ExportDialog {
+  constructor() {
+    this.cfg = loadConfig();
+    this.sel = allTicked(this.cfg);
+    this.souls = null;
+    this.now = Date.now();
+    this.status = null;
+    this.busy = false;
+    this.shown = {};
+  }
+  async load() { this.souls = await localSoulHashes(soulNames(this.cfg, "")); }
+  view() { return this.souls ? exportView(this.cfg, this.sel, { souls: this.souls, now: this.now, app: "", home: home() }) : null; }
+  copy(cx) {
+    const v = this.view();
+    if (!v?.ok) return;
+    cx.write_to_clipboard(v.file);
+    this.status = { text: "Copied to the clipboard" };
+    notify({ title: "Copied the export", body: "", level: "info" });
+    cx.notify();
+  }
+  save(cx) {
+    const v = this.view();
+    if (!v?.ok || this.busy) return;
+    this.busy = true; this.status = null; cx.notify();
+    cx.spawn(async (cx) => {
+      let r;
+      try { r = await saveExport(this.now, v.file); } catch { r = { error: "Could not save the export" }; }
+      this.busy = false;
+      this.status = r.error ? { error: r.error } : { text: `Saved ${r.path}` };
+      cx.notify();
+    });
+  }
+  render(cx) {
+    const t = theme(), u = ui(t), cfg = this.cfg, v = this.view();
+    const locked = lockedAgents(cfg, this.sel);
+    const pick = (kind, id) => (_e, cx) => { this.sel = toggle(cfg, this.sel, kind, id); this.status = null; cx.notify(); };
+    return u.frame("Export agents and squads",
+      v_flex().id("export-body").flex_1().min_h(0).overflow_y_scrollbar().gap(2)
+        .child(u.label("Agents"))
+        .child(h_flex().gap(6).flex_wrap().children(cfg.agents.map((a) => { const on = this.sel.agents.has(a.id) || locked.has(a.id); return tick(u, `xa-${a.id}`, on, labelOf(a.name), pick("agent", a.id), locked.has(a.id)); })))
+        .child(u.label("Squads (a squad takes its agents with it)"))
+        .child(h_flex().gap(6).flex_wrap().children(cfg.squads.map((s) => tick(u, `xs-${s.id}`, this.sel.squads.has(s.id), labelOf(s.name), pick("squad", s.id)))))
+        .child(u.label("Scan"))
+        .child(!v ? div().text_size(12).text_color(t.dim).child("Checking the souls…")
+          : v.ok ? div().text_size(12).text_color(t.muted).child(v.message)
+          : v_flex().gap(2).child(div().text_size(12).text_color(t.blocked).child(v.message))
+            .children(v.blocked.map((b) => div().text_size(12).text_color(t.blocked).child(`• ${b}`))))
+        .children(v?.warnings?.length ? [v_flex().pt(4).gap(1).children(v.warnings.map((w) => div().text_size(11.5).text_color(t.dim).child(`⚠ ${w}`)))] : [])
+        .child(div().pt(8).text_size(11.5).text_color(t.dim).child("Review before sharing: the file holds every command and instruction below, in plain text. Environment variables and their names are never exported."))
+        .children(v?.ok ? [u.label("What will be copied or saved"), textBox(t, "export-text", v.file, 260, this.shown["export-text"], (_e, cx) => { this.shown["export-text"] = (this.shown["export-text"] ?? CHUNK) + CHUNK; cx.notify(); })] : [])
+        .child(this.status ? div().pt(8).text_size(12).text_color(this.status.error ? t.blocked : t.muted).child(this.status.error ?? this.status.text) : div())
+        .child(div().pt(6).text_size(11).text_color(t.dim).child(`Saved files go to ${exportsDir()}`)),
+      h_flex().flex_none().pt(14).gap(8).items_center()
+        .child(div().flex_1())
+        .child(u.button("close", "Close", false, close))
+        .child(btn(t, u, "copy", "Copy JSON", false, Boolean(v?.ok), (_e, cx) => this.copy(cx)))
+        .child(btn(t, u, "save", this.busy ? "Saving…" : "Save to exports folder", true, Boolean(v?.ok) && !this.busy, (_e, cx) => this.save(cx)))).h_full();
+  }
+}
+
+// Import: paste the text or give a path, preview what would change, choose per row, then apply. Nothing is written before Apply, and
+// Apply is bound to the plan that was shown (the pure core compares digests and refuses a stale one: the dialog previews again).
+class ImportDialog {
+  constructor() {
+    this.text = TextareaState.new({ placeholder: "Paste an exported JSON here", value: "", rows: 5 });
+    this.path = InputState.new({ placeholder: "or a path to a file on this machine: an absolute path or ~/…" });
+    this.ui = {};       // the person's picks per row
+    this.shown = {};    // lines drawn per text box
+    this.fileText = null;
+    this.ctx = null;
+    this.view = null;
+    this.error = null;
+    this.result = null;
+    this.busy = false;
+    this.text.focus();
+  }
+  // The facts the core needs. Read again for every preview and every apply.
+  async facts(text, choices) {
+    const cfg = loadConfig();
+    return settleFacts(cfg, text, { localSouls: await localSoulHashes(soulNames(cfg, text)), supported: 1, home: home() }, choices, envIdsFor);
+  }
+  refresh() { this.view = this.fileText == null ? null : previewImport(loadConfig(), this.fileText, this.ctx, this.ui); }
+  preview(cx, keepPicks = false, note = null) {
+    if (this.busy) return;
+    this.busy = true; this.error = note; this.result = null; cx.notify();
+    cx.spawn(async (cx) => {
+      try {
+        const path = this.path.value().trim();
+        let text = this.text.value();
+        if (path) { const r = await readImportFile(path); if (r.error) { this.error = r.error; this.view = null; return; } text = r.text; }
+        if (!text.trim()) { this.error = "Paste a file or give a path first"; this.view = null; return; }
+        this.fileText = text;
+        if (!keepPicks) { this.ui = {}; this.shown = {}; }
+        this.ctx = await this.facts(text, toChoicesOf(this.ui));
+        this.refresh();
+      } catch { this.error = "Could not read the facts needed for the preview"; this.view = null; }
+      finally { this.busy = false; cx.notify(); }
+    });
+  }
+  // A pick can change which ids the plan allocates (a copy), so the facts are settled again before the view is redrawn.
+  setPick(key, patch, cx) {
+    if (this.busy) return; // the plan Apply confirmed must not change under it
+    this.ui[key] = { ...(this.ui[key] ?? {}), ...patch };
+    this.busy = true; cx.notify();
+    cx.spawn(async (cx) => {
+      try { this.ctx = await this.facts(this.fileText, toChoicesOf(this.ui)); this.refresh(); }
+      catch { this.error = "Could not read the facts needed for the preview"; this.view = null; }
+      finally { this.busy = false; cx.notify(); }
+    });
+  }
+  apply(cx) {
+    if (this.busy || !this.view?.canApply) return;
+    const confirmed = this.view.plan, text = this.fileText; // what the click confirmed: the rest of the apply uses only these
+    this.busy = true; this.error = null; cx.notify();
+    cx.spawn(async (cx) => {
+      let again = false;
+      try {
+        this.ctx = await this.facts(text, confirmed.choices);
+        // Read the config after the last await: the apply itself is synchronous, so nothing can slip in between.
+        const r = applyImport(loadConfig(), confirmed, this.ctx);
+        if (r.config) { setShared(AGENTS_KEY, r.config); this.result = r.message; this.view = null; this.fileText = null; }
+        else { this.error = r.message; again = true; }
+      } catch { this.error = "The import failed; nothing was changed"; }
+      finally { this.busy = false; }
+      if (again) this.preview(cx, true, this.error); else cx.notify();
+    });
+  }
+  more(id) { return [this.shown[id], (_e, cx) => { this.shown[id] = (this.shown[id] ?? CHUNK) + CHUNK; cx.notify(); }]; }
+  rowView(t, u, r) {
+    const color = r.action === "blocked" ? t.blocked : r.action === "skip" || r.action === "keep" ? t.dim : t.foreground;
+    const what = r.kind === "squad" ? `squad ${r.id || "?"}` : `agent ${r.id || "?"}`;
+    const head = h_flex().gap(8).items_center().flex_wrap()
+      .child(div().flex_none().text_size(11.5).font_semibold().text_color(color).child(r.action === "blocked" ? "BLOCKED" : r.action.toUpperCase()))
+      .child(div().flex_1().min_w(0).truncate().text_size(12.5).child(`${what}${r.name ? ` · ${r.name}` : ""}${r.newId ? ` → ${r.newId}` : ""}`));
+    const picks = r.options.length ? h_flex().gap(6).flex_wrap().children(r.options.map((o) => u.chip(`${r.key}-${o.action}`, o.label, r.action === o.action, (_e, cx) => this.setPick(r.key, { action: o.action }, cx)))) : div();
+    const detail = r.action === "blocked" ? [] : r.kind === "agent"
+      ? [div().text_size(11).text_color(t.dim).child("Command"), textBox(t, `${r.key}-cmd`, r.command, 80, ...this.more(`${r.key}-cmd`)),
+        ...(r.soul ? [div().text_size(11).text_color(t.dim).child(`Soul: ${r.soul}`)] : []),
+        div().text_size(11).text_color(t.dim).child("Instructions"), textBox(t, `${r.key}-ins`, r.instructions || "(none)", 140, ...this.more(`${r.key}-ins`))]
+      : [div().text_size(11.5).text_color(t.muted).child(`Leader ${r.leader} · members ${r.members.map((m) => `${m.agent}${m.role ? ` (${m.role})` : ""}`).join(", ") || "none"}`)];
+    return v_flex().id(`row-${r.key}`).gap(5).p(10).rounded(8).border_1().border_color(r.action === "blocked" ? t.blocked : t.border)
+      .child(head).child(picks)
+      .children(r.blocked.map((b) => div().text_size(12).text_color(t.blocked).child(`✕ ${b}`)))
+      .children(r.warnings.map((w) => div().text_size(11.5).text_color(t.dim).child(`⚠ ${w}`)))
+      .children(r.acks.map((a) => u.chip(`${r.key}-ack-${a.kind}`, `${a.ticked ? "☑" : "☐"} ${a.text}`, a.ticked, (_e, cx) => this.setPick(r.key, { [a.kind === "env" ? "ackEnv" : "ackSoul"]: !a.ticked }, cx))))
+      .children(detail);
+  }
+  render(cx) {
+    const t = theme(), u = ui(t), v = this.view;
+    const body = v_flex().id("import-body").flex_1().min_h(0).overflow_y_scrollbar().gap(6)
+      .child(div().text_size(11.5).text_color(t.dim).child("An imported agent runs its command on this machine. Read every command below before you apply. Nothing is written until Apply."))
+      .child(u.label("Paste")).child(u.field(Textarea.new(this.text)).py(6))
+      .child(u.label("Or a file path")).child(u.field(Input.new(this.path).h(34)))
+      .child(h_flex().pt(8).child(u.button("preview", this.busy && !v ? "Reading…" : "Preview", false, (_e, cx) => this.preview(cx))))
+      .child(this.error ? div().pt(6).text_size(12).text_color(t.blocked).child(this.error) : div())
+      .child(this.result ? div().pt(8).text_size(12.5).text_color(t.foreground).child(this.result) : div())
+      .children(v && !v.ok ? v.errors.map((e) => div().pt(6).text_size(12).text_color(t.blocked).child(e)) : [])
+      .children(v?.ok ? [u.label(`Preview · ${v.rows.length} row${v.rows.length === 1 ? "" : "s"}`), v_flex().gap(8).children(v.rows.map((r) => this.rowView(t, u, r)))] : []);
+    return u.frame("Import agents and squads", body,
+      h_flex().flex_none().pt(14).gap(8).items_center()
+        .child(div().flex_1()).child(u.button("close", "Close", false, close))
+        .child(btn(t, u, "apply", this.busy && v ? "Applying…" : "Apply", true, Boolean(v?.canApply) && !this.busy, (_e, cx) => this.apply(cx)))).h_full();
+  }
+}
+
 // Start dialog. Each choice resolves: what the person clicked, else what was used last (drover.agents.last), else the configured
 // default (drover-config), else today's built-in. Read on each render, so the mod.json layer applies when it finishes loading and a
 // click is never overwritten by it.
@@ -267,7 +446,7 @@ export default class Agents extends View {
   init(_props, cx) {
     bind({ shared, modSettings });
     const p = props() ?? {};
-    this.dialog = p.pick ? new Picker() : p.agent !== undefined ? new AgentEditor() : p.squad !== undefined ? new SquadEditor() : null;
+    this.dialog = p.pick ? new Picker() : p.agent !== undefined ? new AgentEditor() : p.squad !== undefined ? new SquadEditor() : p.export ? new ExportDialog() : p.import ? new ImportDialog() : null;
     if (this.dialog?.load) cx.spawn(async (cx) => { await this.dialog.load(); cx.notify(); });
     // The pickers and editors are dialogs other screens open: they are not the Squads screen and are never switched off.
     if (this.dialog) cx.timer?.every?.(30000, () => { observeEnded(); });
@@ -338,6 +517,11 @@ export default class Agents extends View {
       .child(section("Agents", u.button("add-agent", "+ Agent", false, () => dialog({ agent: null })),
         cfg.agents.map((a) => row(`a-${a.id}`, a.name, (a.soul ? `soul ${a.soul} · ` : "") + a.command + (a.instructions ? " · instructions" : "") + (envs[a.id] ? ` · ${envs[a.id]} env` : ""), a.version, () => dialog({ agent: a.id }), startNow("agent", a.id)))))
       .child(section("Squads", u.button("add-squad", "+ Squad", false, () => dialog({ squad: null })),
-        cfg.squads.map((s) => row(`s-${s.id}`, s.name, names(s), s.version, () => dialog({ squad: s.id }), startNow("squad", s.id)))));
+        cfg.squads.map((s) => row(`s-${s.id}`, s.name, names(s), s.version, () => dialog({ squad: s.id }), startNow("squad", s.id)))))
+      .child(section("Share", div(), [
+        div().px(10).text_size(11.5).text_color(t.dim).child("Move your agents and squads to another machine or a friend. Environment variables are never exported."),
+        h_flex().px(10).pt(4).gap(8)
+          .child(u.button("export", "Export…", false, () => dialog({ export: true }, true)))
+          .child(u.button("import", "Import…", false, () => dialog({ import: true }, true)))]));
   }
 }

@@ -11,6 +11,8 @@ import { apply as applyKey } from "./keys.js";
 import * as HE from "./herd-export.js";
 import { resolveWorkFolder, moveOffers, parseMove } from "./workfolder.js";
 import { bind as bindCfg, load as loadCfg, ready as cfgReady, cfg } from "./config.js";
+import { soulHash } from "./herd-export.js";
+import { exportName } from "./herd-share.js";
 import { AGENTS_KEY, RUNS_KEY, config, plan, argv, leaderPrompt, createCardsPrompt, memberPrompt, worktreeOf, terminalName, startGuard, projectOfDrover, isLiveDrover, activeFor, reconcile, runFolder, markEnded, orphanedWorkers, terminalRecord, liveStatuses, launchArgv, parseAgentEnv, envProblem, BIND_KEY, droverChoices, defaultDrover, maxRuns, keptRuns, pruneRuns } from "./runs.js";
 
 export const load = () => list(shared(KEY));
@@ -533,6 +535,58 @@ export async function envCounts(ids) {
   return out;
 }
 
+// ---- Share (Export / Import dialogs). The facts the pure core needs, read here: it has no fs.
+// Local soul hashes: sha-256 of souls/<name>.md + souls/_herd.md as installed. A soul file that is absent or unreadable is left out
+// (the core then treats the name as "not here"). Without _herd.md nothing can be hashed.
+export async function localSoulHashes(names) {
+  const out = {};
+  let herd;
+  try { herd = await readTextFile(`${SOULS()}/_herd.md`); } catch (e) { logFailure("soul read", e); return out; }
+  if (herd == null) return out;
+  for (const n of names) {
+    if (!/^[a-z0-9-]{1,64}$/.test(String(n))) continue;
+    try { const t = await readTextFile(`${SOULS()}/${n}.md`); if (t != null) out[n] = soulHash(t, herd); } catch (e) { logFailure("soul read", e); }
+  }
+  return out;
+}
+
+// The agent ids (of the given list) that have an env file: a Set, or { error } when any read fails (never treated as absent).
+// Only existence is looked at: the content is dropped at once.
+export async function envIdsFor(ids) {
+  const found = new Set();
+  const list = [...new Set(ids)].filter(validId);
+  try {
+    for (let i = 0; i < list.length; i += 25) {
+      const chunk = list.slice(i, i + 25);
+      const got = await Promise.all(chunk.map(async (id) => (await readTextFile(envPath(id))) != null));
+      chunk.forEach((id, n) => { if (got[n]) found.add(id); });
+    }
+  } catch (e) { logFailure("env check", e); return { error: reasonCode(e) }; }
+  return found;
+}
+
+// Exports go to one fixed folder (the runtime has no save dialog). Made 0700 by drover-workfolder, below the config root.
+export const exportsDir = () => `${WORKFOLDER_ROOT()}/exports`;
+export async function readImportFile(path) {
+  const p = String(path ?? "").trim();
+  if (!p) return { error: "Type the path of a file" };
+  if (!p.startsWith("/") && !p.startsWith("~/")) return { error: "Use an absolute path (or one that starts with ~/)" };
+  try {
+    const text = await readTextFile(p.startsWith("~/") ? `${home()}${p.slice(1)}` : p);
+    return text == null ? { error: "No such file" } : { text };
+  } catch (e) { logFailure("import read", e); return { error: `Cannot read the file (${reasonCode(e)})` }; }
+}
+// { path } or { error }. A same-day export is replaced (writeTextFile checks it still holds what was read).
+export async function saveExport(now, text) {
+  const dir = exportsDir(), path = `${dir}/${exportName(now)}`;
+  try { await ensureWorkFolder({ mode: "global", path: dir }); } catch (e) { return { error: String(e?.message ?? e).slice(0, 200) }; }
+  try {
+    const before = await readTextFile(path);
+    await writeTextFile(path, text, before);
+  } catch (e) { logFailure("export write", e); return { error: `Could not save the export (${reasonCode(e)})` }; }
+  return { path };
+}
+
 // Inbox op project-add. Every Git check awaits, so the store is read only after the last await and the name/equality recheck plus the write
 // happen in one synchronous block: a project the Projects dialog or another request saved meanwhile is never overwritten or duplicated.
 const gitOut = (cwd, args) => exec("git", ["-C", cwd, ...args], { timeout: 10000 }).catch(() => ({ code: 1, stdout: "", stderr: "" }));
@@ -613,7 +667,7 @@ async function importFacts(ids) {
   const envIds = new Set();
   try { for (const id of ids) if (await hasAgentEnv(id)) envIds.add(id); }
   catch (e) { return { error: `Cannot check the agent environment files (${reasonCode(e)})` }; }
-  return { ctx: { localSouls: s.localSouls, envIds, supported: HE.VERSION } };
+  return { ctx: { localSouls: s.localSouls, envIds, supported: HE.VERSION, home: home() } };
 }
 
 // Every id the core may ask about: the ones in this config and the valid ids of the file (when it parses).
@@ -723,7 +777,7 @@ function agentsExport(cmd, facts) {
   const agents = list(cmd.agents), squads = list(cmd.squads);
   if (agents === null || squads === null) return "error: agents and squads must be lists of ids";
   if (facts.error) return `error: ${facts.error}`;
-  const opts = { souls: facts.localSouls, app: "", now: Date.now() };
+  const opts = { souls: facts.localSouls, app: "", now: Date.now(), home: home() };
   if (agents !== undefined) opts.agents = agents;
   if (squads !== undefined) opts.squads = squads;
   const sum = HE.exportSummary(HE.exportHerd(loadConfig(), opts));

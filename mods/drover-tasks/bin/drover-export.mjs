@@ -3,6 +3,7 @@
 // Usage: node drover-export.mjs --home <dir> [--agent <id>]... [--squad <id>]...
 // Output (stdout): "ok: exported …" header lines, "---", then the file; or a line starting "error:" and exit 1.
 import { readFileSync, readdirSync } from "node:fs";
+import { homedir } from "node:os";
 
 const fail = (msg, code = 1) => { process.stdout.write(`${msg}\n`); process.exit(code); };
 const args = process.argv.slice(2);
@@ -34,7 +35,8 @@ try {
   }
 } catch { fail("error: cannot read the soul files"); }
 
-const opts = { souls, app: "", now: Date.now() };
+// home (the --home above is the app data folder) is the real user home: it becomes ~ in the export, like the Squads dialog and the mods.
+const opts = { souls, app: "", now: Date.now(), home: homedir() };
 if (agents.length) opts.agents = agents;
 if (squads.length) opts.squads = squads;
 const sum = HE.exportSummary(HE.exportHerd(cfg, opts));

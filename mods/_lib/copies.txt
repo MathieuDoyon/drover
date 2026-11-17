@@ -19,3 +19,4 @@ tokenfilter.js
 tokenmenu.js
 filterui.js
 herd-export.js
+herd-share.js

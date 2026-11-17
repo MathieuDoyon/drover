@@ -343,3 +343,27 @@ test("20000 expired receipts do not disable confirms: they are pruned before the
   const d2 = await dry(file([fa("more")]));
   assert.match(await confirm(file([fa("more")]), tokenOf(d2)), /^error: too many/, "live receipts still cap");
 });
+
+// ---- job 6: the exporter's home becomes ~ on every export path; the import path knows the receiver's home
+
+test("agents-export: the host home becomes ~ in command and instructions, and the local-path warning is in the header", async () => {
+  cfg().agents[0].command = `${SONNET} --add-dir ${host.home}/notes`;
+  cfg().agents[0].instructions = `read ${host.home}/docs/a.md`;
+  const r = await send({ op: "agents-export" });
+  assert.match(r, /^ok: exported 2 agents/, r);
+  const d = body(r);
+  assert.equal(d.agents[0].command, `${SONNET} --add-dir ~/notes`);
+  assert.equal(d.agents[0].instructions, "read ~/docs/a.md");
+  assert.ok(!r.slice(0, r.indexOf("\n---\n")).includes(host.home), "the header names no home");
+  assert.match(r, /^warning: wrangler · command · local-path$/m);
+  assert.match(r, /^warning: wrangler · instructions · local-path$/m);
+});
+
+test("agents-import through the inbox: a ~/ command is stored with this machine's home", async () => {
+  const f = file([fa("fresh", { command: "~/bin/claude --add-dir ~/n" })]);
+  const d = await dry(f);
+  assert.match(d, /^ok: dry run/, d);
+  const r = await confirm(f, tokenOf(d));
+  assert.match(r, /^ok: applied/, r);
+  assert.equal(cfg().agents.find((a) => a.id === "fresh").command, `${host.home}/bin/claude --add-dir ${host.home}/n`);
+});

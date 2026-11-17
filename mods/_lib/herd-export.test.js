@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { sha256, stableJson, scanSecrets, homePath, scanItems, exportHerd, plan, apply, FORMAT, MAX_BYTES } from "./herd-export.js";
+import { sha256, stableJson, scanSecrets, homePath, scanItems, localPath, exportHerd, exportSummary, shown, plan, apply, FORMAT, MAX_BYTES } from "./herd-export.js";
 
 // Secret-shaped fixtures are built from parts so this file never trips the public-sync leak scan.
 const GHP = "gh" + "p_" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8";
@@ -757,4 +757,182 @@ test("env replay: each set replaces the names, clear empties them", () => {
   c.agents[0].envLog = ["2026-11-16T10:00:00.000Z set A, B", "2026-11-16T11:00:00.000Z set A"];
   const p = plan(c, file([fa("scout", DIFF)]), ctxOf({ envIds: new Set(["scout"]) }), ch({ action: "overwrite" }));
   assert.deepEqual(row(p, "agent:scout").envNames, ["A"]);
+});
+
+// ---- job 4: the exporter's home becomes ~, and local file paths are warned about
+
+const ME = "/Us" + "ers/me", MEOW = "/Us" + "ers/meow";
+const withText = (command, instructions) => ({ agents: [agent("a", { command, instructions })], squads: [] });
+
+test("exportHerd home: the exporter's home prefix becomes ~ at a path boundary, in command and instructions", () => {
+  const r = exportHerd(withText(`claude --add-dir ${ME}/x`, `see ${ME}/a, ${MEOW}/b and ${ME} and ${ME}.bak and x${ME}/z`), expOpts({ home: ME }));
+  const a = JSON.parse(r.file).agents[0];
+  assert.equal(a.command, "claude --add-dir ~/x");
+  assert.equal(a.instructions, `see ~/a, ${MEOW}/b and ~ and ${ME}.bak and x${ME}/z`);
+  assert.ok(!r.file.includes(`${ME}/x`));
+});
+
+test("exportHerd home: a trailing slash on home works; no home leaves the text alone", () => {
+  assert.equal(JSON.parse(exportHerd(withText(`claude ${ME}/x`, ""), expOpts({ home: `${ME}/` })).file).agents[0].command, "claude ~/x");
+  assert.equal(JSON.parse(exportHerd(withText(`claude ${ME}/x`, ""), expOpts()).file).agents[0].command, `claude ${ME}/x`);
+  assert.equal(JSON.parse(exportHerd(withText(`claude ${ME}/x`, ""), expOpts({ home: "relative" })).file).agents[0].command, `claude ${ME}/x`);
+});
+
+test("exportHerd home: a replaced path no longer warns as a home path; another user's path still does", () => {
+  const only = exportHerd(withText("claude", `${ME}/a`), expOpts({ home: ME }));
+  assert.ok(!only.warnings.some((w) => w.rule === "home-path"));
+  const other = exportHerd(withText("claude", `${MEOW}/a`), expOpts({ home: ME }));
+  assert.ok(other.warnings.some((w) => w.rule === "home-path" && w.field === "instructions"));
+});
+
+test("exportHerd home: the secret scan still sees the text, and a hit still blocks", () => {
+  const r = exportHerd(withText("claude", `${ME}/a ${GHP}`), expOpts({ home: ME }));
+  assert.equal(r.file, undefined);
+  assert.deepEqual(r.blocked.map((b) => b.rule), ["github-token"]);
+});
+
+test("localPath: absolute and ~/ paths yes; slash commands, urls, and/or, dates and relative paths no", () => {
+  for (const t of ["--add-dir ~/notes", "read /tmp/foo/bar.md", "(see /etc/hosts/x)", `cd ${ME}/x`]) assert.equal(localPath(t), true, t);
+  for (const t of ["/loop 5m", "https://example.com/a/b", "and/or", "w/o it", "2026/11/16", "src/lib/x.js", "a ~ b", "", undefined]) assert.equal(localPath(t), false, String(t));
+});
+
+test("exportHerd: a local file path in command or instructions is a warning per field", () => {
+  const r = exportHerd(withText("claude --add-dir ~/notes", "read /tmp/foo/bar.md"), expOpts({ home: ME }));
+  assert.ok(r.file);
+  assert.deepEqual(r.warnings.filter((w) => w.rule === "local-path").map((w) => [w.id, w.field]), [["a", "command"], ["a", "instructions"]]);
+  assert.equal(exportHerd(withText("claude", "plain text"), expOpts()).warnings.length, 0);
+});
+
+test("plan: a friend's file naming a local path gets a local-path warning on that row", () => {
+  const p = plan(cfg0(), file([fa("fresh", { command: "claude --add-dir ~/x", instructions: "open /var/data/f.txt" }), fa("clean")]), ctxOf(), {});
+  const w = (k) => row(p, k).warnings.filter((x) => x.code === "local-path").map((x) => x.field);
+  assert.deepEqual(w("agent:fresh"), ["command", "instructions"]);
+  assert.deepEqual(w("agent:clean"), []);
+  assert.equal(row(p, "agent:fresh").action, "add", "a warning never blocks");
+});
+
+// ---- diagnostics never print a secret-shaped id or name
+
+const TOK = "gh" + "p_" + "K".repeat(30);
+const HIDDEN = "(hidden: looks like a secret)";
+const clean = (v) => assert.ok(!JSON.stringify(v).includes(TOK), "secret-shaped text in a diagnostic");
+
+test("shown: hides secret-shaped text, keeps the rest", () => {
+  assert.equal(shown(TOK), HIDDEN);
+  assert.equal(shown("scout"), "scout");
+  assert.equal(shown(undefined), "");
+});
+
+test("exportSummary: a blocked line and a warning line never print a secret-shaped id", () => {
+  const blocked = exportSummary(exportHerd({ agents: [agent(TOK)], squads: [] }, expOpts()));
+  clean(blocked);
+  assert.match(blocked.error, new RegExp(`${HIDDEN.replace(/[()]/g, "\\$&")} · id · github-token`));
+  const ok = exportSummary({ agents: 1, squads: 0, file: "{}", warnings: [{ id: TOK, field: "command", rule: "home-path" }] });
+  clean(ok);
+});
+
+test("exportHerd errors: a missing agent or squad id and a squad's name are redacted", () => {
+  clean(exportHerd(exportCfg(), expOpts({ agents: [TOK] })));
+  clean(exportHerd(exportCfg(), expOpts({ squads: [TOK] })));
+  const c = exportCfg();
+  c.squads[0] = { ...c.squads[0], name: TOK, members: [{ agent: "ghost", role: "" }] };
+  const r = exportHerd(c, expOpts({ squads: ["drive"] }));
+  assert.ok(r.error);
+  clean(r);
+});
+
+test("plan: file errors and the name-clash warning redact secret-shaped ids", () => {
+  clean(plan(cfg0(), file([fa(TOK), fa(TOK)]), ctxOf(), {}));
+  const c = cfg0();
+  c.agents.push(agent(TOK, { name: "FRESH" }));
+  const p = plan(c, file([fa("fresh")]), ctxOf(), {});
+  assert.equal(row(p, "agent:fresh").action, "add");
+  assert.ok(p.warnings.some((w) => w.code === "name-clash"));
+  clean(p.warnings);
+  clean(p.rows);
+});
+
+test("apply: errors redact a secret-shaped id", () => {
+  const c = cfg0();
+  c.agents.push(agent(TOK));
+  const p = plan(c, file([fa(TOK, { command: "claude --x" })]), ctxOf(), { [`agent:${TOK}`]: { action: "overwrite" } });
+  clean(p.rows);
+  const dup = { ...c, agents: [...c.agents, agent(TOK)] };
+  clean(apply(dup, p, ctxOf()));
+});
+
+// ---- review round 4: path boundaries, and ~ in a command is expanded on import
+
+test("tildify: a sibling name never matches, whatever continues it (non-ASCII letters, +, digits, underscore)", () => {
+  for (const sib of ["me\u00e9", "me+backup", "me2", "me_x", "me\u0301", "me.bak", "meow"]) assert.equal(exportHerd(withText(`claude ${ME.slice(0, -2)}${sib}/p`, ""), expOpts({ home: ME })).file.includes("~"), false, sib);
+});
+
+test("tildify: start boundary, and every real ending", () => {
+  const t = (x) => JSON.parse(exportHerd(withText("claude", x), expOpts({ home: ME })).file).agents[0].instructions;
+  for (const pre of ["x", "\u00e9", "+", "9", "_", "~", "/"]) assert.equal(t(`${pre}${ME}/z`), `${pre}${ME}/z`, `start ${pre}`);
+  assert.equal(t(`--dir=${ME}/z`), "--dir=~/z");
+  for (const [end, out] of [["", "~"], ["/z", "~/z"], [" z", "~ z"], ["\n", "~\n"], ['"', '~"'], ["'", "~'"], [")", "~)"], [",", "~,"], [":", "~:"], [";", "~;"], [".", "~."], ["`", "~`"]]) assert.equal(t(`see ${ME}${end}`), `see ${out}`, `end ${JSON.stringify(end)}`);
+  assert.equal(t(`${ME}.bak and ${ME}.x`), `${ME}.bak and ${ME}.x`);
+});
+
+const RH = "/ho" + "me/u";
+const cmdOf = (p, id = "agent:fresh") => p.rows.find((r) => r.key === id).item.command;
+test("plan: leading ~/ tokens of a command expand to the receiver's home; instructions keep ~", () => {
+  const f = file([fa("fresh", { command: "~/.local/bin/claude --add-dir ~/notes --x=~/y ~ a~/b", instructions: "read ~/notes" })]);
+  const p = plan(cfg0(), f, ctxOf({ home: RH }), {});
+  assert.equal(cmdOf(p), `${RH}/.local/bin/claude --add-dir ${RH}/notes --x=~/y ${RH} a~/b`);
+  assert.equal(row(p, "agent:fresh").item.instructions, "read ~/notes");
+  assert.ok(!row(p, "agent:fresh").warnings.some((w) => w.code === "tilde-command"));
+  assert.equal(plan(cfg0(), f, ctxOf({ home: `${RH}///` }), {}).rows[0].item.command.split(" ")[0], `${RH}/.local/bin/claude`);
+});
+
+test("plan: no usable home -> the ~ stays and the row says so; a command without ~ gets no such warning", () => {
+  const f = file([fa("fresh", { command: "claude --add-dir ~/notes" }), fa("plain")]);
+  for (const home of [undefined, "relative", "", "/"]) {
+    const p = plan(cfg0(), f, ctxOf(home === undefined ? {} : { home }), {});
+    assert.equal(cmdOf(p), "claude --add-dir ~/notes");
+    assert.ok(row(p, "agent:fresh").warnings.some((w) => w.code === "tilde-command"), String(home));
+    assert.ok(!row(p, "agent:plain").warnings.some((w) => w.code === "tilde-command"));
+  }
+});
+
+test("plan+apply: the stored command has the absolute receiver path, never a literal ~; apply needs the same home", () => {
+  const f = file([fa("fresh", { command: "~/bin/claude --add-dir ~/n" })]);
+  const c = cfg0(), ctx = ctxOf({ home: RH });
+  const p = plan(c, f, ctx, {});
+  const r = apply(c, p, ctx);
+  assert.equal(r.config.agents.find((a) => a.id === "fresh").command, `${RH}/bin/claude --add-dir ${RH}/n`);
+});
+
+test("plan: an expanded command equal to mine is a skip, not a clash", () => {
+  const c = cfg0();
+  c.agents.push(agent("fresh", { name: "FRESH", command: `${RH}/bin/claude` }));
+  const p = plan(c, file([fa("fresh", { command: "~/bin/claude" })]), ctxOf({ home: RH }), {});
+  assert.equal(row(p, "agent:fresh").action, "skip");
+});
+
+// ---- review round 5: the command is rewritten only in the form import expands
+
+const cmdExport = (command, home = ME) => JSON.parse(exportHerd(withText(command, `see ${ME}/i`), expOpts({ home })).file).agents[0];
+
+test("export command: only a token that starts with the home is rewritten; --x=/home/... stays absolute and warns", () => {
+  const a = cmdExport(`${ME}/bin/claude --add-dir ${ME}/n --dir=${ME}/d ${ME} a${ME}/z "${ME}/q" ${ME}:x`);
+  assert.equal(a.command, `~/bin/claude --add-dir ~/n --dir=${ME}/d ~ a${ME}/z "${ME}/q" ${ME}:x`);
+  assert.equal(a.instructions, "see ~/i", "instructions keep the wider rewrite");
+  const w = exportHerd(withText(`claude --add-dir=${ME}/notes`, ""), expOpts({ home: ME })).warnings;
+  assert.ok(w.some((x) => x.rule === "local-path" && x.field === "command"));
+});
+
+test("round trip: export then import gives the receiver-absolute argv, and an = form is unchanged on both sides", () => {
+  const sent = `${ME}/bin/claude --add-dir ${ME}/n --dir=${ME}/d ${ME}`;
+  const a = cmdExport(sent);
+  const p = plan(cfg0(), file([fa("fresh", { command: a.command })]), ctxOf({ home: RH }), {});
+  assert.equal(cmdOf(p), `${RH}/bin/claude --add-dir ${RH}/n --dir=${ME}/d ${RH}`);
+});
+
+test("import: a standalone ~ token expands to the receiver's home; ~x and a~ do not", () => {
+  const p = plan(cfg0(), file([fa("fresh", { command: "claude --dir ~ ~x a~ ~/y" })]), ctxOf({ home: RH }), {});
+  assert.equal(cmdOf(p), `claude --dir ${RH} ~x a~ ${RH}/y`);
+  const q = plan(cfg0(), file([fa("fresh", { command: "claude --dir ~" })]), ctxOf(), {});
+  assert.ok(row(q, "agent:fresh").warnings.some((w) => w.code === "tilde-command"));
 });

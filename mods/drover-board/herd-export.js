@@ -98,14 +98,53 @@ export const scanSecrets = (text) => (typeof text === "string" ? RULES.filter(([
 // A home folder with a user name is privacy, not a secret: a warning.
 export const homePath = (text) => typeof text === "string" && /\/(?:Users|home)\/[A-Za-z0-9._-]+/.test(text);
 
+// A local file path the export does not carry: ~/… or an absolute path of two or more parts. One part (/loop) is a command, not a file;
+// a path after a word character, a dot, a colon or a slash (and/or, urls, 2026/11/16, src/lib) is not one either.
+export const localPath = (text) => typeof text === "string" && /(?<![\w./:~-])(?:~\/[^\s"'`)\]},;]+|\/[A-Za-z0-9._~-]+\/[^\s"'`)\]},;]*)/.test(text);
+
+// The program of a known harness may sit at any path (/opt/bin/pi): that is how it is started, not a file the agent reads.
+const commandPath = (command) => {
+  const a = argv(command);
+  return localPath((HARNESSES.includes(String(a[0] ?? "").slice(String(a[0] ?? "").lastIndexOf("/") + 1)) ? a.slice(1) : a).join(" "));
+};
+
+// The exporter's home folder becomes ~, only where a path part starts and ends (a sibling folder whose name merely starts with the home name is left alone). Pure: home is an input.
+const escRe = (t) => t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+export function tildify(text, home, tokenOnly = false) {
+  if (typeof text !== "string" || typeof home !== "string") return text;
+  const h = home.replace(/\/+$/, "");
+  if (!h.startsWith("/") || h.length < 2) return text;
+  // Start: not after a letter, digit, _ . / ~ + - (any script). End: the text ends, or a / whitespace quote or punctuation follows,
+  // or a full stop that ends a sentence. Anything else continues the folder name (me\u00e9, me+backup, me2, me.bak).
+  // A command is rewritten only where import expands it again: the home starts a whitespace-separated token and is the whole token or its folder.
+  if (tokenOnly) return text.replace(new RegExp(`(?<=^|\\s)${escRe(h)}(?=$|[\\s/])`, "gu"), "~");
+  return text.replace(new RegExp(`(?<![\\p{L}\\p{M}\\p{N}_./~+-])${escRe(h)}(?=$|[\\s/"'\`)\\]},;:>]|\\.(?=\\s|$))`, "gu"), "~");
+}
+
+// Import side: a ~ or ~/… token of a command (argv splits on whitespace, nothing expands ~) becomes the receiver's home.
+// Returns { command, missing }: missing = there is a ~/ token and no usable home, so it stays.
+const homeOf = (home) => (typeof home === "string" && !CONTROL.test(home) ? home.replace(/\/+$/, "") : "");
+export function expandHome(command, home) {
+  const h = homeOf(home);
+  const has = /(^|\s)~(?=\/|\s|$)/.test(command);
+  if (!has) return { command, missing: false };
+  if (!h.startsWith("/")) return { command, missing: true };
+  return { command: command.replace(/(^|\s)~(?=\/|\s|$)/g, (_m, pre) => `${pre}${h}`), missing: false };
+}
+
+// Text shown in a diagnostic: an id or a name that looks like a secret is hidden, the scan sees the same text.
+export const shown = (v) => (scanSecrets(String(v ?? "")).length ? "(hidden: looks like a secret)" : String(v ?? ""));
+
 // Problems of one agent or squad, as [{field, rule}]. Used by export (blocked) and import (row blocked).
 const secretsOf = (pairs) => pairs.flatMap(([field, text]) => scanSecrets(text).map((rule) => ({ field, rule })));
 const agentSecrets = (a) => secretsOf([["name", a.name], ["command", a.command], ["instructions", a.instructions]]);
-const squadSecrets = (s) => secretsOf([["name", s.name], ...(Array.isArray(s.members) ? s.members : []).map((m) => ["role", m?.role])]);
+// Ids and references are scanned too: an id that fits the grammar can still look like a token, and it is written to the file.
+const idSecrets = (x) => secretsOf([["id", x.id]]);
+const squadSecrets = (s) => secretsOf([["name", s.name], ["leader", s.leader], ...(Array.isArray(s.members) ? s.members : []).flatMap((m) => [["role", m?.role], ["agent", m?.agent]])]);
 export function scanItems({ agents = [], squads = [] }) {
   return [
-    ...agents.flatMap((a) => agentSecrets(a).map((h) => ({ id: a.id, ...h }))),
-    ...squads.flatMap((s) => squadSecrets(s).map((h) => ({ id: s.id, ...h }))),
+    ...agents.flatMap((a) => [...idSecrets(a), ...agentSecrets(a)].map((h) => ({ id: a.id, ...h }))),
+    ...squads.flatMap((s) => [...idSecrets(s), ...squadSecrets(s)].map((h) => ({ id: s.id, ...h }))),
   ];
 }
 
@@ -133,12 +172,12 @@ export function exportHerd(cfg, opts = {}) {
   const all = opts.agents === undefined && opts.squads === undefined;
   const wantAgents = new Set(all ? cfg.agents.map((a) => a.id) : opts.agents ?? []);
   const wantSquads = new Set(all ? cfg.squads.map((s) => s.id) : opts.squads ?? []);
-  for (const id of wantAgents) if (!cfg.agents.some((a) => a.id === id)) return { error: `No agent ${id}` };
+  for (const id of wantAgents) if (!cfg.agents.some((a) => a.id === id)) return { error: `No agent ${shown(id)}` };
   for (const id of wantSquads) {
     const s = cfg.squads.find((x) => x.id === id);
-    if (!s) return { error: `No squad ${id}` };
+    if (!s) return { error: `No squad ${shown(id)}` };
     for (const ref of [s.leader, ...s.members.map((m) => m.agent)]) {
-      if (!cfg.agents.some((a) => a.id === ref)) return { error: `Squad ${s.name} names a missing agent` };
+      if (!cfg.agents.some((a) => a.id === ref)) return { error: `Squad ${shown(s.name)} names a missing agent` };
       wantAgents.add(ref);
     }
   }
@@ -152,18 +191,22 @@ export function exportHerd(cfg, opts = {}) {
   const outAgents = agents.map((a) => {
     const id = String(a.id);
     if (!ID.test(id)) blocked.push({ id, field: "id", rule: "id-contract" });
-    for (const h of agentSecrets(a)) blocked.push({ id, ...h });
-    for (const field of ["command", "instructions"]) if (homePath(a[field])) warnings.push({ id, field, rule: "home-path" });
+    for (const h of [...idSecrets(a), ...agentSecrets(a)]) blocked.push({ id, ...h });
+    const command = tildify(String(a.command ?? ""), opts.home, true), instructions = tildify(String(a.instructions ?? ""), opts.home);
+    for (const [field, text] of [["command", command], ["instructions", instructions]]) {
+      if (homePath(text)) warnings.push({ id, field, rule: "home-path" });
+      if (field === "command" ? commandPath(text) : localPath(text)) warnings.push({ id, field, rule: "local-path" });
+    }
     const hash = typeof a.soul === "string" && own(souls, a.soul) ? souls[a.soul] : null;
     const soulOk = typeof a.soul === "string" && SOUL.test(a.soul) && typeof hash === "string" && HASH.test(hash);
     if (a.soul && !soulOk) warnings.push({ id, field: "soul", rule: "soul-missing" });
     const needs = envNamesOf(a.envLog).length;
-    return { id, name: String(a.name ?? ""), ...(soulOk ? { soul: a.soul, soulHash: hash } : {}), command: String(a.command ?? ""), instructions: String(a.instructions ?? ""), ...(needs ? { needsEnv: needs } : {}) };
+    return { id, name: String(a.name ?? ""), ...(soulOk ? { soul: a.soul, soulHash: hash } : {}), command, instructions, ...(needs ? { needsEnv: needs } : {}) };
   });
   const outSquads = squads.map((s) => {
     const id = String(s.id);
     if (!ID.test(id)) blocked.push({ id, field: "id", rule: "id-contract" });
-    for (const h of squadSecrets(s)) blocked.push({ id, ...h });
+    for (const h of [...idSecrets(s), ...squadSecrets(s)]) blocked.push({ id, ...h });
     return { id, name: String(s.name ?? ""), leader: s.leader, members: s.members.map((m) => ({ agent: m.agent, role: String(m.role ?? "") })) };
   });
   if (blocked.length) return { blocked };
@@ -207,7 +250,7 @@ function readFile(text, supported) {
     const seen = new Set();
     for (const x of list) {
       if (!isObj(x) || typeof x.id !== "string" || !ID.test(x.id)) continue;
-      if (seen.has(x.id)) return { errors: [`Two ${kind}s share the id ${x.id}`] };
+      if (seen.has(x.id)) return { errors: [`Two ${kind}s share the id ${shown(x.id)}`] };
       seen.add(x.id);
     }
   }
@@ -342,9 +385,14 @@ export function plan(cfg, text, ctx = {}, choices = {}) {
       }
     }
     delete item.soulHash;
+    const home = expandHome(item.command, ctx.home);
+    item.command = home.command;
+    if (home.missing) warn("tilde-command", "The command has a ~ path and this machine's home folder is unknown: it stays a literal ~ and will not expand", "command");
     if (item.needsEnv) warn("needs-env", `Re-add ${item.needsEnv} environment variable${item.needsEnv === 1 ? "" : "s"} after the import`);
     if (homePath(item.command)) warn("home-path", "The command has a home folder path", "command");
     if (homePath(item.instructions)) warn("home-path", "The instructions have a home folder path", "instructions");
+    if (commandPath(item.command)) warn("local-path", "The command names a local file this file does not carry", "command");
+    if (localPath(item.instructions)) warn("local-path", "The instructions name a local file this file does not carry", "instructions");
     const exe = basename(argv(item.command)[0] ?? "");
     if (!HARNESSES.includes(exe)) warn("unknown-harness", `Unknown program "${exe.slice(0, 64)}": it will run on this machine when the agent starts`, "command");
 
@@ -368,7 +416,7 @@ export function plan(cfg, text, ctx = {}, choices = {}) {
     }
     if (action === "add" || action === "copy") {
       const other = cfg.agents.find((a) => a.id !== item.id && String(a.name).toLowerCase() === item.name.toLowerCase());
-      if (other) warn("name-clash", `Another agent (${other.id}) has the same name`);
+      if (other) warn("name-clash", `Another agent (${shown(other.id)}) has the same name`);
     }
     const out = { ...item };
     if (action === "copy") {
@@ -453,11 +501,11 @@ export function plan(cfg, text, ctx = {}, choices = {}) {
 // Final check, the same as saveSquad: unique ids, an id the env contract accepts for everything written, no dangling refs.
 function finalProblem(agents, squads, writtenAgents, writtenSquads) {
   const ids = new Set();
-  for (const a of agents) { if (ids.has(a.id)) return `Two agents share the id ${a.id}`; ids.add(a.id); }
+  for (const a of agents) { if (ids.has(a.id)) return `Two agents share the id ${shown(a.id)}`; ids.add(a.id); }
   const sids = new Set();
-  for (const s of squads) { if (sids.has(s.id)) return `Two squads share the id ${s.id}`; sids.add(s.id); }
-  for (const id of [...writtenAgents, ...writtenSquads]) if (!ID.test(id)) return `Bad id ${String(id).slice(0, 20)}`;
-  for (const s of squads) if (!ids.has(s.leader) || s.members.some((m) => !ids.has(m.agent))) return `Squad ${s.name} names a missing agent`;
+  for (const s of squads) { if (sids.has(s.id)) return `Two squads share the id ${shown(s.id)}`; sids.add(s.id); }
+  for (const id of [...writtenAgents, ...writtenSquads]) if (!ID.test(id)) return `Bad id ${shown(String(id).slice(0, 20))}`;
+  for (const s of squads) if (!ids.has(s.leader) || s.members.some((m) => !ids.has(m.agent))) return `Squad ${shown(s.name)} names a missing agent`;
   return null;
 }
 
@@ -480,31 +528,31 @@ export function apply(cfg, p, ctx = {}) {
     const it = r.item;
     if (r.kind === "agent") {
       const { problems } = cleanAgent(it);
-      if (problems.length || agentSecrets(it).length) return { error: `Agent ${String(it.id).slice(0, 64)} is not valid` };
+      if (problems.length || agentSecrets(it).length) return { error: `Agent ${shown(String(it.id).slice(0, 64))} is not valid` };
       if (it.soul && isObj(ctx.localSouls) && !(SOUL.test(it.soul) && own(ctx.localSouls, it.soul))) return { stale: true };
       const existing = agents.find((a) => a.id === it.id);
       const base = { id: it.id, name: it.name, ...(it.soul ? { soul: it.soul } : {}), command: it.command, instructions: it.instructions };
       if (r.action === "overwrite") {
-        if (!existing) return { error: `No agent ${it.id} to overwrite` };
-        if (envIds.has(it.id) && p.choices[r.key]?.ackEnv !== true) return { error: `Agent ${it.id} has an environment: acknowledge the overwrite` };
+        if (!existing) return { error: `No agent ${shown(it.id)} to overwrite` };
+        if (envIds.has(it.id) && p.choices[r.key]?.ackEnv !== true) return { error: `Agent ${shown(it.id)} has an environment: acknowledge the overwrite` };
         const next = { ...base, ...(Array.isArray(existing.envLog) ? { envLog: existing.envLog } : {}), version: (Number.isInteger(existing.version) ? existing.version : 0) + 1 };
         agents = agents.map((a) => (a.id === it.id ? next : a));
       } else {
-        if (existing) return { error: `An agent ${it.id} exists` };
-        if (envIds.has(it.id)) return { error: `An environment file already exists for ${it.id}` };
+        if (existing) return { error: `An agent ${shown(it.id)} exists` };
+        if (envIds.has(it.id)) return { error: `An environment file already exists for ${shown(it.id)}` };
         agents.push({ ...base, version: 1 });
       }
       writtenAgents.push(it.id);
     } else {
       const { problems } = cleanSquad(it);
-      if (problems.length || squadSecrets(it).length) return { error: `Squad ${String(it.id).slice(0, 64)} is not valid` };
+      if (problems.length || squadSecrets(it).length) return { error: `Squad ${shown(String(it.id).slice(0, 64))} is not valid` };
       const existing = squads.find((s) => s.id === it.id);
       const base = { id: it.id, name: it.name, leader: it.leader, members: it.members.map((m) => ({ agent: m.agent, role: m.role })) };
       if (r.action === "overwrite") {
-        if (!existing) return { error: `No squad ${it.id} to overwrite` };
+        if (!existing) return { error: `No squad ${shown(it.id)} to overwrite` };
         squads = squads.map((s) => (s.id === it.id ? { ...base, version: (Number.isInteger(existing.version) ? existing.version : 0) + 1 } : s));
       } else {
-        if (existing) return { error: `A squad ${it.id} exists` };
+        if (existing) return { error: `A squad ${shown(it.id)} exists` };
         squads.push({ ...base, version: 1 });
       }
       writtenSquads.push(it.id);
@@ -530,6 +578,6 @@ export const soulHash = (soulText, herdText) => sha256(`${soulText}\n${herdText}
 // The text of an export result: { error } (one string, lines joined) or { header: [lines], file }. Names the rule, never a value.
 export function exportSummary(r) {
   if (r.error) return { error: `error: ${r.error}` };
-  if (r.blocked) return { error: ["error: export blocked by the secret scan (edit the agent, then export again):", ...r.blocked.map((b) => `  ${b.id} · ${b.field} · ${b.rule}`)].join("\n") };
-  return { header: [`ok: exported ${r.agents} agent${r.agents === 1 ? "" : "s"}, ${r.squads} squad${r.squads === 1 ? "" : "s"}`, ...r.warnings.map((w) => `warning: ${w.id} · ${w.field} · ${w.rule}`)], file: r.file };
+  if (r.blocked) return { error: ["error: export blocked by the secret scan (edit the agent, then export again):", ...r.blocked.map((b) => `  ${shown(b.id)} · ${b.field} · ${b.rule}`)].join("\n") };
+  return { header: [`ok: exported ${r.agents} agent${r.agents === 1 ? "" : "s"}, ${r.squads} squad${r.squads === 1 ? "" : "s"}`, ...r.warnings.map((w) => `warning: ${shown(w.id)} · ${w.field} · ${w.rule}`)], file: r.file };
 }

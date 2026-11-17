@@ -220,3 +220,30 @@ test("headless export through a symlink installed elsewhere (the omarchy ~/.loca
   }
   assert.deepEqual(readdirSync(inbox), [], "node answered, no mod needed");
 });
+
+test("headless export: the user's real home (HOME, not --home) becomes ~, and the local-path warnings are printed", async () => {
+  const H = mkdtempSync(join(tmpdir(), "icli-realhome-"));
+  const cfg = base();
+  cfg.agents[0].command = `${SONNET} --add-dir ${H}/notes`;
+  cfg.agents[0].instructions = `read ${H}/docs/a.md`;
+  writeFileSync(join(home, "shared.json"), JSON.stringify({ "drover.agents": cfg }));
+  const r = await cli(["agents", "export", "--agent", "wrangler"], { DROVER_AGENTS_WAIT: "1", HOME: H });
+  assert.equal(r.code, 0, r.stderr);
+  const a = JSON.parse(r.stdout).agents[0];
+  assert.equal(a.command, `${SONNET} --add-dir ~/notes`);
+  assert.equal(a.instructions, "read ~/docs/a.md");
+  assert.ok(!r.stdout.includes(H) && !r.stderr.includes(H));
+  assert.match(r.stderr, /warning: wrangler · command · local-path/);
+  assert.match(r.stderr, /warning: wrangler · instructions · local-path/);
+});
+
+test("export through the consumer (no node): same ~ rewrite and warnings", async () => {
+  const cfg = base();
+  cfg.agents[0].command = `${SONNET} --add-dir ${host.home}/notes`;
+  host.state[CFG] = cfg;
+  startConsumer();
+  const r = await cli(["agents", "export", "--agent", "wrangler"], NO_NODE);
+  assert.equal(r.code, 0, r.stderr);
+  assert.equal(JSON.parse(r.stdout).agents[0].command, `${SONNET} --add-dir ~/notes`);
+  assert.match(r.stderr, /warning: wrangler · command · local-path/);
+});
