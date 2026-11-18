@@ -15,7 +15,7 @@ Read `hc --skill` once, at your first turn. It is the manual for `hc`, the tool 
 | Read an agent's screen | `hc read <t> --lines 120` |
 | Run a check | `hc run --cwd <dir> "<cmd>"` (blocks, returns the exit code) |
 | Slow check | `hc run --bg --no-notify --name chk-<n> --cwd <dir> "<cmd>"` then `hc wait chk-<n>` |
-| Tasks | `drover tasks [tag]` · `drover task <T-…>` · `drover add "<title>" --desc "…" --tag <epic> [--parent <T-…>]` · `drover move <T-…> <column>` (a squad agent never moves to `done`; only the owner, or a Drover on the owner's explicit order) · `drover note <T-…> [--kind decision\|log\|blocker\|pr\|handoff] "<text>"` (see "Notes on the card") · `drover edit <T-…> --title/--desc/--parent <T-…|none>` · `drover projects` · `drover add … --project <id|name>` · `drover tasks --project <id|name>` · `drover link <T-…> <issue URL\|none>` (a card made without its issue: run it right after `gh issue create`, so the card shows its Source) · `drover task-project <T-…> <id|name|none>` |
+| Tasks | `drover tasks [tag]` · `drover task <T-…>` · `drover add "<title>" --desc "…" --tag <epic> [--parent <T-…>]` · `drover move <T-…> <column>` (`backlog`, `ready`, `in-progress`, `review`, `blocked`, `done`; the Board's names; a squad agent never moves to `done`; only the owner, or a Drover on the owner's explicit order) · `drover note <T-…> [--kind decision\|log\|blocker\|pr\|handoff] "<text>"` (see "Notes on the card") · `drover edit <T-…> --title/--desc/--parent <T-…|none>` · `drover projects` · `drover add … --project <id|name>` · `drover tasks --project <id|name>` · `drover link <T-…> <issue URL\|none>` (a card made without its issue: run it right after `gh issue create`, so the card shows its Source) · `drover task-project <T-…> <id|name|none>` |
 | GitHub issue (linked card) | `gh issue edit <n> -R <o/r> --add-label "<l>" --remove-label "<l>" --add-assignee @me` · `gh issue close <n> -R <o/r> -c "<text>"` · `gh issue reopen <n> -R <o/r>` · `gh label create "<l>" -R <o/r>` |
 | Jira issue (linked card) | Atlassian MCP: get the issue's transitions, transition it, assign it to the current user |
 | Queue (Drover bound to a project) | `drover next` (free slots + Ready cards of your project, starts nothing) |
@@ -75,18 +75,18 @@ A card can link an issue. Find it on the `source:` line of `drover task <T-…>`
 
 Whoever moves the card (`drover move`, or `drover start`) syncs the linked issue right after, then writes a `log` note ("synced <issue> -> <column>"). Use your own tools: `gh`, the Atlassian MCP, or another CLI if it is installed. No tool for it: skip, and say so in the note. A tool that is not authenticated: send `STATUS: HELP` up the chain and ask the person. Never work around it, never use another login.
 
-| Column | GitHub label (`status: …`) | GitHub state | Jira status |
-|---|---|---|---|
-| Backlog | none | open | To Do |
-| Ready | `status: ready` | open | To Do |
-| Doing | `status: in progress` | open | In Progress |
-| Review | `status: review` | open | In Review |
-| Blocked | `status: blocked` | open | Blocked |
-| Done | none (remove all `status:` labels) | closed | Done |
+| Column | CLI name | GitHub label (`status: …`) | GitHub state | Jira status |
+|---|---|---|---|---|
+| Backlog | `backlog` | none | open | To Do |
+| Ready | `ready` | `status: ready` | open | To Do |
+| In progress | `in-progress` | `status: in progress` | open | In Progress |
+| Review | `review` | `status: review` | open | In Review |
+| Blocked | `blocked` | `status: blocked` | open | Blocked |
+| Done | `done` | none (remove all `status:` labels) | closed | Done |
 
-- **Labels:** keep exactly 1 `status:` label on the issue for Ready, Doing, Review and Blocked. Keep 0 for Backlog and Done: only remove the old one. Add the new one and remove the others in the same `gh issue edit`. If the label does not exist, create it once with `gh label create`.
+- **Labels:** keep exactly 1 `status:` label on the issue for Ready, In progress, Review and Blocked. Keep 0 for Backlog and Done: only remove the old one. Add the new one and remove the others in the same `gh issue edit`. If the label does not exist, create it once with `gh label create`.
 - **Done:** `gh issue close <n> -c "<1 line: what was done>"`. Skip the comment and the close if a PR already closed the issue. Leaving Done: `gh issue reopen <n>`.
-- **Jira:** transition to the status in the table's Jira column (not the column name: Doing is In Progress). No matching transition: skip, and say so in the note.
+- **Jira:** transition to the status in the table's Jira column (not the column name: Ready is To Do). No matching transition: skip, and say so in the note.
 - **New issue for an existing card:** when you create a GitHub issue for a card that has no `source:` line, run `drover link <T-…> <issue URL>` right after `gh issue create`. Without it the card has no Source in the task dialog and the sync above skips it. Never link a URL that belongs to another card.
 - **Assignee:** when a drive starts, assign the person (`gh issue edit … --add-assignee @me`; Jira: the current user). Agent names go in notes, never in the assignee field.
 - **Scope:** the carve-out in rule 6 covers only the linked issue's status, the labels above, the assignee, and the close/reopen comment. No other comment, edit or issue.

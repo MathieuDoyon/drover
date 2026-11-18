@@ -16,8 +16,8 @@ usage: drover tasks [tag|column] [--project <id|name>]   list tasks (id, column,
        drover agents export [--out <file>] [--agent <id>]… [--squad <id>]…   export agents and squads as JSON (stdout, or a new private file; node reads shared.json, else an open mod answers); never exports env values; a secret blocks it
        drover agents import <file> [--confirm <token>]   dry run by default (prints the plan and a token, writes nothing); --confirm <token> applies it.
                                                   Adds new ids, skips identical, keeps yours on a clash. Copy/overwrite: Squads screen. Needs Drover mods with protocol 4
-       drover add "<title>" [--desc "<text>"] [--tag <t>]… [--column backlog|todo] [--priority P0-P3] [--project <id|name>] [--assignee <agent|squad>:<id>] [--parent <T-…>]
-       drover move <T-…> <backlog|todo|doing|review|blocked|done>   (an agent cannot move to done: the owner does)
+       drover add "<title>" [--desc "<text>"] [--tag <t>]… [--column backlog|ready] [--priority P0-P3] [--project <id|name>] [--assignee <agent|squad>:<id>] [--parent <T-…>]
+       drover move <T-…> <backlog|ready|in-progress|review|blocked|done>   (an agent cannot move to done: the owner does)
        drover next                                queue mode: free slots + Ready cards of your project (starts nothing)
        drover archive <T-…>                               archive a task (like the editor's Archive button)
        drover start <T-…|-> <squad|agent> [--worktree] [--project <id|name>]   open a squad (or 1 agent) on a task, or none (-);
@@ -38,13 +38,22 @@ path, what, *args = sys.argv[1:]
 try: d = json.load(open(path))
 except FileNotFoundError: d = {}
 tasks = [t for t in d.get("drover.tasks", []) if not t.get("archived")]
+# Same names as the board (store.js COLUMNS: label lowercased, spaces -> hyphens). Stored ids (todo, doing) stay valid input; mods/_test/drover-cli-columns.test.js checks this table against store.js.
+COLUMNS = [("backlog", "Backlog"), ("todo", "Ready"), ("doing", "In progress"), ("review", "Review"), ("blocked", "Blocked"), ("done", "Done")]
+def cname(i): return next((l.lower().replace(" ", "-") for c, l in COLUMNS if c == i), i)
+def squash(v): return "".join(ch for ch in str(v).lower() if ch not in " _-")
+def cid(v): return next((c for c, l in COLUMNS if squash(v) and squash(v) in (squash(c), squash(l))), None)
 projects = d.get("drover.projects") or []
 def repo(p):
     r = p.get("repos") or []
     return next((x["path"] for x in r if x.get("default")), r[0]["path"] if r else "-")
 def find(k):
     return next((p for p in projects if p["id"] == k or p["name"].lower() == k.lower()), None)
-if what == "projects":
+if what == "column":
+    c = cid(args[0])
+    if not c: sys.exit(f'error: unknown column {args[0]} (use {", ".join(cname(c) for c, _ in COLUMNS)})')
+    print(c)
+elif what == "projects":
     for p in projects: print(f'{p["id"]}  {p["name"]}  {repo(p)}')
     if not projects: print('no projects (create one: drover project add "<name>" --repo <abs path>)', file=sys.stderr)
 elif what == "tasks":
@@ -57,15 +66,16 @@ elif what == "tasks":
         args = args[:i] + args[i + 2:]
         tasks = [t for t in tasks if t.get("project") == pf["id"]]
     f = args[0].lower().lstrip("#") if args else None
+    fc = cid(f) if f else None  # a column name, label or stored id; anything else is a tag
     order = {"doing": 0, "review": 1, "blocked": 2, "todo": 3, "backlog": 4, "done": 5}
     for t in sorted(tasks, key=lambda t: (order.get(t["column"], 9), t.get("priority", "P2"))):
-        if f and f != t["column"] and f not in t.get("tags", []): continue
+        if f and f != t["column"] and fc != t["column"] and f not in t.get("tags", []): continue
         tags = " ".join("#" + x for x in t.get("tags", []))
-        print(f'{t["id"]}  {t["column"]:<7} {t.get("priority","P2")}  {t["title"]}{"  " + tags if tags else ""}{"  agent " + t["agent"] if t.get("agent") else ""}')
+        print(f'{t["id"]}  {cname(t["column"]):<11} {t.get("priority","P2")}  {t["title"]}{"  " + tags if tags else ""}{"  agent " + t["agent"] if t.get("agent") else ""}')
 elif what == "task":
     t = next((t for t in tasks if t["id"] == args[0]), None)
     if not t: sys.exit(f"error: no task {args[0]}")
-    print(f'{t["id"]} [{t["column"]}] {t.get("priority","P2")} {t["title"]}')
+    print(f'{t["id"]} [{cname(t["column"])}] {t.get("priority","P2")} {t["title"]}')
     if t.get("tags"): print("tags: " + ", ".join(t["tags"]))
     pr = find(t["project"]) if t.get("project") else None
     if pr: print(f'project: {pr["name"]} ({pr["id"]}) repo {repo(pr)}')
@@ -257,8 +267,8 @@ case "${1:-}" in
     send "{\"op\":\"link\",\"id\":\"$2\",\"url\":$(json "$3"),\"by\":$(json "${HC_TERMINAL_ID:-}")}" 5 ;;
   move)
     [ $# -eq 3 ] && [[ "$2" =~ ^T-[A-Z0-9]+$ ]] || usage
-    case "$3" in backlog|todo|doing|review|blocked|done) ;; *) usage ;; esac
-    send "{\"op\":\"move\",\"id\":\"$2\",\"column\":\"$3\",\"from\":$(json "${HC_TERMINAL_ID:-}")}" 5 ;;
+    col="$(read_shared column "$3")" || exit 2  # a name or a stored id in, the stored id on the wire
+    send "{\"op\":\"move\",\"id\":\"$2\",\"column\":\"$col\",\"from\":$(json "${HC_TERMINAL_ID:-}")}" 5 ;;
   next)
     [ $# -eq 1 ] || usage
     send "{\"op\":\"next\",\"from\":$(json "${HC_TERMINAL_ID:-}")}" 5 ;;
@@ -276,6 +286,7 @@ case "${1:-}" in
         --parent) [ $# -ge 2 ] && [[ "$2" =~ ^T-[A-Z0-9]+$ ]] || usage; parent="$2"; shift 2 ;; *) usage ;;
       esac
     done
+    column="$(read_shared column "$column")" || exit 2
     tj="[$(for t in ${tags[@]+"${tags[@]}"}; do printf '%s,' "$(json "$t")"; done | sed 's/,$//')]"
     aj=null
     if [ -n "$assignee" ]; then

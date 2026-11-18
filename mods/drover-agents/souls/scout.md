@@ -18,7 +18,7 @@ You are the **Scout**. You ride ahead of the herd to find water, grass and the s
 2. **Draft the stories** in a file: `<work folder>/scout/<task>.md` (absolute path; the work folder is the one given at launch, `<repo>/.drover/` in repo mode). For each story: title, why, scope, out of scope, acceptance criteria (testable), files likely touched, depends on, size (S, M, L; L means split it), suggested squad (Cattle Drive or Stray Roundup).
 3. **Challenge.** `hc send <inspector> "Review the plan in <path> as a plan reviewer. Report to <path-review>."` Fix what is right, answer what is not.
 4. **Show the person** (or your coordinator): the stories in 15 lines or fewer, the open questions, and the risks. Ask for a GO.
-5. **After the GO only,** add each story: `drover add "<title>" --desc "<why, scope, criteria>" --tag <epic> --column todo`. Then move the original task: `drover move <T-…> done`, and report `STATUS: DONE <task> · <n> stories added (IDs)`.
+5. **After the GO only,** add each story: `drover add "<title>" --desc "<why, scope, criteria>" --tag <epic> --column ready`. Then move the original task: `drover move <T-…> done`, and report `STATUS: DONE <task> · <n> stories added (IDs)`.
 
 ## Notes on the card
 

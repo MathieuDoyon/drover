@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { CLAIMING, firstSight, add, update, shift, reorder, matches, attention, list, validate, imageName, appendImage, imageLines, staleImages, applyCommand, NOTE_KINDS, COLUMNS, GROUPS, PRIORITY_LABEL, STATUS_ICON, updatedAgo, clampText, sortCards, archiveDone, inScope, SCOPES, checklistProgress, ringGlyph, menuChange, FILTER_FIELDS, toggleFilter, clearFilters, matchesFilter, filterValues, searchFilters, filterChips, filterProjects, nextIndex, canCreate, isSubmitKey, allTags, toggleTag, newTag, runnerChoices, startHint, canCreateAgent, agentChoices, packDraft, unpackDraft, createSize, editSize, saveText, patchField, assigneeKey, assigneeText } from "./store.js";
+import { CLAIMING, firstSight, add, update, shift, reorder, matches, attention, list, validate, imageName, appendImage, imageLines, staleImages, applyCommand, addCommand, columnName, columnId, NOTE_KINDS, COLUMNS, GROUPS, PRIORITY_LABEL, STATUS_ICON, updatedAgo, clampText, sortCards, archiveDone, inScope, SCOPES, checklistProgress, ringGlyph, menuChange, FILTER_FIELDS, toggleFilter, clearFilters, matchesFilter, filterValues, searchFilters, filterChips, filterProjects, nextIndex, canCreate, isSubmitKey, allTags, toggleTag, newTag, runnerChoices, startHint, canCreateAgent, agentChoices, packDraft, unpackDraft, createSize, editSize, saveText, patchField, assigneeKey, assigneeText } from "./store.js";
 
 test("add, edit, archive, restore keep the id; invalid edits change nothing", () => {
   const a = add([], { title: "  Fix login ", tags: "#Auth, auth, ui", priority: "P1" }, 1);
@@ -107,6 +107,35 @@ test("agent commands: move only, known columns, known tasks", () => {
   assert.ok(applyCommand(tasks, { op: "move", id: "T-NONE", column: "done" }).error);
   assert.ok(applyCommand(tasks, { op: "delete", id: task.id }).error);
   assert.ok(applyCommand(tasks, { op: "move", id: task.id, column: "done", title: "" }).task.title === "x");
+});
+
+test("column names: the CLI name is the board label, the stored id never changes", () => {
+  for (const [id, label] of COLUMNS) {
+    assert.equal(columnName(id), label.toLowerCase().replace(/ /g, "-"));
+    assert.equal(columnId(columnName(id)), id);
+    assert.equal(columnId(id), id); // the stored id stays valid input
+    assert.equal(columnId(label), id);
+    assert.equal(columnId(label.toUpperCase()), id);
+  }
+  assert.equal(columnName("todo"), "ready");
+  assert.equal(columnName("doing"), "in-progress");
+  for (const a of ["ready", "READY", " todo "]) assert.equal(columnId(a), "todo");
+  for (const a of ["in-progress", "In progress", "inprogress", "doing", "DOING"]) assert.equal(columnId(a), "doing");
+  for (const bad of ["nope", "", null, undefined, 3, "in-progres"]) assert.equal(columnId(bad), null);
+  assert.equal(columnName("nope"), null);
+});
+
+test("agent commands accept column names and aliases and store the id", () => {
+  const { tasks, task } = add([], { title: "x" });
+  for (const [name, id] of [["ready", "todo"], ["in-progress", "doing"], ["todo", "todo"], ["doing", "doing"], ["Review", "review"]]) {
+    assert.equal(applyCommand(tasks, { op: "move", id: task.id, column: name }).task.column, id, name);
+  }
+  assert.equal(addCommand(tasks, { title: "y", column: "ready" }).task.column, "todo");
+  assert.equal(addCommand(tasks, { title: "y", column: "in-progress" }).task.column, "doing");
+  assert.equal(addCommand(tasks, { title: "y" }).task.column, "backlog");
+  assert.equal(addCommand(tasks, { title: "y", column: "nope" }).error, "Unknown column nope (use backlog, ready, in-progress, review, blocked, done)");
+  const bad = applyCommand(tasks, { op: "move", id: task.id, column: "nope" }).error;
+  assert.equal(bad, "Unknown column nope (use backlog, ready, in-progress, review, blocked, done)");
 });
 
 import * as R from "./runs.js";

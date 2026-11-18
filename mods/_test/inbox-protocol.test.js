@@ -190,7 +190,7 @@ test("d. requests with no ifRev/ttlMs behave as before, for every op of the tabl
   const noteId = (await (async () => { await send({ op: "note", id, text: "n", by: "t" }); return card(id).notes[0].id; })());
   host.state[KEY] = tasks().map((t) => (t.id === id ? { ...t, project: "P-OLD" } : t)); // so the `project none` row has something to clear
   const table = [
-    [{ op: "move", id, column: "doing" }, /^ok: T-\S+ -> doing$/],
+    [{ op: "move", id, column: "doing" }, /^ok: T-\S+ -> in-progress$/],
     [{ op: "edit", id, title: "t2" }, /^ok: T-\S+ edited$/],
     [{ op: "note", id, text: "again", by: "t" }, /^ok: T-\S+ note 2$/],
     [{ op: "note-edit", id, noteId, text: "z" }, /^ok: T-\S+ \S+ edited$/],

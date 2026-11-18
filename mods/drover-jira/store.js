@@ -14,6 +14,12 @@ export const COLUMNS = [
 ];
 export const PRIORITIES = ["P0", "P1", "P2", "P3"];
 const COLUMN_IDS = COLUMNS.map(([id]) => id);
+// The CLI speaks the board's names: the label, lowercased, spaces to hyphens ("In progress" -> "in-progress"). Stored ids stay on the wire and in the data.
+const squash = (v) => String(v).toLowerCase().replace(/[\s_-]+/g, "");
+export const columnName = (id) => COLUMNS.find(([i]) => i === id)?.[1].toLowerCase().replace(/ /g, "-") ?? null;
+// A column name, a label or a stored id (any case; "in progress", "in_progress", "doing", "todo" all work) -> the stored id, or null.
+export const columnId = (input) => (typeof input === "string" && squash(input) ? COLUMNS.find(([id, label]) => squash(input) === squash(id) || squash(input) === squash(label))?.[0] ?? null : null);
+const unknownColumn = (c) => `Unknown column ${c} (use ${COLUMN_IDS.map(columnName).join(", ")})`;
 // Editor menus. tone = a theme color key (the editor maps it to a color).
 export const PRIORITY_LABEL = { P0: "Urgent", P1: "High", P2: "Medium", P3: "Low" };
 export const STATUS_ICON = {
@@ -165,7 +171,9 @@ export function addCommand(tasks, cmd, projectId, now, ctx) {
   if (cmd.tags !== undefined && cmd.tags !== null) { const r = strictTags(cmd.tags); if (r.error) return r; tags = r.value; }
   if (!none(cmd.parent)) { const r = strictParent(tasks, null, cmd.parent, projectId); if (r.error) return r; parent = r.value; }
   if (cmd.assignee !== undefined && cmd.assignee !== null) { const r = strictAssignee(cmd.assignee, ctx); if (r.error) return r; assignee = r.value; }
-  return add(tasks, { title: cmd.title, desc: cmd.desc ?? "", tags, column: cmd.column ?? "backlog", priority, project: projectId, assignee, ...(parent ? { parent } : {}) }, now);
+  let column = "backlog";
+  if (!none(cmd.column)) { column = columnId(cmd.column); if (!column) return { error: unknownColumn(cmd.column) }; }
+  return add(tasks, { title: cmd.title, desc: cmd.desc ?? "", tags, column, priority, project: projectId, assignee, ...(parent ? { parent } : {}) }, now);
 }
 
 // One card per source item: "Add to Board" twice finds the first one.
@@ -383,9 +391,10 @@ export function applyCommand(tasks, cmd, now, ctx) {
   }
   if (cmd.op === "project") return update(tasks, cmd.id, { project: cmd.project ?? null }, now); // the caller resolved the name to an id
   if (cmd.op !== "move") return { error: "Unknown drover command" };
-  if (!COLUMN_IDS.includes(cmd.column)) return { error: `Unknown column ${cmd.column}` };
-  if (cmd.column === "done" && cmd.from && !cmd.fromDrover) return { error: "Only the owner moves a card to done: tell the owner" }; // from = an agent's terminal; fromDrover = io.js checked it is a live Drover
-  return update(tasks, cmd.id, { column: cmd.column }, now);
+  const column = columnId(cmd.column);
+  if (!column) return { error: unknownColumn(cmd.column) };
+  if (column === "done" && cmd.from && !cmd.fromDrover) return { error: "Only the owner moves a card to done: tell the owner" }; // from = an agent's terminal; fromDrover = io.js checked it is a live Drover
+  return update(tasks, cmd.id, { column }, now);
 }
 
 // Queue mode: a Drover takes Ready cards (column todo) of its own project.
@@ -427,7 +436,7 @@ export function claim(tasks, id, projectId, now, alive) {
   if (cur.agent === CLAIMING) return { error: `${id} is already starting` };
   if (cur.agent && (!alive || alive.has(cur.agent))) return { error: `${id} already has agent ${cur.agent}` };
   if (projectId !== undefined) { // queue mode; a manual start (undefined) may take a card from any column
-    if (cur.column !== "todo") return { error: `${id} is not Ready (it is in ${cur.column})` };
+    if (cur.column !== "todo") return { error: `${id} is not Ready (it is in ${columnName(cur.column)})` };
     if (cur.project !== projectId) return { error: `${id} is not in this project` };
   }
   const r = update(tasks, id, { column: "doing", agent: CLAIMING, claimedAt: now ?? Date.now() }, now);

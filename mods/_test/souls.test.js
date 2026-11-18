@@ -2,12 +2,14 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { COLUMNS, columnName } from "../_lib/store.js";
 
 const soul = (n) => readFileSync(new URL(`../drover-agents/souls/${n}.md`, import.meta.url), "utf8");
 
 test("_herd.md: mapping table covers every column, rule 6 carve-out points to it", () => {
   const h = soul("_herd");
-  for (const row of ["| Backlog |", "| Ready |", "| Doing |", "| Review |", "| Blocked |", "| Done |"]) assert.ok(h.includes(row), row);
+  for (const [id, label] of COLUMNS) assert.ok(h.includes(`| ${label} | ${"`" + columnName(id) + "`"} |`), label); // the Board's label and the CLI name, never a third name
+  assert.ok(!h.includes("| Doing |"));
   for (const s of ["status: ready", "status: in progress", "status: review", "status: blocked", "In Review", "gh issue close", "gh issue reopen", "gh label create", "--add-assignee @me", "`source:`"]) assert.ok(h.includes(s), s);
   assert.match(h, /Keep 0 for Backlog and Done/);
   assert.match(h, /table's Jira column/);

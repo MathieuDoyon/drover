@@ -1,5 +1,5 @@
 // Canonical copy lives in mods/_lib. Pure: agent profiles, squads, prompts and run status.
-import { repoOf, update, CLAIMING } from "./store.js";
+import { repoOf, update, CLAIMING, columnName } from "./store.js";
 import { cfg } from "./config.js";
 
 export const AGENTS_KEY = "drover.agents";
@@ -481,7 +481,7 @@ export function startGuard(c, cmd) {
   const project = projectOfDrover(c.runs, cmd.from);
   if (!project) return { ok: true };
   if (t.archived) return { error: `${t.id} is archived` };
-  if (t.column !== "todo") return { error: `${t.id} is not Ready (it is in ${t.column})` };
+  if (t.column !== "todo") return { error: `${t.id} is not Ready (it is in ${columnName(t.column)})` };
   if (t.project !== project) return { error: `${t.id} is not in your project` };
   if (!repoOf(t, c.projects)) return { error: `${t.id} has no repo: add one to its project` };
   if (activeFor(c.runs, c.tasks, project, c.live, c.alive) >= maxRuns()) return { error: `no free slot: ${maxRuns()} runs are active` };
