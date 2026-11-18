@@ -87,6 +87,7 @@ test("filter popover: field list, submenu with back, search narrows, advanced cl
 
 test("active filters: chips render, columns() narrows (AND with text filter), reopening resets the menu", () => {
   b.filters = { priority: ["P0"] };
+  b.pop = "filter"; // the filter menu (fr-clear) is built only while open
   const r = render();
   assert.ok(r.ids.includes("chip-priority-P0") && r.ids.includes("chips-clear") && r.ids.includes("fr-clear"));
   assert.deepEqual(titles(), ["urgent"]);

@@ -174,7 +174,7 @@ export default class Tasks extends View {
       .trigger(h_flex().id("filter").h(22).px(5).gap(3).flex_none().items_center().rounded(5).text_size(11).cursor_pointer().hover((s) => s.bg(t.raised).text_color(t.foreground))
         .text_color(open || filterCount > 0 ? t.foreground : t.muted).when(open, (el) => el.bg(t.raised))
         .child(svg(I("list-filter")).size(14)).when(filterCount > 0, (el) => el.child(div().child(String(filterCount)))))
-      .content(filterMenu());
+      .content(open ? filterMenu() : div());
 
     for (const o of takeRemoteOutcomes()) this.remoteMsg = outcomeText(o); // a result that arrived after the wait
     const banners = merged.remotes.filter((r) => r.banner).map((r) => h_flex().id(`banner-${r.localId}`).mx(8).mb(6).px(8).min_h(28).gap(6).items_center().rounded(7).bg(t.hover).text_size(11.5)

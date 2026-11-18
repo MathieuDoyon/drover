@@ -181,6 +181,9 @@ export default class Board extends View {
     const projects = loadProjects();
     const cfg_ = loadConfig();
     const hidden = this.hiddenCount();
+    // The write gate of a remote project, computed once per render (it reads the projects, the cache and the pending list): not once per card.
+    const gates = new Map();
+    const gateOf = (pid) => { if (!gates.has(pid)) gates.set(pid, controlState(remoteWriteState(pid))); return gates.get(pid); };
     const card = (x, ci) => {
       const agent = x.agent ? live.get(x.agent) : null;
       const status = x.agent ? (agent?.status ?? "gone") : null;
@@ -189,7 +192,7 @@ export default class Board extends View {
         .text_size(11).text_color(color).when(Boolean(iconName), (el) => el.child(svg(I(iconName)).size(11))).child(text);
       const ago = updatedAgo(x.updated);
       const ro = Boolean(x.remote); // a card of a project on another machine
-      const w = ro ? this.wstate(x) : null; // its write controls: on when omarchy is reachable, updated and not frozen
+      const w = ro ? gateOf(x.project) : null; // its write controls: on when omarchy is reachable, updated and not frozen
       const shift = (dir) => ro ? (w.on ? icon(`${dir < 0 ? "l" : "r"}-${x.id}`, dir < 0 ? "chevron-left" : "chevron-right", (cx) => { const op = shiftOp(x, this.visibleIds(), dir); if (op) this.rsend(x.project, op, cx); }) : off(`${dir < 0 ? "l" : "r"}-${x.id}`, dir < 0 ? "chevron-left" : "chevron-right", w.tip))
         : icon(`${dir < 0 ? "l" : "r"}-${x.id}`, dir < 0 ? "chevron-left" : "chevron-right", () => save(shiftVisible(load(), x.id, dir, this.visibleIds())));
       const dim = ro && staleNow(x) ? 0.55 : 1;
@@ -283,14 +286,14 @@ export default class Board extends View {
         .trigger(h_flex().id("scope").h(28).px(10).gap(8).items_center().rounded(7).text_size(12.5).cursor_pointer().hover((s) => s.bg(t.hover).text_color(t.foreground))
           .text_color(this.pop === "scope" ? t.foreground : t.muted).when(this.pop === "scope", (el) => el.bg(t.hover))
           .child(svg(I("clipboard-list")).size(15)).child(div().whitespace_nowrap().child(scopeLabel)).child(svg(I("chevron-down")).size(13)))
-        .content(menuBox("scope-menu", 220).mt(4)
+        .content(this.pop !== "scope" ? div() : menuBox("scope-menu", 220).mt(4)
           .children(SCOPES.map(([id, label]) => scopeItem(id, label, null)))
           .when(projects.length > 0, (m) => m.child(sep()).children(projects.map((p) => scopeItem(`project:${p.id}`, p.name, "folder"))))))
       .child(Popover.new("pop-filter").anchor("top_left").open(this.pop === "filter").on_open_change((v, cx) => this.setPop("filter", v, cx))
         .trigger(h_flex().id("filter").h(28).px(8).gap(5).items_center().rounded(7).text_size(12).cursor_pointer().hover((s) => s.bg(t.hover).text_color(t.foreground))
           .text_color(this.pop === "filter" || filterCount > 0 ? t.foreground : t.muted).when(this.pop === "filter", (el) => el.bg(t.hover))
           .child(svg(I("list-filter")).size(15)).when(filterCount > 0, (el) => el.child(div().child(String(filterCount)))))
-        .content(filterMenu().mt(4)))
+        .content(this.pop === "filter" ? filterMenu().mt(4) : div()))
       .child(Input.new(this.input).w(260).h(28).px(8).rounded(7).border_1().border_color(t.input).bg(t.background).text_size(12))
       .child(div().flex_1())
       .when(hidden > 0, (el) => el.child(div().id("hidden-note").px(8).text_size(12).text_color(t.dim).whitespace_nowrap().child(`${hidden} hidden`)))
@@ -363,7 +366,7 @@ export default class Board extends View {
               .child(Popover.new(`pop-${col.id}`).anchor("top_right").open(this.pop === `col:${col.id}`).on_open_change((v, cx) => this.setPop(`col:${col.id}`, v, cx))
                 .trigger(div().id(`more-${col.id}`).w(22).h(22).flex().items_center().justify_center().rounded(5).cursor_pointer()
                   .text_color(this.pop === `col:${col.id}` ? t.foreground : t.muted).hover((s) => s.bg(t.hover).text_color(t.foreground)).child(svg(I("ellipsis")).size(15)))
-                .content(menu()))
+                .content(this.pop === `col:${col.id}` ? menu() : div()))
               .child(this.addControl(`add-${col.id}`, (tip, go) => tip ? off(`add-${col.id}`, "plus", tip) : icon(`add-${col.id}`, "plus", go), col.id)))
             .child(v_flex().id(`cards-${col.id}`).flex_1().min_h(0).overflow_y_scrollbar().px(8).pb(8).gap(8)
               .border_2().border_color(this.over?.col === col.id && this.over.before === null ? t.accent : t.surface)

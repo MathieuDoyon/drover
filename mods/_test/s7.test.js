@@ -332,12 +332,14 @@ test("round 3: while sending, the pencil does nothing", async () => {
 
 // ── round 4: owner native check
 const popoverOf = (r, name) => find(r.root, `pop-${name}`);
+// A closed menu builds no content (T-MWL7FAABO29): open `name`, render, return its Popover.
+const openPop = (e, name) => { e.menu = name; return popoverOf(render(e), name); };
 const ARG = (n, k) => n.args[k]?.[0];
 
 test("every sidebar selector is a Popover that opens BELOW its trigger (top_* anchor, mt 4) and closes on outside press", () => {
-  const r = render(seed({}));
+  const e = seed({});
   for (const n of ["status", "priority", "assignee", "labels", "project", "parent"]) {
-    const pop = popoverOf(r, n);
+    const pop = openPop(e, n);
     assert.ok(pop, `pop-${n} is a Popover`);
     assert.ok(/^top_/.test(ARG(pop, "anchor")), `${n}: top anchor, got ${ARG(pop, "anchor")}`);
     const content = pop.kids.find((k) => k.id === `menu-${n}`);
@@ -350,8 +352,7 @@ test("every sidebar selector is a Popover that opens BELOW its trigger (top_* an
 });
 
 test("the composer picker opens UPWARD (bottom_left, mb 4) so it never covers its trigger", () => {
-  const r = render(seed({}));
-  const pop = popoverOf(r, "send");
+  const pop = openPop(seed({}), "send");
   assert.ok(pop);
   assert.equal(ARG(pop, "anchor"), "bottom_left");
   assert.deepEqual(pop.kids.find((k) => k.id === "menu-send").args.mb, [4]);
@@ -393,10 +394,10 @@ test("note cards: softer border and a background between the dialog and the dark
 // ── round 5: Popover opening focus lands where the key handler / search is
 test("every selector's Popover names the menu focus handle (the list's key handler) as its track_focus destination", () => {
   const e = seed({});
-  const r = render(e);
   for (const n of ["status", "priority", "assignee", "labels", "project", "parent", "send"]) {
-    assert.equal(ARG(popoverOf(r, n), "track_focus"), e.menuFocus, `${n}: track_focus = menuFocus`);
-    assert.equal(find(popoverOf(r, n), `menu-${n}`).args.track_focus?.[0], e.menuFocus, `${n}: the list tracks the same handle`);
+    const pop = openPop(e, n);
+    assert.equal(ARG(pop, "track_focus"), e.menuFocus, `${n}: track_focus = menuFocus`);
+    assert.equal(find(pop, `menu-${n}`).args.track_focus?.[0], e.menuFocus, `${n}: the list tracks the same handle`);
   }
 });
 

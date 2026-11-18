@@ -1119,25 +1119,28 @@ export class Editor {
     const prio = PRIORITY_COLOR(t);
     const RC = this.remote ? this.remoteChoices() : null; // an omarchy card: the pickers read omarchy's data only
     const assigneeChoices = RC ? RC.assignees : runnerChoices(loadConfig());
-    const items = {
-      status: COLUMNS.map(([id, name]) => ({ key: id, glyph: STATUS_ICON[id].icon, color: t[STATUS_ICON[id].tone], text: name, current: id === this.column, on: (cx) => this.setProp("status", id, cx) })),
-      priority: Object.keys(PRIORITY_LABEL).map((p) => ({ key: p, glyph: "●", color: prio[p], text: PRIORITY_LABEL[p], current: p === this.priority, on: (cx) => this.setProp("priority", p, cx) })),
-      labels: [...(newTag(this.labelSearch.value(), this.labelChoices()) ? [{ key: "new", glyph: "+", color: t.accent, text: `Create "${this.labelSearch.value().trim()}"`, current: false, on: (cx) => this.createLabel(cx) }] : []),
+    // Lazy: a menu's item list is built only for the menu that is open (and once per render); a closed menu costs nothing (T-MWL7FAABO29).
+    const itemDefs = {
+      status: () => COLUMNS.map(([id, name]) => ({ key: id, glyph: STATUS_ICON[id].icon, color: t[STATUS_ICON[id].tone], text: name, current: id === this.column, on: (cx) => this.setProp("status", id, cx) })),
+      priority: () => Object.keys(PRIORITY_LABEL).map((p) => ({ key: p, glyph: "●", color: prio[p], text: PRIORITY_LABEL[p], current: p === this.priority, on: (cx) => this.setProp("priority", p, cx) })),
+      labels: () => [...(newTag(this.labelSearch.value(), this.labelChoices()) ? [{ key: "new", glyph: "+", color: t.accent, text: `Create "${this.labelSearch.value().trim()}"`, current: false, on: (cx) => this.createLabel(cx) }] : []),
         ...this.labelChoices().filter((g) => g.includes(this.labelSearch.value().trim().replace(/^#/, "").toLowerCase()))
           .map((g) => ({ key: g, glyph: "#", color: t.muted, text: g, current: this.labels.includes(g), on: (cx) => this.toggleLabel(g, cx) }))],
-      assignee: [{ key: "none", glyph: "–", color: t.muted, text: "No assignee", current: !this.assignee, on: (cx) => this.setProp("assignee", null, cx) },
+      assignee: () => [{ key: "none", glyph: "–", color: t.muted, text: "No assignee", current: !this.assignee, on: (cx) => this.setProp("assignee", null, cx) },
         ...assigneeChoices.map((c) => ({ key: `${c.kind}-${c.id}`, glyph: c.kind === "squad" ? "◈" : "●", color: t.muted, text: c.name,
           current: this.assignee?.kind === c.kind && this.assignee.id === c.id, on: (cx) => this.setProp("assignee", { kind: c.kind, id: c.id }, cx) }))],
-      agent: agentChoices(loadConfig()).map((c) => ({ key: c.id, glyph: "●", color: t.muted, text: c.name, current: c.id === this.runner, on: () => (this.runner = c.id) })),
-      parent: [{ key: "none", glyph: "–", color: t.muted, text: "Clear parent", current: !this.parent, on: (cx) => this.setProp("parent", null, cx) },
+      agent: () => agentChoices(loadConfig()).map((c) => ({ key: c.id, glyph: "●", color: t.muted, text: c.name, current: c.id === this.runner, on: () => (this.runner = c.id) })),
+      parent: () => [{ key: "none", glyph: "–", color: t.muted, text: "Clear parent", current: !this.parent, on: (cx) => this.setProp("parent", null, cx) },
         ...filterParents(RC ? RC.parents : this.task ? parentChoices(load(), this.task.id) : [], this.parentSearch.value()).map((p) => ({ key: p.id, glyph: "↑", color: t.muted, text: parentLabel(p), hint: p.id, current: p.id === this.parent, on: (cx) => this.setProp("parent", p.id, cx) }))],
-      send: this.sendOptions(t),
-      project: [{ id: null, name: "No project" }, ...filterProjects(projects, this.projSearch.value())]
+      send: () => this.sendOptions(t),
+      project: () => [{ id: null, name: "No project" }, ...filterProjects(projects, this.projSearch.value())]
         .map((p) => ({ key: p.id ?? "none", glyph: p.id ? "◆" : "–", color: t.muted, text: projLabel(p), current: p.id === this.project, disabled: projTip(p), on: (cx) => this.setProp("project", p.id, cx) })),
     };
+    const built = {};
+    const items = (name) => (built[name] ??= itemDefs[name]());
     const setOpen = (name, open, cx) => {
       this.menu = open ? name : this.menu === name ? null : this.menu;
-      if (open) this.hi = Math.max(0, items[name].findIndex((i) => i.current));
+      if (open) this.hi = Math.max(0, items(name).findIndex((i) => i.current));
       // The list takes the keyboard when a click opens it (base does it only for keys). Closed: back to the title field, so Esc still reaches the editor.
       const search = { project: this.projSearch, labels: this.labelSearch, parent: this.parentSearch }[name];
       if (open) {
@@ -1151,10 +1154,10 @@ export class Editor {
     // The labels list is multi-select: a pick keeps it open.
     const pick = (name, item, cx) => { if (item.disabled) return; item.on(cx); if (name === "labels") cx.notify(); else setOpen(name, false, cx); };
     const onKey = (name) => (e, cx) => {
-      const n = items[name].length;
+      const n = items(name).length;
       if (e.key === "escape") return setOpen(name, false, cx), cx.stop_propagation();
       if (e.key === "up" || e.key === "down") this.hi = nextIndex(this.hi, n, e.key);
-      else if (e.key === "enter" && items[name][this.hi]) return pick(name, items[name][this.hi], cx), cx.stop_propagation();
+      else if (e.key === "enter" && items(name)[this.hi]) return pick(name, items(name)[this.hi], cx), cx.stop_propagation();
       else return;
       cx.notify(); cx.stop_propagation();
     };
@@ -1164,7 +1167,7 @@ export class Editor {
       .when(name === "project" || name === "labels" || name === "parent", (el) => el.child(h_flex().h(30).px(8).gap(6).items_center().mb(2).border_b_1().border_color(t.input)
         .child(svg(I("search")).size(13).text_color(t.dim))
         .child(Input.new({ project: this.projSearch, labels: this.labelSearch, parent: this.parentSearch }[name]).flex_1().h(26))))
-      .child(v_flex().id(`items-${name}`).gap(1).overflow_y_scrollbar().children(items[name].map((it, i) =>
+      .child(v_flex().id(`items-${name}`).gap(1).overflow_y_scrollbar().children(items(name).map((it, i) =>
         h_flex().id(`${name}-${it.key}`).h(28).px(8).gap(8).items_center().rounded(6)
           .text_size(12).text_color(t.foreground).role("list_box_option").aria_selected(it.current)
           .when(i === this.hi, (el) => el.aria_active_descendant().bg(t.selected))
@@ -1178,7 +1181,7 @@ export class Editor {
       .on_open_change((v, cx) => setOpen(name, v, cx))
       .track_focus(this.menuFocus) // opening focus goes to the list's key handler (Up/Down/Enter); Labels/Project then hand it to their search (setOpen)
       .trigger(trigger)
-      .content(list(name)[gap](4));
+      .content(open ? list(name)[gap](4) : div()); // a closed menu builds no row (the host interrupted a render that built them all)
     const row = (name, text, glyph, color, valueText, Root = Select, icon = null, side = false, sideIcon = null) => {
       const open = this.menu === name;
       // Create modal: the trigger is a pill chip (icon + text), no label column.

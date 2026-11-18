@@ -394,7 +394,8 @@ test("job 12: a local card's edit modal shows Machine = Local, after Project", a
 // ---- job 13: the project picker lists remote-bound projects; the route is decided from the CURRENT pick ----
 const LID2 = "P-ONREM2";
 const withSecondRemote = () => host.state["drover.projects"].push({ id: LID2, name: "second", repos: [], folders: [], branch: "main", remote: { machine: M, projectId: "P-REMOTE2", id: "B-2" } });
-const entry = (v, cx, id) => view(v, cx, `project-${id}`);
+// A closed menu builds no rows (T-MWL7FAABO29): open the project picker to look at its entries.
+const entry = (v, cx, id) => { v.menu = "project"; return view(v, cx, `project-${id}`); };
 
 test("job 13: global create lists local AND remote projects (remote labelled with its machine); remote entries are dead with the reason until writes are on", async () => {
   host.props = { overlay: "ov", edit: null, column: "todo" };
