@@ -33,7 +33,13 @@ beforeEach(async () => {
         const t = sim.terms.get(args[1]);
         if (!t) return { code: 1, stdout: "", stderr: "no terminal" };
         sim.onGet?.(args[1]);
-        return { code: 0, stdout: JSON.stringify({ address: args[1], state: t.killed && !t.b.killFails ? "exited" : "live", argv: [...t.argv, t.task], ...(t.b.noRecord ? {} : { first_message: { sent: t.b.delivered(t.reads) } }) }), stderr: "" };
+        if (t.b.unreadable) return { code: 1, stdout: "", stderr: "hc: unavailable" };
+        // The per-terminal source is FRESH: a lagging terminal (not on the list yet) is live and reports its real status; a stale-list terminal dies only after `dieAfterGets` reads.
+        const lagging = t.reads <= (t.b.lag ?? 0), real = t.b.status(lagging ? (t.b.lag ?? 0) + 1 : t.reads);
+        t.gets = (t.gets ?? 0) + (t.killed ? 1 : 0);
+        const dead = t.killed ? !t.b.killFails && t.gets > (t.b.dieAfterGets ?? 0) : real === "gone";
+        if (dead) t.sawDead = true;
+        return { code: 0, stdout: JSON.stringify({ address: args[1], state: dead ? "exited" : "live", status: dead || real === "running" ? null : real, argv: [...t.argv, t.task], ...(t.b.noRecord ? {} : { first_message: { sent: t.b.delivered(t.reads) } }) }), stderr: "" };
       }
       return { code: 0, stdout: "", stderr: "" };
     },
@@ -43,6 +49,7 @@ beforeEach(async () => {
       const [, op, ...rest] = args;
       sim.calls.push([op, rest]);
       if (op === "tab.new" || op === "space.new") {
+        for (const o of sim.terms.values()) if (o.killed && o.b.needDeadBeforeNextOpen) sim.openedBeforeDeath = (sim.openedBeforeDeath ?? 0) + (o.sawDead ? 0 : 1);
         const address = `t${++sim.n}`, b = sim.plan.shift() ?? OK;
         sim.terms.set(address, { b, reads: 0, killed: false, argv: JSON.parse(rest[rest.indexOf("--argv") + 1]), task: rest[rest.indexOf("--task") + 1] });
         return { code: 0, stdout: JSON.stringify({ terminal: address, space: op === "space.new" ? "sp-new" : rest[rest.indexOf("--space") + 1] }), stderr: "" };
@@ -57,6 +64,7 @@ beforeEach(async () => {
     const out = [{ address: "t1" }]; // a bystander: the person's own terminal is always on the list
     for (const [address, t] of sim.terms) {
       t.reads++;
+      if (t.reads <= (t.b.lag ?? 0) || (t.b.staleList && t.killed)) { if (t.b.staleList && t.killed) out.push({ address }); continue; } // not on the (cached) list yet / the list still shows a killed one
       const gone = t.killed && !t.b.killFails;
       const status = gone ? "gone" : t.b.status(t.reads);
       if (status === "gone") continue;
@@ -336,4 +344,32 @@ test("review 6: a rejected onOpen registration (it returns false) kills that ter
 test("review 6: a check that throws is a stop, not a pass", async () => {
   const r = await go({ check: () => { throw new Error("boom"); } });
   assert.equal(r.cancelled, true); assert.equal(opened().length, 0);
+});
+
+// ---- T-MWM5CE02H07: a just-opened terminal is not on the cached list yet; that is unknown, never "gone".
+test("T-MWM5CE02H07: a working terminal missing from the cached list for the first reads is NOT gone: the barrier asks the terminal itself and resumes", async () => {
+  sim.plan.push({ status: () => "working", delivered: () => true, lag: 3 });
+  const r = await go();
+  assert.equal(r.error, undefined, r.error);
+  assert.equal(opened().length, 1);
+  assert.deepEqual(killed(), []);
+});
+test("T-MWM5CE02H07: a terminal that really exited (the host says so) is still gone", async () => {
+  sim.plan.push({ status: () => "gone", delivered: () => false, lag: 2 }, OK);
+  const r = await go();
+  assert.equal(r.source, "frozen");
+  assert.equal(opened().length, 2);
+});
+test("T-MWM5CE02H07: a list that never shows the killed terminal is no proof of death: the next open waits until the host says it is no longer live", async () => {
+  sim.plan.push({ status: () => "blocked", delivered: () => false, lag: 999, dieAfterGets: 3, needDeadBeforeNextOpen: true }, OK);
+  io.killSettle.tries = 10;
+  const r = await go();
+  assert.equal(r.source, "frozen", r.error);
+  assert.equal(sim.openedBeforeDeath ?? 0, 0, "the fallback opened while the first terminal was still live");
+});
+test("T-MWM5CE02H07: when hc cannot answer, a kill is not confirmed (fail closed), even if the list lacks the terminal", async () => {
+  sim.plan.push({ status: () => "blocked", delivered: () => false, unreadable: true });
+  const r = await go();
+  assert.equal(r.failClosed, true);
+  assert.equal(opened().length, 1);
 });

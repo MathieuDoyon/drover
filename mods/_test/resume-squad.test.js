@@ -638,3 +638,18 @@ test("Cancel after both writes undoes only when the agent is the published leade
   assert.ok((await io.recoverResume("R-OLD", { adopt: false })).ok);
   assert.deepEqual({ agent: card().agent, run: card().run }, { agent: "t55", run: "R-NEW" }, "another agent owns it: not undone");
 });
+
+test("T-MWM5CE02H07: a refused resume (guard error before any open) is shown to the person, not only returned", async () => {
+  host.state["drover.tasks"] = [CARD({ column: "done" })];
+  const r = await io.resumeSquad("R-OLD");
+  assert.ok(r.error, "refused");
+  assert.ok(host.notified.some((n) => n.level === "error" && n.body.includes(r.error)), `notified: ${JSON.stringify(host.notified)}`);
+  const q = await io.resumeSquad("R-OLD", { quiet: true });
+  assert.ok(q.error);
+  assert.equal(host.notified.length, 1, "quiet (the CLI) prints the error itself: no toast");
+});
+test("T-MWM5CE02H07: a just-opened member missing from the cached list is not 'exited': the whole squad resumes", async () => {
+  sim.plan.push({ status: () => "working", delivered: () => true, lag: 999 });
+  const r = await io.resumeSquad("R-OLD");
+  assert.equal(r.error, undefined, r.error);
+});

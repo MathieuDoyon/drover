@@ -13,7 +13,9 @@ export function makeSim(host, { first = 100 } = {}) {
       const t = sim.terms.get(args[1]);
       if (!t) return { code: 1, stdout: "", stderr: "no terminal" };
       sim.onGet?.(args[1]);
-      return { code: 0, stdout: JSON.stringify({ address: args[1], state: t.killed && !t.b.killFails ? "exited" : "live", argv: [...t.argv, t.task],
+      const lagging = t.reads <= (t.b.lag ?? 0), real = t.b.status(lagging ? (t.b.lag ?? 0) + 1 : t.reads); // the per-terminal source is fresh: a lagging terminal is live, not "gone"
+      const dead = t.killed ? !t.b.killFails : real === "gone";
+      return { code: 0, stdout: JSON.stringify({ address: args[1], state: dead ? "exited" : "live", status: dead || real === "running" ? null : real, argv: [...t.argv, t.task],
         ...(t.b.noRecord ? {} : { first_message: { sent: t.b.delivered(t.reads) } }) }), stderr: "" };
     }
     return { code: 0, stdout: "", stderr: "" };
@@ -42,6 +44,7 @@ export function makeSim(host, { first = 100 } = {}) {
     const out = [{ address: "t900" }];
     for (const [address, t] of sim.terms) {
       t.reads++;
+      if (t.reads <= (t.b.lag ?? 0)) continue; // not on the cached list yet
       const status = t.killed && !t.b.killFails ? "gone" : t.b.status(t.reads);
       if (status === "gone") continue;
       out.push({ address, ...(status === "running" ? {} : { status }) });

@@ -503,7 +503,7 @@ export async function ensureWorktree(run) {
 // so a crashed attempt can be recovered by hand (Recover) and found by its token. token rides in every first message.
 export const RESUMES_KEY = "drover.resumes";
 export const resumeSettle = { tries: 20, ms: 1000 }; // the barrier: polls of the live list (ms apart; the host runs the wait)
-export const killSettle = { tries: 10, ms: 300 };
+export const killSettle = { tries: 50, ms: 300 }; // 15 s: Codex takes seconds to exit after a kill
 const resumes = () => { const r = shared(RESUMES_KEY); return r && typeof r === "object" && !Array.isArray(r) ? r : {}; };
 // The lease: an attempt is alive while its heartbeat (renewed by its own work: every check, open, poll and park) is younger than this.
 const staleAfter = () => claimTtl + 2 * resumeSettle.tries * resumeSettle.ms;
@@ -582,17 +582,31 @@ async function delivered(address, token) {
   } catch { return false; }
 }
 const statusNow = (address) => { const { live, alive } = liveState(); return memberStatus(address, live, alive); };
+// One terminal's status from a source that cannot lag: the cached list when it shows the terminal, else the terminal's own record (hc get).
+// A terminal opened a moment ago is not on the cached list yet: that is UNKNOWN, never "gone". "gone" only when the host says it is no longer live.
+async function freshStatus(address) {
+  const { live, alive } = liveState();
+  if (alive.has(address)) return live.get(address) ?? "running";
+  try {
+    const r = await hc(["get", address, "--json"]);
+    if (r?.code !== 0) return "unknown";
+    const rec = JSON.parse(r.stdout);
+    if (typeof rec?.state !== "string") return "unknown";
+    if (rec.state !== "live") return "gone";
+    return typeof rec.status === "string" && rec.status ? rec.status : "running";
+  } catch { return "unknown"; }
+}
 async function barrier(address, token, beat) {
   let ok = 0, sent = false;
   for (let i = 0; i < resumeSettle.tries; i++) {
     beat?.(); // the lease: this attempt is still working
-    const st = statusNow(address);
+    const st = await freshStatus(address);
     if (st === "gone") return { error: "the terminal exited" };
     if (st === "blocked") return { error: "the terminal is blocked on a dialog (answer it by hand)" };
     ok = READY.has(st) ? ok + 1 : 0;
     if (ok >= 2) {
       sent = await delivered(address, token);
-      const again = statusNow(address); // a fresh read at the return point, after the await
+      const again = await freshStatus(address); // a fresh read at the return point, after the await
       if (again === "gone") return { error: "the terminal exited while its first message was being checked" };
       if (again === "blocked") return { error: "the terminal is blocked on a dialog (answer it by hand)" };
       if (sent && READY.has(again)) return { ok: true };
@@ -602,8 +616,8 @@ async function barrier(address, token, beat) {
   }
   return { error: ok >= 2 || sent ? "its first message was not delivered" : "it did not report an agent status (not ready)" };
 }
-// terminal.kill, then PROOF it is gone: the host's own record says it is no longer live, or two non-empty lists in a row lack it.
-// An empty or unreadable list proves nothing. false = unknown: the caller fails closed (never a second session of one id).
+// terminal.kill, then PROOF it is gone: the host's own record of THAT terminal (hc get) says it is no longer live.
+// The cached list proves nothing (it lags in both directions), and no answer is not an answer. false = unknown: the caller fails closed (never a second session of one id).
 async function hostSaysDead(address) {
   try {
     const r = await hc(["get", address, "--json"]);
@@ -614,11 +628,8 @@ async function hostSaysDead(address) {
 }
 async function killConfirmed(address) {
   try { await herdr(["terminal.kill", "--terminal", address]); } catch { /* the proof below decides */ }
-  let absent = 0;
   for (let i = 0; i < killSettle.tries; i++) {
-    const { alive, known } = liveSnapshot();
-    if (known && !alive.has(address)) absent++; else absent = 0;
-    if (absent >= 2 || (alive.has(address) || !known ? await hostSaysDead(address) : false)) return true;
+    if (await hostSaysDead(address)) return true;
     if (i < killSettle.tries - 1) await sleep(killSettle.ms);
   }
   return false;
@@ -704,22 +715,25 @@ export async function resumeSquad(ref, { quiet = false } = {}) {
   ref = String(ref ?? "");
   const all = loadRuns();
   const run = /^T-/.test(ref) ? all.filter((r) => r.task === ref).sort((a, b) => (b.started ?? 0) - (a.started ?? 0))[0] : all.find((r) => r.id === ref);
-  if (!run) return { error: `no run for ${ref}` };
+  const refuse = (error) => { if (!quiet) notify({ title: `${run?.task ?? ref} not resumed`, body: error, level: "error" }); return { error }; }; // a refused click must say why (the CLI prints it itself)
+  if (!run) return refuse(`no run for ${ref}`);
   // ---- no await from here to the claim: a second click, the CLI and another mod all see the claim and the attempt record
-  if (!liveSnapshot().known) return { error: "Herdr's terminal list is not ready: try again in a moment" };
+  if (!liveSnapshot().known) return refuse("Herdr's terminal list is not ready: try again in a moment");
   const g = resumeGuard({ tasks: load(), runs: all, alive: liveState().alive, resuming: inFlight() }, run.id);
-  if (g.error) return { error: g.error };
+  if (g.error) return refuse(g.error);
   const task = g.task;
   const owned = ownerError(loadProjects(), task.project);
-  if (owned) return { error: owned };
+  if (owned) return refuse(owned);
   const a = beginAttempt(run.id, task.id);
-  if (a.error) return { error: a.error };
+  if (a.error) return refuse(a.error);
   const c = claimForResume(task.id, a.id);
-  if (c.error) { endAttempt(run.id, a.id); return { error: c.error }; }
+  if (c.error) { endAttempt(run.id, a.id); return refuse(c.error); }
   noteAttempt(run.id, a.id, { prev: c.prev });
   resuming.add(run.id);
   // ----
   const opened = [], dead = new Set(), pending = [], newT = [];
+  const known = new Map(); // address -> the last FRESH status (hc get); stop() is synchronous, so it reads this when the cached list does not show a new terminal yet
+  const refreshNew = async () => { for (const t of newT) known.set(t.address, await freshStatus(t.address)); };
   let lastBeat = 0;
   const beat = (force = false) => { const t = Date.now(); if (force || t - lastBeat >= 5000) { lastBeat = t; noteAttempt(run.id, a.id, { heartbeat: t }); } };
   // Synchronous: asked before every open and after every barrier. A reason = stop (cancel, replaced attempt or claim, the card Done/archived/deleted).
@@ -734,8 +748,9 @@ export async function resumeSquad(ref, { quiet = false } = {}) {
     if (cur.column !== "doing" || cur.project !== task.project) return `the card was moved to ${columnName(cur.column)}`;
     if (newT.length) { // every terminal this attempt already opened must still be there and not stuck on a dialog; an unknown list is NOT evidence
       if (!liveSnapshot().known) return "Herdr's terminal list is not ready: could not confirm the new terminals are up";
+      const { live, alive } = liveState();
       for (const t of newT) {
-        const st = statusNow(t.address);
+        const st = alive.has(t.address) ? memberStatus(t.address, live, alive) : known.get(t.address) ?? "unknown"; // not listed (yet) = what the terminal itself last said
         if (st === "gone") return `${t.name} (${t.address}) exited before the squad was complete`;
         if (st === "blocked") return `${t.name} (${t.address}) is blocked on a dialog (answer it by hand)`;
       }
@@ -751,12 +766,15 @@ export async function resumeSquad(ref, { quiet = false } = {}) {
     for (let i = 0; i < resumeSettle.tries; i++) {
       beat(true);
       if (liveSnapshot().known) {
+        let unsure = false;
         for (const t of newT) {
-          const st = statusNow(t.address);
+          const st = await freshStatus(t.address);
+          known.set(t.address, st);
           if (st === "gone") throw new Error(`${t.name} (${t.address}) exited before the squad was complete`);
           if (st === "blocked") throw new Error(`${t.name} (${t.address}) is blocked on a dialog (answer it by hand)`);
+          if (st === "unknown") unsure = true;
         }
-        return;
+        if (!unsure) return;
       }
       if (i < resumeSettle.tries - 1) await sleep(resumeSettle.ms);
     }
@@ -801,10 +819,10 @@ export async function resumeSquad(ref, { quiet = false } = {}) {
     };
     for (const t of run.terminals.filter((x) => x !== leaderOld)) {
       const m = await open(t, "member");
-      newT.push(m.rec); map.push({ role: t.role, name: t.name, old: t.address, address: m.address });
+      newT.push(m.rec); await refreshNew(); map.push({ role: t.role, name: t.name, old: t.address, address: m.address });
     }
     const lead = await open(leaderOld, "leader");
-    newT.push(lead.rec);
+    newT.push(lead.rec); await refreshNew();
     must();
     // Floating workers, as launch() does: park each member once the leader's tab is open. Recorded only when Herdr confirms the pane is gone.
     const failed = [];
