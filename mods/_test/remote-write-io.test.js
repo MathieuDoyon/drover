@@ -148,3 +148,14 @@ test("cleanup runs when the machine turns fresh (the reconnect): the inbox is li
   await ready();
   assert.equal(om.sawList, true);
 });
+
+// #70: PROTOCOL is 5. The remote writer's gates are minimums (writes >= 2, fields >= 3): omarchy on 4 keeps working, and so does a 5.
+test("remoteWriteState: a protocol 4 or 5 answer keeps writes and the field controls on", async () => {
+  for (const level of [4, 5]) {
+    IO.resetRemoteWriter();
+    await ready(level);
+    const st = IO.remoteWriteState(LID);
+    assert.equal(st.enabled, true, `protocol ${level}`);
+    assert.deepEqual(st.fields, { on: true, tip: null }, `protocol ${level}`);
+  }
+});

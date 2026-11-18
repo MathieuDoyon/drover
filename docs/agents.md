@@ -68,6 +68,7 @@ Squads → **Export…** and **Import…**, or `drover agents export` and `drove
 | `project add "<name>" --repo <abs path> [--branch <b>] [--folder <abs path>]…` | Create a project (for a headless Drover); same request again answers `exists` |
 | `start <T-…\|-> <squad\|agent> [--worktree]` | Open a squad on a task; its leader reports to `$HC_TERMINAL_ID` |
 | `agents export [--out <file>] [--agent <id>]… [--squad <id>]…`, `agents import <file> [--confirm <token>]` | Export or import the herd (import is a dry run until `--confirm`; protocol 4) |
+| `config`, `config max-parallel [<n>]` | List, show or set the parallel-runs limit (1-10); the owner's call, see [Runs](mods/runs.md#parallel-runs); protocol 5 |
 | `wake <t\|T-…> <when> "<msg>"`, `wake … every <30m\|2h\|1d> "<msg>"`, `wakes`, `wake off\|on\|rm <W-…>` | Wakeups |
 
 Reads come from `shared.json`. Writes go to `<home>/data/drover-inbox`; an open Tasks, Board or Wakeups mod applies them (otherwise: `queued`).

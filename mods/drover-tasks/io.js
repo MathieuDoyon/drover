@@ -10,7 +10,7 @@ import { WAKE_KEY, reschedule, addWake, decide, setStatus, wakeOp } from "./wake
 import { apply as applyKey } from "./keys.js";
 import * as HE from "./herd-export.js";
 import { resolveWorkFolder, moveOffers, parseMove } from "./workfolder.js";
-import { bind as bindCfg, load as loadCfg, ready as cfgReady, cfg } from "./config.js";
+import { bind as bindCfg, load as loadCfg, ready as cfgReady, cfg, KEY as CONFIG_KEY, configGet, configSet } from "./config.js";
 import { soulHash } from "./herd-export.js";
 import { exportName } from "./herd-share.js";
 import { AGENTS_KEY, RUNS_KEY, config, plan, argv, leaderPrompt, createCardsPrompt, memberPrompt, worktreeOf, terminalName, startGuard, projectOfDrover, isLiveDrover, activeFor, reconcile, runFolder, markEnded, orphanedWorkers, terminalRecord, agentKind, newUuid, withSessionFlag, withMarker, pickCodexSession, liveStatuses, memberStatus, resumeCandidates, resumeToken, resumeGuard, resumePrompt, resumedTerminal, resumedRun, linkResumed, sessionMarker, claimTtl, launchArgv, parseAgentEnv, envProblem, BIND_KEY, droverChoices, defaultDrover, maxRuns, keptRuns, pruneRuns } from "./runs.js";
@@ -1387,6 +1387,8 @@ async function drain() {
     // The only await before the gate (the Jira site for `link`), so the compare and the apply below stay in one turn.
     const jira = cmd?.op === "link" ? await jiraSite().catch(() => "") : "";
     // The other await before the gate: the soul hashes and env-file checks of agents-import / agents-export (read once, the write below is synchronous).
+    // And one more for config-get / config-set: the mod.json layer of drover-runs (an inherited value), so the value reported is the one the scheduler uses.
+    if (cmd?.op === "config-get" || cmd?.op === "config-set") await loadPolicy("drover-runs").catch(() => {});
     const herd = cmd?.op === "agents-import" ? await importFacts(idsFor(cmd.file)) : cmd?.op === "agents-export" ? await soulFacts() : null;
     // ---- no await from here to the apply: bad -> expired -> stale (against the rev of the card as it is NOW) -> apply ----
     const tasks = load();
@@ -1397,6 +1399,10 @@ async function drain() {
       // The probe. A sender must get `ok: protocol 2` or more before it sends ifRev or ttlMs (3 before the edit/add fields): an OLD consumer ignores both fields and applies the
       // request unconditionally (it answers this probe `error: Unknown drover command`). Changes no state.
       reply = `ok: protocol ${PROTOCOL}`;
+    } else if (cmd?.op === "config-get") {
+      reply = configGet(cmd, cfg).reply;
+    } else if (cmd?.op === "config-set") {
+      reply = configSetOp(cmd);
     } else if (cmd?.op === "agents-import") {
       reply = agentsImport(cmd, herd);
     } else if (cmd?.op === "agents-export") {
@@ -1443,6 +1449,18 @@ async function drain() {
     }
     await fs.writeFile(path.replace(/\.json$/, ".result"), reply);
   }
+}
+
+// config-set (protocol 5): the only config write an agent has. Local only (never in the remote writer's ops). Synchronous: the compare and the write share one turn.
+// `from` is a claimed terminal, not a verified identity: the announcement says so. Raising the limit is policy (the soul rule) plus this visibility, not authentication.
+function configSetOp(cmd) {
+  if (cmd.ttlMs === undefined) return "error: config-set needs ttlMs: a queued change to a global setting must expire";
+  const r = configSet(shared(CONFIG_KEY), cmd, cfg);
+  if (!r.shared) return r.reply;
+  setShared(CONFIG_KEY, r.shared);
+  const who = terminalName(loadRuns(), String(cmd.from ?? "")) || "unknown";
+  notify({ title: "Parallel runs changed", body: `${r.name} ${r.from} -> ${r.to} (requested by ${who}, unverified). Reset it in Drover > Config.`, level: "info" });
+  return r.reply;
 }
 
 // The agents and squads of THIS machine, for assignee checks (ids only; nothing else of the config leaves this function).

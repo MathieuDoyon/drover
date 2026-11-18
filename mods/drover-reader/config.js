@@ -107,3 +107,39 @@ export function resetOverride(sharedObj, mod, key) {
   else delete base[mod];
   return base;
 }
+
+// ---- the settings an agent may change on the owner's request (inbox ops config-get / config-set, protocol 5, #70) ----
+// A deliberate table: one entry per setting. Everything else (the Jira site, work folder, keys...) stays dialog-only. The CONSUMER enforces it
+// (the CLI's parsing is only a convenience), and `setOverride` alone is not this boundary: it validates every schema key.
+export const AGENT_SETTABLE = Object.freeze([Object.freeze(["drover-runs", "max_parallel"])]);
+const agentField = (key) => (typeof key === "string" ? AGENT_SETTABLE.find(([m, k]) => `${m}.${k}` === key) : undefined);
+const shortOf = (v) => { const s = typeof v === "string" ? v : JSON.stringify(v) ?? "undefined"; return s.length > 40 ? `${s.slice(0, 40)}...` : s; };
+const rangeOf = (f) => `${f.min}-${f.max}`;
+
+// One line per setting: `<mod>.<key> <value> (<title>, <range>, applies at once)`. effective(mod, key) = the value the scheduler uses
+// (cfg() after the mod.json layer is loaded), never shared.json alone.
+export function agentSettingLine([mod, key], effective) {
+  const f = field(mod, key);
+  return `${mod}.${key} ${effective(mod, key)} (${f.title}, ${rangeOf(f)}${f.live ? ", applies at once" : ""})`;
+}
+
+// config-get: { reply } always. No key lists every agent-settable setting.
+export function configGet(cmd, effective) {
+  if (cmd.key === undefined) return { reply: ["ok: settings an agent may change on the owner's request", ...AGENT_SETTABLE.map((s) => agentSettingLine(s, effective))].join("\n") };
+  const s = agentField(cmd.key);
+  return s ? { reply: `ok: ${agentSettingLine(s, effective)}` } : { reply: `error: ${shortOf(cmd.key)} is not a setting an agent may read or change here` };
+}
+
+// config-set. Pure: returns { reply } (an error or a no-op) or { reply, shared, from, to } (write `shared`, then announce).
+// The value must be a JSON number (a string "4" is refused). No-op = the request equals the effective value AND an override already says so;
+// otherwise the override is written, so a requested 2 over an inherited 7 writes 2.
+export function configSet(sharedObj, cmd, effective) {
+  const s = agentField(cmd.key);
+  if (!s) return { reply: `error: ${shortOf(cmd.key)} is not a setting an agent may change` };
+  const [mod, key] = s, f = field(mod, key), name = `${mod}.${key}`;
+  if (typeof cmd.value !== "number" || !Number.isInteger(cmd.value)) return { reply: `error: ${name}: value must be a whole number (got ${shortOf(cmd.value)})` };
+  if (cmd.value < f.min || cmd.value > f.max) return { reply: `error: ${name}: value must be between ${f.min} and ${f.max} (got ${cmd.value})` };
+  const from = effective(mod, key);
+  if (from === cmd.value && own(plain(sharedObj)[mod], key) && validate(f, sharedObj[mod][key]).ok && sharedObj[mod][key] === cmd.value) return { reply: `ok: ${name} is already ${from}` };
+  return { reply: `ok: ${name} ${from} -> ${cmd.value}`, shared: setOverride(sharedObj, mod, key, cmd.value), name, from, to: cmd.value };
+}

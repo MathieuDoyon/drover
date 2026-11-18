@@ -247,3 +247,20 @@ test("export through the consumer (no node): same ~ rewrite and warnings", async
   assert.equal(JSON.parse(r.stdout).agents[0].command, `${SONNET} --add-dir ~/notes`);
   assert.match(r.stderr, /warning: wrangler · command · local-path/);
 });
+
+// #70 raised PROTOCOL to 5. Every gate is a minimum: an install on 4 (omarchy) keeps working, and so does 5.
+test("agents export passes the protocol gate at 4 and at 5 (a minimum, not an equality)", async () => {
+  for (const level of [4, 5]) {
+    responder = setInterval(() => {
+      for (const nm of readdirSync(inbox).filter((x) => x.endsWith(".json"))) {
+        const cmd = JSON.parse(readFileSync(join(inbox, nm), "utf8"));
+        unlinkSync(join(inbox, nm));
+        writeFileSync(join(inbox, nm.replace(/\.json$/, ".result")), cmd.op === "protocol" ? `ok: protocol ${level}` : `ok: exported 0 agents, 0 squads\n---\n{"a":1}`);
+      }
+    }, 5);
+    const r = await cli(["agents", "export"], NO_NODE);
+    assert.equal(r.code, 0, `protocol ${level}: ${r.stderr}`);
+    assert.equal(r.stdout.trim(), '{"a":1}');
+    clearInterval(responder); responder = null;
+  }
+});

@@ -198,3 +198,13 @@ test("souls: paths that agents write point at <work folder>, not <repo>/.drover 
 test("drover soul: in repo mode the plan stays at <repo>/.drover/<epic>/plan.md", () => {
   assert.match(soul("drover"), /repo mode[^\n]*`<repo>\/\.drover\/<epic>\/plan\.md`[^\n]*existing plan logs keep working/);
 });
+
+// --- #70: the parallel-runs limit is the owner's ---
+test("_herd.md: rule 12 lets an agent change the limit only on the owner's plain-text request, never to unblock itself", () => {
+  const h = soul("_herd");
+  const m = h.match(/\n12\. \*\*The parallel-runs limit is the owner's[^\n]*/);
+  assert.ok(m, "rule 12 present");
+  for (const s of ["drover config max-parallel <n>", "drover-runs.max_parallel", "only when the owner asks", "plain text in your own terminal", "Never raise it to unblock yourself", "`hc` message", "STATUS: HELP", "Review or Blocked keep their slot"]) assert.ok(m[0].includes(s), s);
+  assert.ok(h.includes("| Parallel runs limit | `drover config max-parallel`"), "tools table row");
+  assert.ok(h.indexOf("12. **The parallel-runs limit") < h.indexOf("## 5. Honesty"), "rule 12 is in the hard rules");
+});

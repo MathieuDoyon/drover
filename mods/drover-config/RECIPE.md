@@ -9,6 +9,7 @@ An 860x620 dialog. Left: the list of mods plus `General` and `Shortcuts`. Right:
 ## How it behaves
 
 - Writes only the shared key `drover.config` (`{ "<mod>": { "<key>": value } }`), and only the values you changed; `Reset` puts the default back. A draft stays while another copy saves.
+- One setting is also writable by an agent on the owner's request: `drover-runs.max_parallel` (`drover config max-parallel <n>`, inbox op `config-set`, protocol 5). It writes the same override in `drover.config` as the dialog, and the dialog shows it as changed with `Reset`. Every other setting stays dialog-only.
 - `General` holds the Work folder (`project` or `repo`) with a two-step "Move existing .drover files here": the button asks, the Move click does it.
 - `Shortcuts` reads and writes `keys.json` (read again after every write): sidebar toggle `cmd-alt-b` in `layout:drover`, create task `cmd-shift-c` in `global`.
 - Settings include each screen's `enabled`, Board `visible_columns`, Jira `site` / `jql` / `pages`, GitHub scopes and `limit`, Room `refresh_minutes`, Runs `max_parallel`, Wakeups `min_repeat_minutes` / `expiry_hours`.
@@ -53,7 +54,7 @@ An 860x620 dialog. Left: the list of mods plus `General` and `Shortcuts`. Right:
 | `drover-room` | `refresh_minutes` | int | 1-1440 | `5` | live | Minimum age before a run's context reloads |
 | `drover-room` | `pr_cap` | int | 1-100 | `10` | live | Most pull requests linked from the issue that the Room loads for a run |
 | `drover-room` | `kept_contexts` | int | 1-1000 | `30` | live | Runs whose loaded issue and PR context the Room remembers |
-| `drover-runs` | `max_parallel` | int | 1-10 | `2` | live | Squad runs active at once for each project |
+| `drover-runs` | `max_parallel` | int | 1-10 | `2` | live | Squad runs active at once for each project. A card in Review or Blocked keeps its slot while its run is active. An agent can change this on the owner's request (drover config max-parallel) |
 | `drover-runs` | `kept` | int | 10-5000 | `200` | live | Ended runs remembered in the list |
 | `drover-wakeups` | `min_repeat_minutes` | int | 1-1440 | `5` | live | A repeating wakeup may not fire more often than this |
 | `drover-wakeups` | `expiry_hours` | int | 1-168 | `2` | live | A wakeup not delivered this long after its time expires |

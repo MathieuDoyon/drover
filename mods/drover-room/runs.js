@@ -632,7 +632,7 @@ export function startGuard(c, cmd) {
   if (t.column !== "todo") return { error: `${t.id} is not Ready (it is in ${columnName(t.column)})` };
   if (t.project !== project) return { error: `${t.id} is not in your project` };
   if (!repoOf(t, c.projects)) return { error: `${t.id} has no repo: add one to its project` };
-  if (activeFor(c.runs, c.tasks, project, c.live, c.alive) >= maxRuns()) return { error: `no free slot: ${maxRuns()} runs are active` };
+  if (activeFor(c.runs, c.tasks, project, c.live, c.alive) >= maxRuns()) return { error: `no free slot: limit ${maxRuns()} reached for this project (setting drover-runs.max_parallel, 1-10, each project). Only the owner may raise it: ask, then run: drover config max-parallel <n>` };
   return { ok: true };
 }
 

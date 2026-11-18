@@ -92,7 +92,7 @@ export const SCHEMA = [
   { mod: "drover-room", key: "kept_contexts", title: "Kept runs", type: "int", default: 30, min: 1, max: 1000, live: true,
     description: "Runs whose loaded issue and PR context the Room remembers." },
   { mod: "drover-runs", key: "max_parallel", title: "Parallel runs", type: "int", default: 2, min: 1, max: 10, live: true,
-    description: "Squad runs active at once for each project." },
+    description: "Squad runs active at once for each project. A card in Review or Blocked keeps its slot while its run is active. An agent can change this on your request (drover config max-parallel)." },
   { mod: "drover-runs", key: "kept", title: "Kept runs", type: "int", default: 200, min: 10, max: 5000, live: true,
     description: "Ended runs remembered in the list. Older ended runs are dropped; a run that is still going is never dropped." },
   { mod: "drover-wakeups", key: "min_repeat_minutes", title: "Shortest repeat (minutes)", type: "int", default: 5, min: 1, max: 1440, live: true,

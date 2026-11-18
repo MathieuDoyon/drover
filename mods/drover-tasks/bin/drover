@@ -16,6 +16,9 @@ usage: drover tasks [tag|column] [--project <id|name>]   list tasks (id, column,
        drover agents export [--out <file>] [--agent <id>]… [--squad <id>]…   export agents and squads as JSON (stdout, or a new private file; node reads shared.json, else an open mod answers); never exports env values; a secret blocks it
        drover agents import <file> [--confirm <token>]   dry run by default (prints the plan and a token, writes nothing); --confirm <token> applies it.
                                                   Adds new ids, skips identical, keeps yours on a clash. Copy/overwrite: Squads screen. Needs Drover mods with protocol 4
+       drover config                              list the settings an agent may change on the owner's request, with the value in force (needs protocol 5)
+       drover config max-parallel [<n>]           show / set drover-runs.max_parallel (1-10, squad runs active at once for each project; applies at once).
+                                                  RAISE IT ONLY WHEN THE OWNER ASKS in plain text in your terminal, never to unblock yourself. The change is announced to the owner
        drover add "<title>" [--desc "<text>"] [--tag <t>]… [--column backlog|ready] [--priority P0-P3] [--project <id|name>] [--assignee <agent|squad>:<id>] [--parent <T-…>]
        drover move <T-…> <backlog|ready|in-progress|review|blocked|done>   (an agent cannot move to done: the owner does)
        drover next                                queue mode: free slots + Ready cards of your project (starts nothing)
@@ -129,13 +132,36 @@ send() {  # body, seconds to wait for the answer, optional name suffix
 }
 # Agents export/import: this script only carries text. Validation, the secret scan and the merge rules live in the consuming mod (JS).
 # The probe first: a Drover without protocol 4 is refused cleanly (an old consumer would answer the new ops with "Unknown drover command").
-# Returns 0 (protocol 4+), 1 (too old, message printed) or 2 (no mod answered).
-protocol4() {
-  r="$(send '{"op":"protocol","ttlMs":60000}' "${DROVER_AGENTS_WAIT:-5}" -probe)" || true  # send() answers, cleans up its result and prints "queued:" when nobody answers
-  case "$r" in queued:*) return 2 ;; esac
-  if [[ "$r" =~ ^ok:\ protocol\ ([0-9]+)$ ]] && [ "${BASH_REMATCH[1]}" -ge 4 ]; then return 0; fi
-  echo "error: this machine's Drover mods are too old for agents export/import (answer: ${r%%$'\n'*}); update the mods (protocol 4 needed)" >&2
+# Returns 0 (protocol N+), 1 (too old, message printed) or 2 (no mod answered). protocol_need <N> <what> [cleanup]: with cleanup the unanswered probe file is removed (a probe left queued would answer later).
+protocol_need() {
+  r="$(send '{"op":"protocol","ttlMs":60000}' "${DROVER_CONFIG_WAIT:-${DROVER_AGENTS_WAIT:-5}}" -probe)" || true  # send() answers, cleans up its result and prints "queued:" when nobody answers
+  case "$r" in queued:*) [ -z "${3:-}" ] || rm -f "$home/data/drover-inbox/"*-$$-probe.json; return 2 ;; esac
+  if [[ "$r" =~ ^ok:\ protocol\ ([0-9]+)$ ]] && [ "${BASH_REMATCH[1]}" -ge "$1" ]; then return 0; fi
+  echo "error: this machine's Drover mods are too old for $2 (answer: ${r%%$'\n'*}); update the mods (protocol $1 needed)" >&2
   return 1
+}
+protocol4() { protocol_need 4 "agents export/import"; }
+# drover config: the consumer holds the allowlist and every check; this only carries text. The probe comes BEFORE the request, so with no consumer or an old one
+# nothing is queued. A change to a global setting must never apply later by surprise: it carries a 60 s ttl, and an unanswered set is reported as unknown.
+config() {
+  [ $# -le 2 ] || usage
+  case "${1:-}" in
+    "") body='{"op":"config-get"}' ;;
+    max-parallel)
+      if [ $# -eq 1 ]; then body='{"op":"config-get","key":"drover-runs.max_parallel"}'
+      else
+        v="$2"; [ -n "$v" ] || usage
+        if [[ "$v" =~ ^-?[0-9]+(\.[0-9]+)?$ ]]; then vj="$v"; else vj="$(json "$v")"; fi  # a number goes as a number; anything else is sent as text and refused by the consumer
+        body="{\"op\":\"config-set\",\"key\":\"drover-runs.max_parallel\",\"value\":$vj,\"from\":$(json "${HC_TERMINAL_ID:-}"),\"ttlMs\":60000}"
+      fi ;;
+    *) usage ;;
+  esac
+  rc=0; protocol_need 5 "drover config" cleanup || rc=$?
+  if [ "$rc" -eq 2 ]; then echo "error: no Drover mod is open, nothing changed (open Drover, then run it again)" >&2; exit 1; fi
+  [ "$rc" -eq 0 ] || exit 1
+  rc=0; res="$(send "$body" "${DROVER_CONFIG_WAIT:-5}" -config)" || rc=$?
+  case "$res" in queued:*) echo "error: no answer from Drover; the change is not confirmed (it may still apply; the request expires 60 s after it was sent). Check: drover config max-parallel" >&2; exit 1 ;; esac
+  printf '%s\n' "$res"; exit "$rc"
 }
 agents_cmd() {  # the op as one JSON line, built in python from argv/file: the file never goes through a shell variable or argv
   python3 - "$@" <<'PY'
@@ -227,6 +253,7 @@ with os.fdopen(fd, "wb") as f: f.write(sys.stdin.buffer.read())' "$out" || exit 
 }
 case "${1:-}" in
   agents) agents "${@:2}" ;;
+  config) config "${@:2}" ;;
   tasks) read_shared tasks "${@:2}" ;;
   task) [ $# -eq 2 ] || usage; read_shared task "$2" ;;
   squads) read_shared squads ;;

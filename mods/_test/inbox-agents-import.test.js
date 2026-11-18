@@ -54,9 +54,9 @@ const tokenOf = (reply) => /^token: ([0-9a-f]{64})$/m.exec(reply)?.[1];
 const cfg = () => host.state[CFG];
 const snap = () => JSON.stringify(cfg());
 
-test("probe answers ok: protocol 4", async () => {
-  assert.equal(S.PROTOCOL, 4);
-  assert.equal(await send({ op: "protocol" }), "ok: protocol 4");
+test("probe answers ok: protocol 5", async () => {
+  assert.equal(S.PROTOCOL, 5);
+  assert.equal(await send({ op: "protocol" }), "ok: protocol 5");
 });
 
 test("dry run writes nothing and returns the plan text and a token", async () => {
