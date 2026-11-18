@@ -34,7 +34,9 @@ const { launch } = await import("../_lib/io.js");
 const WRAP = "/app/mods/drover-agents/bin/drover-env";
 const envFile = (id, body = `{"version":1,"env":{"GH_TOKEN":{"value":"${FAKE}","secret":true}}}`) =>
   fs.writeFile(path.join(tmp, ".config/drover-herdr/agents", id + ".json"), body, { mode: 0o600 });
-const argvs = () => calls.filter(([op]) => op === "tab.new" || op === "space.new").map(([, r]) => JSON.parse(r[r.indexOf("--argv") + 1]));
+// Claude also gets a Drover-made --session-id <uuid> (session-record.test.js covers it): dropped here so these tests stay about the wrapper.
+const noSession = (a) => { const i = a.indexOf("--session-id"); return i < 0 ? a : [...a.slice(0, i), ...a.slice(i + 2)]; };
+const argvs = () => calls.filter(([op]) => op === "tab.new" || op === "space.new").map(([, r]) => noSession(JSON.parse(r[r.indexOf("--argv") + 1])));
 
 test("no env file: argv is unchanged", async () => {
   await launch(null, { kind: "squad", id: "s1" });

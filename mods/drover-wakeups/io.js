@@ -13,7 +13,7 @@ import { resolveWorkFolder, moveOffers, parseMove } from "./workfolder.js";
 import { bind as bindCfg, load as loadCfg, ready as cfgReady, cfg } from "./config.js";
 import { soulHash } from "./herd-export.js";
 import { exportName } from "./herd-share.js";
-import { AGENTS_KEY, RUNS_KEY, config, plan, argv, leaderPrompt, createCardsPrompt, memberPrompt, worktreeOf, terminalName, startGuard, projectOfDrover, isLiveDrover, activeFor, reconcile, runFolder, markEnded, orphanedWorkers, terminalRecord, liveStatuses, launchArgv, parseAgentEnv, envProblem, BIND_KEY, droverChoices, defaultDrover, maxRuns, keptRuns, pruneRuns } from "./runs.js";
+import { AGENTS_KEY, RUNS_KEY, config, plan, argv, leaderPrompt, createCardsPrompt, memberPrompt, worktreeOf, terminalName, startGuard, projectOfDrover, isLiveDrover, activeFor, reconcile, runFolder, markEnded, orphanedWorkers, terminalRecord, agentKind, newUuid, withSessionFlag, withMarker, pickCodexSession, liveStatuses, launchArgv, parseAgentEnv, envProblem, BIND_KEY, droverChoices, defaultDrover, maxRuns, keptRuns, pruneRuns } from "./runs.js";
 
 export const load = () => list(shared(KEY));
 
@@ -238,6 +238,62 @@ async function parkConfirmed(address) {
   return !panes().some((p) => p.terminal === address);
 }
 
+// ---- Session ids (resume needs them). Only ids and file paths are handled here: grep runs with -l, so no transcript text is ever read.
+// Claude gets a Drover-made --session-id. Codex has no such flag: its launch prompt carries a per-terminal marker and the rollout file that holds it names the session.
+export const sessionSettle = { tries: 20, ms: 1500 }; // Codex writes its rollout a moment after start: bounded retries
+// The label is what Reader reads. A missing hc or a failed label never fails a launch, and nothing is logged (no ids in logs).
+async function labelSession(address, id) {
+  try { await hc(["label", address, `revive.session=${id}`]); } catch { /* best effort */ }
+}
+// Rollout files sit in sessions/YYYY/MM/DD (host-local day): yesterday, today and tomorrow in both UTC and local time cover midnight and zone skew.
+function codexDays(now) {
+  const two = (n) => String(n).padStart(2, "0"), days = new Set();
+  for (const off of [-1, 0, 1]) {
+    const d = new Date(now + off * 86400000);
+    days.add(`${d.getUTCFullYear()}/${two(d.getUTCMonth() + 1)}/${two(d.getUTCDate())}`);
+    days.add(`${d.getFullYear()}/${two(d.getMonth() + 1)}/${two(d.getDate())}`);
+  }
+  return [...days];
+}
+// The session id of the one rollout file that holds the marker, or null (nothing yet, 2+ files, grep failed: never a guess).
+async function findCodexSession(token) {
+  try {
+    const roots = codexDays(Date.now()).map((d) => `${home()}/.codex/sessions/${d}`);
+    const ls = await exec("ls", ["-d", ...roots], { timeout: 10000 });
+    const have = new Set(String(ls?.stdout ?? "").split("\n").map((l) => l.trim()));
+    // Every root must be accounted for: listed, or named in a "No such file" line (a day folder that does not exist yet). Any other failure
+    // (permission, timeout) may hide a second candidate, so the match could not be called unique: unknown.
+    const absent = String(ls?.stderr ?? "").split("\n").filter((l) => /No such file or directory/.test(l));
+    if (!roots.every((r) => have.has(r) || absent.some((l) => l.includes(r)))) return null;
+    const dirs = roots.filter((r) => have.has(r));
+    if (!dirs.length) return null;
+    const r = await exec("grep", ["-r", "-l", "-F", "-s", "--include=rollout-*.jsonl", "-e", token, ...dirs], { timeout: 30000 });
+    if (r?.code !== 0) return null; // 1 = no match yet; anything else is unknown, even with output
+    return pickCodexSession(String(r.stdout ?? "").split("\n"));
+  } catch { return null; }
+}
+// Re-reads the shared runs, sets the id on that run's terminal only, and writes. A pruned run is not brought back; the other fields (ended, parked, reaped) stay.
+function patchSession(runId, address, session, kind) {
+  const runs = loadRuns();
+  const mine = (r) => r.id === runId && r.terminals?.some((x) => x.address === address); // run ids come from the clock: the address tells two same-millisecond runs apart
+  const t = runs.find(mine)?.terminals.find((x) => x.address === address);
+  if (!t || t.session) return false;
+  setShared(RUNS_KEY, runs.map((r) => (!mine(r) ? r : { ...r, terminals: r.terminals.map((x) => (x.address === address ? { ...x, session, kind } : x)) })));
+  return true;
+}
+// Detached from launch(): never awaited by it. The runtime that launched owns the search: if it is reloaded first, the id stays unknown.
+async function discoverSessions(runId, pending) {
+  await Promise.all(pending.map(async ({ address, token }) => {
+    try {
+      for (let i = 0; i < sessionSettle.tries; i++) {
+        const id = await findCodexSession(token);
+        if (id) { if (patchSession(runId, address, id, "codex")) await labelSession(address, id); return; }
+        if (i < sessionSettle.tries - 1) await exec("sleep", [String(sessionSettle.ms / 1000)]); // no setTimeout in a mod: the host runs the wait
+      }
+    } catch { /* unknown stays unknown */ }
+  }));
+}
+
 async function herdr(args) {
   let out = null;
   try { out = JSON.parse((await exec("herdr-app", ["do", ...args])).stdout); } catch {}
@@ -347,15 +403,23 @@ export async function launch(task, runner, { worktree, reportTo, project, create
     const folder = runFolder(wt?.path, chosen ?? repoOf({ project: runProject }, loadProjects()), boss?.cwd);
     if (!wf) wf = await workFolderFor({ mode: "repo", runId, worktree: wt?.path, repo: projRepo ?? folder, project: runProj });
     ctx.workFolder = wf?.path ?? null;
+    const pending = []; // Codex terminals whose session id is looked up after the run is saved
     const open = async (agent, prompt) => {
+      const kind = agentKind(agent.command);
+      let cmd = argv(agent.command), session = null, token = null;
+      if (kind === "claude") { const id = newUuid(), flagged = withSessionFlag(cmd, id); if (flagged) { cmd = flagged; session = id; } } // a profile's own session/resume flag stays: id unknown
+      else if (kind === "codex") { token = newUuid().replace(/-/g, ""); prompt = withMarker(prompt, token); }
+      const cwd = wt && !terminals.length ? wt.path : folder; // the folder this terminal opens in; null = Herdr's default, not recorded
       const name = `${task ? task.id + " " : ""}${agent.role === "leader" ? agent.name : agent.role.split(/[.:(]/)[0].trim()}`.slice(0, 40);
       // Env file present: the wrapper runs the agent. A wrapper failure exits non-zero and the plain agent never starts.
-      const args = ["--argv", JSON.stringify(launchArgv(agent.id, argv(agent.command), ENV_WRAPPER(), await hasAgentEnv(agent.id))), "--task", prompt];
+      const args = ["--argv", JSON.stringify(launchArgv(agent.id, cmd, ENV_WRAPPER(), await hasAgentEnv(agent.id))), "--task", prompt];
       const out = wt && !terminals.length
         ? await herdr(["space.new", "--name", `${task.id} ${task.title}`.slice(0, 40), "--folder", wt.path, "--tab", name, ...args])
         : await herdr(["tab.new", "--name", name, ...(space ? ["--space", space] : []), ...(folder ? ["--folder", folder] : []), ...args]);
       if (out.space) space = out.space;
-      terminals.push(terminalRecord(out.terminal, agent, Date.now()));
+      terminals.push(terminalRecord(out.terminal, agent, Date.now(), undefined, { session, kind, cwd }));
+      if (session) await labelSession(out.terminal, session);
+      if (token) pending.push({ address: out.terminal, token });
       return out.terminal;
     };
     for (const m of create ? [] : p.members) m.address = await open(m, memberPrompt(task, m, ctx));
@@ -377,6 +441,7 @@ export async function launch(task, runner, { worktree, reportTo, project, create
       const current = load().find((x) => x.id === task.id);
       save(update(load(), task.id, { agent: leader, run: run.id, column: "doing", claimedAt: null, ...(current && !current.assignee && runner ? { assignee: { kind: runner.kind, id: runner.id } } : {}) }));
     }
+    if (pending.length && home()) void discoverSessions(run.id, pending); // after the run is saved; launch does not wait for it
     return run;
   } catch (e) {
     const error = String(e?.message ?? e);

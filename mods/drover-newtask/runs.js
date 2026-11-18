@@ -284,11 +284,51 @@ export function modelOf(command) {
   return null;
 }
 
+// ---- Session id per terminal (resume needs it). The id is not a secret; the transcript behind it is: only ids and paths are handled here.
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+const baseName = (p) => String(p ?? "").split("/").pop();
+// "claude" | "codex" from argv[0] of a command (string or argv array); anything else null.
+export function agentKind(command) {
+  const a = Array.isArray(command) ? command : argv(command);
+  const b = baseName(a[0]);
+  return b === "claude" || b === "codex" ? b : null;
+}
+// A v4 uuid. The mod runtime may lack crypto.randomUUID (no node:crypto): fall back to Math.random (an id, not a secret).
+export function newUuid() {
+  const c = globalThis.crypto;
+  if (typeof c?.randomUUID === "function") { try { return c.randomUUID(); } catch { /* fall through */ } }
+  const h = (n) => Array.from({ length: n }, () => Math.floor(Math.random() * 16).toString(16)).join("");
+  return `${h(8)}-${h(4)}-4${h(3)}-${"89ab"[Math.floor(Math.random() * 4)]}${h(3)}-${h(12)}`;
+}
+// Claude only: `--session-id <id>` right after argv[0]. A profile that sets its own session, resume or continue flag
+// (before any `--`) is never overridden: null = the id is unknown. Other agents and a bad id also give null.
+export function withSessionFlag(args, id) {
+  if (agentKind(args) !== "claude" || !UUID.test(String(id))) return null;
+  for (const a of args.slice(1)) {
+    if (a === "--") break;
+    if (a === "--session-id" || a.startsWith("--session-id=") || a === "--resume" || a.startsWith("--resume=") || a === "-r" || a === "--continue" || a === "-c") return null;
+  }
+  return [args[0], "--session-id", id, ...args.slice(1)];
+}
+// Codex has no flag: one marker line in the launch prompt lets the launcher find the rollout file afterwards.
+export const sessionMarker = (token) => `drover-launch-marker: ${token}`;
+export const withMarker = (prompt, token) => `${prompt}\n\n${sessionMarker(token)}`;
+// Paths of the rollout files that hold one marker. Exactly one file gives its uuid (rollout-<time>-<uuid>.jsonl); 0 or 2+ give null (never a guess).
+export function pickCodexSession(paths) {
+  const hits = [...new Set((paths ?? []).map((p) => String(p).trim()).filter((p) => /(^|\/)rollout-.*-[0-9a-f-]{36}\.jsonl$/.test(p)))];
+  const id = hits.length === 1 ? hits[0].match(/-([0-9a-f-]{36})\.jsonl$/)?.[1] : null;
+  return id && UUID.test(id) ? id : null;
+}
+// The command that reopens a session by hand. null = unknown kind or id.
+export const resumeCommand = (kind, id) => (UUID.test(String(id)) ? { claude: `claude --resume ${id}`, codex: `codex resume ${id}` }[kind] ?? null : null);
+
 // The record saved for each run terminal at launch. model = requested (from the frozen command), started = launch time.
-// envNames = variable names only, never values.
-export const terminalRecord = (address, agent, now, envNames) =>
+// envNames = variable names only, never values. extra: { session, kind, cwd }, each kept only when known (cwd only when absolute).
+export const terminalRecord = (address, agent, now, envNames, extra = {}) =>
   ({ address, agent: agent.id, name: agent.name, role: agent.role, model: modelOf(agent.command), started: now,
-    ...(envNames?.length ? { env: [...envNames] } : {}) });
+    ...(envNames?.length ? { env: [...envNames] } : {}),
+    ...(UUID.test(String(extra.session)) ? { session: extra.session, ...(extra.kind ? { kind: extra.kind } : {}) } : {}),
+    ...(typeof extra.cwd === "string" && extra.cwd.startsWith("/") ? { cwd: extra.cwd } : {}) });
 
 // Pure. Stamps `ended` on a terminal the first time it is seen gone, and on the run once all its terminals are gone.
 // The time is when it was first OBSERVED gone (the app may have been closed), not an exact end time.
@@ -330,7 +370,8 @@ export function lineageOf(run, allRuns, live, alive, now) {
     const status = memberStatus(t.address, live, alive);
     const startedMs = num(t.started), endedMs = num(t.ended);
     return { address: t.address, name: t.name ?? t.address, role, agent: t.agent ?? null, model: t.model ?? null, status, startedMs, endedMs,
-      durationMs: startedMs == null ? null : (endedMs ?? now) - startedMs, gone: status === "gone", parked: t.parked === true };
+      durationMs: startedMs == null ? null : (endedMs ?? now) - startedMs, gone: status === "gone", parked: t.parked === true,
+      ...(t.session ? { session: t.session, kind: t.kind ?? null } : {}), ...(t.cwd ? { cwd: t.cwd } : {}) }; // legacy records: row unchanged
   };
   const terminals = run.terminals ?? [];
   const rows = [];
@@ -361,7 +402,7 @@ export function squadRows(rows) {
     const coord = r.role === "coordinator";
     const leader = i === (hasCoord ? 1 : 0);
     return { ...r, leader, depth: coord ? 0 : (hasCoord ? 1 : 0) + (leader ? 0 : 1), modelText: coord ? "—" : r.model ?? "—",
-      durationText: durationText(r.durationMs), focusable: !r.gone, dim: r.gone && !coord };
+      durationText: durationText(r.durationMs), focusable: !r.gone, dim: r.gone && !coord, resumeText: resumeCommand(r.kind, r.session) };
   });
 }
 

@@ -550,3 +550,103 @@ test("defaultDrover: the sidebar's space wins over a newer Drover elsewhere; els
   assert.equal(defaultDrover(c, null), "t2");
   assert.equal(defaultDrover([], "s1"), null);
 });
+
+// ---- session record (T-MWLGPRPU53A)
+import { agentKind, withSessionFlag, sessionMarker, withMarker, pickCodexSession, resumeCommand, newUuid } from "./runs.js";
+const UUID = "0b9f6c2e-5d1a-4c3b-8e7f-123456789abc", UUID2 = "1c0a7d3f-6e2b-4d4c-9f80-23456789abcd";
+const rollout = (id, day = "2026/11/17") => `/h/.codex/sessions/${day}/rollout-2026-11-17T10-00-00-${id}.jsonl`;
+
+test("agentKind: claude and codex by argv[0] basename, anything else null", () => {
+  assert.equal(agentKind("claude --model x"), "claude");
+  assert.equal(agentKind(["/usr/local/bin/claude", "-p"]), "claude");
+  assert.equal(agentKind("codex --no-daemon"), "codex");
+  assert.equal(agentKind("/opt/bin/codex"), "codex");
+  assert.equal(agentKind("claude-wrapper --x"), null);
+  assert.equal(agentKind(""), null);
+  assert.equal(agentKind(undefined), null);
+});
+
+test("withSessionFlag: adds --session-id after argv[0]; input untouched", () => {
+  const a = ["claude", "--model", "m"];
+  assert.deepEqual(withSessionFlag(a, UUID), ["claude", "--session-id", UUID, "--model", "m"]);
+  assert.deepEqual(a, ["claude", "--model", "m"]);
+});
+
+test("withSessionFlag: an explicit session, resume or continue flag means unknown (null), never overridden", () => {
+  for (const extra of [["--session-id", UUID2], [`--session-id=${UUID2}`], ["--resume"], ["--resume", UUID2], [`--resume=${UUID2}`], ["-r", UUID2], ["--continue"], ["-c"]])
+    assert.equal(withSessionFlag(["claude", ...extra, "--model", "m"], UUID), null, extra.join(" "));
+});
+
+test("withSessionFlag: a flag after a -- boundary is a prompt word, not an override; non-claude and bad id give null", () => {
+  assert.deepEqual(withSessionFlag(["claude", "--", "--resume"], UUID), ["claude", "--session-id", UUID, "--", "--resume"]);
+  assert.equal(withSessionFlag(["codex", "--no-daemon"], UUID), null);
+  assert.equal(withSessionFlag(["claude"], "not-a-uuid"), null);
+});
+
+test("newUuid: v4 shape, different each call", () => {
+  const a = newUuid(), b = newUuid();
+  assert.match(a, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+  assert.notEqual(a, b);
+});
+
+test("newUuid: the Math.random fallback (no crypto, no randomUUID, or a throwing one) still gives distinct v4 ids", () => {
+  const orig = Object.getOwnPropertyDescriptor(globalThis, "crypto");
+  const V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+  try {
+    for (const fake of [undefined, {}, { randomUUID() { throw new Error("no entropy"); } }]) {
+      Object.defineProperty(globalThis, "crypto", { value: fake, configurable: true, writable: true });
+      const ids = new Set(Array.from({ length: 20 }, () => newUuid()));
+      assert.equal(ids.size, 20);
+      for (const id of ids) assert.match(id, V4);
+    }
+  } finally { orig ? Object.defineProperty(globalThis, "crypto", orig) : delete globalThis.crypto; }
+  assert.match(newUuid(), V4);
+});
+
+test("sessionMarker / withMarker: one marker line appended to the prompt", () => {
+  assert.equal(sessionMarker("abc"), "drover-launch-marker: abc");
+  const p = withMarker("Do the task.", "abc");
+  assert.equal(p, "Do the task.\n\ndrover-launch-marker: abc");
+  assert.equal(p.split("drover-launch-marker: abc").length, 2);
+});
+
+test("pickCodexSession: exactly one rollout gives its uuid; 0, 2+ and non-rollout paths give null", () => {
+  assert.equal(pickCodexSession([rollout(UUID)]), UUID);
+  assert.equal(pickCodexSession([rollout(UUID), rollout(UUID)]), UUID, "the same path twice is one file");
+  assert.equal(pickCodexSession([rollout(UUID), rollout(UUID2, "2026/11/16")]), null);
+  assert.equal(pickCodexSession([]), null);
+  assert.equal(pickCodexSession(['{"terminal":"t1"}', "/x/notes.txt"]), null);
+  assert.equal(pickCodexSession(["/x/notes.txt", rollout(UUID)]), UUID, "noise lines are ignored");
+});
+
+test("resumeCommand: claude --resume / codex resume; unknown kind or bad id gives null", () => {
+  assert.equal(resumeCommand("claude", UUID), `claude --resume ${UUID}`);
+  assert.equal(resumeCommand("codex", UUID), `codex resume ${UUID}`);
+  assert.equal(resumeCommand(null, UUID), null);
+  assert.equal(resumeCommand("claude", "x; rm -rf /"), null);
+  assert.equal(resumeCommand("claude", null), null);
+});
+
+test("terminalRecord: session, kind and an absolute cwd are kept; unknown ones are omitted", () => {
+  const agent = { id: "w", name: "W", role: "Wrangler", command: "claude --model m" };
+  assert.deepEqual(terminalRecord("t1", agent, 5, undefined, { session: UUID, kind: "claude", cwd: "/r/wt" }),
+    { address: "t1", agent: "w", name: "W", role: "Wrangler", model: "m", started: 5, session: UUID, kind: "claude", cwd: "/r/wt" });
+  const bare = terminalRecord("t1", agent, 5, undefined, { session: null, cwd: "relative/dir" });
+  assert.equal("session" in bare, false);
+  assert.equal("kind" in bare, false);
+  assert.equal("cwd" in bare, false, "a relative folder is never recorded");
+  assert.deepEqual(terminalRecord("t1", agent, 5), terminalRecord("t1", agent, 5, undefined, {}));
+});
+
+test("lineageOf / squadRows: session, cwd and resumeText; a legacy record has none and renders as before", () => {
+  const run = lineRun({ terminals: [T("t2", { kind: "codex", session: UUID2, cwd: "/r" }), T("t3", { role: "leader", kind: "claude", session: UUID }), T("t4")] });
+  const rows = squadRows(lineageOf(run, [], new Map(), new Set(["t2", "t3", "t4"]), 0));
+  const by = Object.fromEntries(rows.map((r) => [r.address, r]));
+  assert.equal(by.t3.session, UUID);
+  assert.equal(by.t3.resumeText, `claude --resume ${UUID}`);
+  assert.equal(by.t2.resumeText, `codex resume ${UUID2}`);
+  assert.equal(by.t2.cwd, "/r");
+  assert.equal("session" in by.t4, false);
+  assert.equal("cwd" in by.t4, false);
+  assert.equal(by.t4.resumeText, null);
+});

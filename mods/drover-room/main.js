@@ -46,6 +46,14 @@ export default class Room extends View {
     if (target) openNewWakeup(target);
   }
 
+  // Squad row: copies the resume command. The click stops here, so it never reaches the row (no focus, no peek). No resume action: the person pastes it.
+  copyResume(address, text, cx) {
+    cx.stop_propagation();
+    cx.write_to_clipboard(text);
+    this.copied = address; cx.notify();
+    cx.timer.after(1500, (cx) => { if (this.copied === address) { this.copied = null; cx.notify(); } });
+  }
+
   // Only the run you are in, only when its data is refresh_minutes old (or missing), one at a time.
   refresh(cx) {
     const r = this.run;
@@ -181,14 +189,20 @@ export default class Room extends View {
         const row = h_flex().id(`m-${m.address}`).min_h(26).gap(8).items_center().rounded(6).pl(m.depth * 14)
           .when(m.dim, (el) => el.opacity(0.5))
           .when(m.focusable, (el) => el.cursor_pointer().hover((x) => x.bg(t.hover)).on_click(() => run(openCommand(m), { terminal: m.address })));
-        return row
+        const line = m.resumeText && h_flex().id(`resume-${m.address}`).ml(m.depth * 14 + 15).mb(2).px(6).py(2).gap(8).items_center().rounded(5).bg(t.raised)
+          .cursor_pointer().hover((x) => x.bg(t.hover)).on_click((_e, cx) => this.copyResume(m.address, m.resumeText, cx))
+          .child(div().text_size(11).flex_none().text_color(t.muted).child(`session ${m.session.slice(0, 8)}`))
+          .child(div().flex_1().min_w(0).truncate().text_size(11).text_color(t.dim).child(m.resumeText))
+          .child(div().text_size(11).flex_none().text_color(this.copied === m.address ? t.done : t.dim).child(this.copied === m.address ? "Copied" : "⧉ Copy"));
+        return v_flex().id(`sq-${m.address}`).child(row
           .child(div().size(7).rounded(4).flex_none().bg(color[m.status] ?? t.idle))
           .child(div().text_size(12.5).flex_none().child(m.name))
           .child(div().flex_1().truncate().text_size(11).text_color(t.dim)
             .child([m.role, m.address, m.leader && r.worktree ? r.worktree.branch : null].filter(Boolean).join(" · ")))
           .child(div().px(5).rounded(4).flex_none().bg(t.raised).text_size(11).text_color(t.muted).child(`req: ${m.modelText}`))
           .child(div().text_size(11).flex_none().text_color(color[m.status] ?? t.muted).child(m.status))
-          .child(div().w(44).flex_none().text_size(11).text_color(t.dim).child(m.durationText));
+          .child(div().w(44).flex_none().text_size(11).text_color(t.dim).child(m.durationText)))
+          .when(Boolean(line), (el) => el.child(line));
       }));
   }
 }
