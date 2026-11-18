@@ -604,10 +604,45 @@ export const isLiveDrover = (runs, address, alive) =>
 export const projectOfDrover = (runs, address) =>
   runs.find((r) => r.project && r.terminals?.some((m) => m.agent === "drover" && m.address === address))?.project ?? null;
 
-// Squad runs of a project that hold a slot: not ended (starting, blocked and stopped count), plus cards being claimed.
-export const activeFor = (runs, tasks, projectId, live, alive) =>
-  runs.filter((r) => r.task && r.project === projectId && runStatus(r, live, alive) !== "ended").length +
-  tasks.filter((t) => t.project === projectId && t.agent === CLAIMING && !t.archived).length;
+// The parallel-slot numbers of every project, from ONE pass over runs and tasks (cards indexed once). Pure; kills and writes nothing.
+// A squad run holds a slot while it is not ended, unless its card is in Review or Blocked: then the run is "waiting" (it stays alive, it just
+// does not count) and takes its slot again when the card moves back. A card that is missing or archived does not exempt its run.
+// Cards being claimed (a launch or resume in flight) count, whatever their column; a project with only claims gets a bucket too.
+// Over limit is allowed (a card moved back to In progress): active may exceed limit, free never goes below 0.
+// Returns { limit, byProject: Map(projectId -> { active, waiting, free }), waitingRunIds: Set(run id) }. limit defaults to the setting.
+export function slotSnapshot(runs, tasks, live, alive, limit = maxRuns()) {
+  const card = new Map();
+  for (const t of tasks) if (!card.has(t.id)) card.set(t.id, t);
+  const byProject = new Map(), waitingRunIds = new Set();
+  const bucket = (p) => { let b = byProject.get(p); if (!b) byProject.set(p, (b = { active: 0, waiting: 0, free: 0 })); return b; };
+  for (const r of runs) {
+    if (!r.task || !r.project || runStatus(r, live, alive) === "ended") continue;
+    const c = card.get(r.task), b = bucket(r.project);
+    if (c && !c.archived && (c.column === "review" || c.column === "blocked")) { b.waiting++; waitingRunIds.add(r.id); }
+    else b.active++;
+  }
+  for (const t of tasks) if (t.project && t.agent === CLAIMING && !t.archived) bucket(t.project).active++;
+  for (const b of byProject.values()) b.free = Math.max(0, limit - b.active);
+  return { limit, byProject, waitingRunIds };
+}
+
+// The numbers of one project (zeros when it has no bucket).
+export const slotsOf = (snap, projectId) => snap.byProject.get(projectId) ?? { active: 0, waiting: 0, free: snap.limit };
+
+// Pure view text. bucket: one project's { active, waiting } from a slotSnapshot; "" when it has no run (nothing to show).
+export function slotLine(bucket, limit, name) {
+  if (!bucket || bucket.active + bucket.waiting === 0) return "";
+  return `${name ? `${name}: ` : ""}Slots ${bucket.active}/${limit}${bucket.waiting > 0 ? ` \u00b7 ${bucket.waiting} waiting` : ""}`;
+}
+
+// The status text a run card shows: a run parked on a Review/Blocked card reads "waiting (no slot)" instead of its terminal status.
+// waiting: a plain boolean the screen took from the one snapshot of its render. Stop, Resume and Forget keep the terminal status.
+export const WAITING_LABEL = "waiting (no slot)";
+export const runBadge = (waiting, label) => (waiting ? WAITING_LABEL : label);
+
+// Thin views of slotSnapshot for one project: runs that hold a slot, runs parked in Review/Blocked.
+export const activeFor = (runs, tasks, projectId, live, alive) => slotsOf(slotSnapshot(runs, tasks, live, alive), projectId).active;
+export const waitingFor = (runs, tasks, projectId, live, alive) => slotsOf(slotSnapshot(runs, tasks, live, alive), projectId).waiting;
 
 // Checks before a coordinator's `drover start`. c: { tasks, runs, projects, live, alive }.
 // A card never gets 2 owners. A Drover bound to a project (queue mode) may start only Ready cards of that project.
@@ -632,7 +667,11 @@ export function startGuard(c, cmd) {
   if (t.column !== "todo") return { error: `${t.id} is not Ready (it is in ${columnName(t.column)})` };
   if (t.project !== project) return { error: `${t.id} is not in your project` };
   if (!repoOf(t, c.projects)) return { error: `${t.id} has no repo: add one to its project` };
-  if (activeFor(c.runs, c.tasks, project, c.live, c.alive) >= maxRuns()) return { error: `no free slot: limit ${maxRuns()} reached for this project (setting drover-runs.max_parallel, 1-10, each project). Only the owner may raise it: ask, then run: drover config max-parallel <n>` };
+  const snap = slotSnapshot(c.runs, c.tasks, c.live, c.alive), mine = slotsOf(snap, project);
+  if (mine.active >= snap.limit) {
+    const parked = mine.waiting ? ` ${mine.waiting} waiting in Review/Blocked (not counted).` : "";
+    return { error: `no free slot: limit ${snap.limit} reached for this project (setting drover-runs.max_parallel, 1-10, each project).${parked} Only the owner may raise it: ask, then run: drover config max-parallel <n>` };
+  }
   return { ok: true };
 }
 

@@ -4,7 +4,7 @@
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, Popover } from "gpui-base";
 import { agents, terminals, theme, shared } from "herdr";
-import { liveAgents } from "./runs.js";
+import { liveAgents, liveStatuses, slotSnapshot, slotLine } from "./runs.js";
 import { COLUMNS, STATUS_ICON, projectOf, shiftVisible, reorder, matches, sorted, updatedAgo, clampText, sortCards, archiveDone, SORT_MODES, SCOPES, inScope, checklistProgress, ringGlyph, menuChange, FILTER_FIELDS, toggleFilter, clearFilters, matchesFilter, filterValues, searchFilters, filterChips, assigneeText } from "./store.js";
 import { load, loadProjects, loadRuns, loadConfig, save, edit, pick, openUrl, watchInbox, modSettings, loadMerged, watchRemote, retryRemote, remoteSend, remoteWriteState, takeRemoteOutcomes } from "./io.js";
 import { OFF_TIP, controlState, statusLine, moveOp, shiftOp, outcomeText } from "./remote-write-ui.js";
@@ -227,6 +227,14 @@ export default class Board extends View {
           .when(prog.total > 0, (el) => el.child(div().flex_none().text_color(prog.done === prog.total ? t.done : t.muted).child(`${ringGlyph(prog.done, prog.total)} ${prog.done}/${prog.total}`))));
     };
 
+    // Slot line: only for a LOCAL project scope, from local tasks and runs (never the filtered columns or remote merged cards). One snapshot, outside every closure.
+    const slotText = (() => {
+      const id = this.scope.startsWith("project:") ? this.scope.slice(8) : null;
+      if (!id || !projects.some((p) => p.id === id) || this.remoteScope()) return "";
+      const state = liveStatuses(agents(), terminals()), alive = new Set(terminals().map((x) => x.address));
+      const snap = slotSnapshot(loadRuns(), load(), state, alive);
+      return slotLine(snap.byProject.get(id), snap.limit);
+    })();
     const scopeLabel = SCOPES.find(([id]) => id === this.scope)?.[1] ?? projects.find((p) => `project:${p.id}` === this.scope)?.name ?? "All issues";
     const topBtn = (id, text, action, active = false) => div().id(id).h(28).px(10).flex().items_center().rounded(7).text_size(12)
       .text_color(active ? t.foreground : t.muted).when(active, (el) => el.bg(t.hover)).cursor_pointer().hover((s) => s.bg(t.hover).text_color(t.foreground))
@@ -296,6 +304,7 @@ export default class Board extends View {
         .content(this.pop === "filter" ? filterMenu().mt(4) : div()))
       .child(Input.new(this.input).w(260).h(28).px(8).rounded(7).border_1().border_color(t.input).bg(t.background).text_size(12))
       .child(div().flex_1())
+      .when(Boolean(slotText), (el) => el.child(div().id("slot-line").px(8).text_size(12).text_color(t.dim).whitespace_nowrap().child(slotText)))
       .when(hidden > 0, (el) => el.child(div().id("hidden-note").px(8).text_size(12).text_color(t.dim).whitespace_nowrap().child(`${hidden} hidden`)))
       .child(topBtn("view-board", "Board", (cx) => { this.view = "board"; cx.notify(); }, this.view === "board"))
       .child(topBtn("view-list", "List", (cx) => { this.view = "list"; cx.notify(); }, this.view === "list"))

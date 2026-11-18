@@ -31,7 +31,7 @@ Each mod also has an `enabled` switch (default on; off hides the screen only). `
 | Room | `refresh_minutes` | 5 | 1-1440 | Minimum age before a run's context reloads |
 | Room | `pr_cap` | 10 | 1-100 | Linked PRs shown |
 | Room | `kept_contexts` | 30 | 1-1000 | Runs remembered |
-| Runs | `max_parallel` | 2 | 1-10 | Active squad runs per project. Cards in Review or Blocked still count. An agent can set it on your request with `drover config max-parallel <n>` (the only setting it can change); see [Runs](mods/runs.md#parallel-runs) |
+| Runs | `max_parallel` | 2 | 1-10 | Active squad runs per project. Runs on cards in Review or Blocked are waiting and do not count. An agent can set it on your request with `drover config max-parallel <n>` (the only setting it can change); see [Runs](mods/runs.md#parallel-runs) |
 | Runs | `kept` | 200 | 10-5000 | Ended runs remembered |
 | Wakeups | `min_repeat_minutes` | 5 | 1-1440 | Shortest repeat (the CLI uses it too) |
 | Wakeups | `expiry_hours` | 2 | 1-168 | A wakeup not delivered by then expires |

@@ -13,7 +13,7 @@ import { resolveWorkFolder, moveOffers, parseMove } from "./workfolder.js";
 import { bind as bindCfg, load as loadCfg, ready as cfgReady, cfg, KEY as CONFIG_KEY, configGet, configSet } from "./config.js";
 import { soulHash } from "./herd-export.js";
 import { exportName } from "./herd-share.js";
-import { AGENTS_KEY, RUNS_KEY, config, plan, argv, leaderPrompt, createCardsPrompt, memberPrompt, worktreeOf, terminalName, startGuard, projectOfDrover, isLiveDrover, activeFor, reconcile, runFolder, markEnded, orphanedWorkers, terminalRecord, agentKind, newUuid, withSessionFlag, withMarker, pickCodexSession, liveStatuses, memberStatus, resumeCandidates, resumeToken, resumeGuard, resumePrompt, resumedTerminal, resumedRun, linkResumed, sessionMarker, claimTtl, launchArgv, parseAgentEnv, envProblem, BIND_KEY, droverChoices, defaultDrover, maxRuns, keptRuns, pruneRuns } from "./runs.js";
+import { AGENTS_KEY, RUNS_KEY, config, plan, argv, leaderPrompt, createCardsPrompt, memberPrompt, worktreeOf, terminalName, startGuard, projectOfDrover, isLiveDrover, slotSnapshot, slotsOf, reconcile, runFolder, markEnded, orphanedWorkers, terminalRecord, agentKind, newUuid, withSessionFlag, withMarker, pickCodexSession, liveStatuses, memberStatus, resumeCandidates, resumeToken, resumeGuard, resumePrompt, resumedTerminal, resumedRun, linkResumed, sessionMarker, claimTtl, launchArgv, parseAgentEnv, envProblem, BIND_KEY, droverChoices, defaultDrover, maxRuns, keptRuns, pruneRuns } from "./runs.js";
 
 export const load = () => list(shared(KEY));
 
@@ -1505,7 +1505,8 @@ function nextFor(from) {
   const rec = reconcile(load(), runs, alive, Date.now(), project, new Set(Object.values(resumes()).map((a) => a.card)));
   if (rec.lines.length) setShared(KEY, rec.tasks);
   const tasks = rec.tasks;
-  return [nextReport(tasks, loadProjects(), project, Math.max(0, maxRuns() - activeFor(runs, tasks, project, live, alive))), ...rec.lines].join("\n");
+  const snap = slotsOf(slotSnapshot(runs, tasks, live, alive), project);
+  return [nextReport(tasks, loadProjects(), project, snap.free, snap.waiting), ...rec.lines].join("\n");
 }
 
 // `drover start <T-…|-> <squad|agent> [--worktree]` from a coordinator agent.

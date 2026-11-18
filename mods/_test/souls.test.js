@@ -204,7 +204,7 @@ test("_herd.md: rule 12 lets an agent change the limit only on the owner's plain
   const h = soul("_herd");
   const m = h.match(/\n12\. \*\*The parallel-runs limit is the owner's[^\n]*/);
   assert.ok(m, "rule 12 present");
-  for (const s of ["drover config max-parallel <n>", "drover-runs.max_parallel", "only when the owner asks", "plain text in your own terminal", "Never raise it to unblock yourself", "`hc` message", "STATUS: HELP", "Review or Blocked keep their slot"]) assert.ok(m[0].includes(s), s);
+  for (const s of ["drover config max-parallel <n>", "drover-runs.max_parallel", "only when the owner asks", "plain text in your own terminal", "Never raise it to unblock yourself", "`hc` message", "STATUS: HELP", "Runs on cards in Review or Blocked are waiting"]) assert.ok(m[0].includes(s), s);
   assert.ok(h.includes("| Parallel runs limit | `drover config max-parallel`"), "tools table row");
   assert.ok(h.indexOf("12. **The parallel-runs limit") < h.indexOf("## 5. Honesty"), "rule 12 is in the hard rules");
 });

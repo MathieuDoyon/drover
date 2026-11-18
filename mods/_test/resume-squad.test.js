@@ -653,3 +653,72 @@ test("T-MWM5CE02H07: a just-opened member missing from the cached list is not 'e
   const r = await io.resumeSquad("R-OLD");
   assert.equal(r.error, undefined, r.error);
 });
+
+// ---- T-MWMIQMBO1BQ: Resume of a Review/Blocked card while its project is at full capacity (limit 2, two live bystander squads on In progress cards).
+// A resume is an owner action: it is never refused by the slot limit, its claim counts while in flight, and no bystander terminal is ever touched.
+const P1 = "P-1";
+function fullProject(column) {
+  const bystander = (n, addr) => ({ id: `R-B${n}`, task: `T-B${n}`, project: P1, started: 2, reportTo: "t81", terminals: [{ address: addr, agent: "wrangler", name: "W", role: "leader", started: 2 }] });
+  const bcard = (n) => ({ ...CARD({ id: `T-B${n}`, title: `by ${n}`, column: "doing", run: `R-B${n}`, agent: `t1${n}` }), project: P1 });
+  host.state["drover.projects"] = [{ id: P1, name: "P", repos: [], folders: [], branch: "main" }];
+  host.state["drover.runs"] = [OLD({ project: P1 }), bystander(1, "t11"), bystander(2, "t12")];
+  host.state["drover.tasks"] = [CARD({ project: P1, column }), bcard(1), bcard(2)];
+  for (const a of ["t11", "t12"]) sim.terms.set(a, { b: OK, reads: 0, killed: false, argv: [], task: "" });
+}
+// The slot numbers of P-1 as the guard sees them right now (a fixed alive set: reading host.terminals would advance the simulator).
+const slots = () => {
+  const alive = new Set(["t11", "t12", ...sim.opened().filter((a) => !sim.terms.get(a).killed)]);
+  return R.slotsOf(R.slotSnapshot(runs(), host.state["drover.tasks"], new Map(), alive, 2), P1);
+};
+const bystanders = () => JSON.stringify(runs().filter((r) => r.id.startsWith("R-B")));
+
+for (const column of ["review", "blocked"]) {
+  test(`resume at capacity, ${column}: not refused; the claim counts while in flight (over the limit); both bystander squads survive unchanged`, async () => {
+    fullProject(column);
+    const by0 = bystanders(), aliveBefore = sim.terms.size;
+    assert.deepEqual(slots(), { active: 2, waiting: 0, free: 0 }, "full before the resume (the gone old run holds nothing)");
+    const inFlight = [];
+    sim.onOpen = () => inFlight.push({ ...slots(), agent: card().agent, column: card().column });
+    const r = await io.resumeSquad("R-OLD");
+    assert.equal(r.error, undefined, "an owner's resume is not refused by the slot limit");
+    assert.ok(inFlight.length >= 1);
+    for (const s of inFlight) assert.deepEqual(s, { active: 3, waiting: 0, free: 0, agent: S.CLAIMING, column: "doing" }, "the claim counts at once: 2 squads + the claim, over the limit");
+    assert.deepEqual(slots(), { active: 3, waiting: 0, free: 0 }, "after: the new run counts once (not twice)");
+    assert.equal(bystanders(), by0, "bystander runs unchanged");
+    assert.ok(!sim.killed().some((a) => a === "t11" || a === "t12"), "no bystander terminal killed");
+    assert.equal(sim.terms.get("t11").killed || sim.terms.get("t12").killed, false);
+    assert.equal(sim.terms.size, aliveBefore + 3, "only the 3 resumed terminals were added");
+  });
+
+  test(`resume at capacity, ${column}: a failed attempt rolls back to ${column}, frees the claim, kills only its own terminals`, async () => {
+    fullProject(column);
+    const by0 = bystanders(), old0 = JSON.stringify(oldRun());
+    sim.plan.push(OK, { status: () => "blocked", delivered: () => false }, { status: () => "blocked", delivered: () => false });
+    const inFlight = [];
+    sim.onOpen = () => inFlight.push(slots().active);
+    const r = await io.resumeSquad("R-OLD");
+    assert.ok(r.error);
+    assert.ok(inFlight.length > 0 && inFlight.every((a) => a === 3), `the claim counted while it ran: ${inFlight}`);
+    assert.deepEqual(sim.killed().sort(), sim.opened().filter((a) => !["t11", "t12"].includes(a)).sort(), "exactly the attempt's own terminals");
+    assert.deepEqual({ agent: card().agent, column: card().column, run: card().run }, { agent: null, column, run: "R-OLD" });
+    assert.deepEqual(slots(), { active: 2, waiting: 0, free: 0 }, "the claim is gone: back to the 2 bystanders");
+    assert.equal(bystanders(), by0);
+    assert.equal(JSON.stringify(oldRun()), old0, "the old run is untouched");
+  });
+
+  test(`resume at capacity, ${column}: cancel mid-attempt releases the claim and leaves the bystander squads alone`, async () => {
+    fullProject(column);
+    const by0 = bystanders();
+    sim.plan.push({ status: () => "idle", delivered: () => false });
+    let during = null;
+    sim.onGet = () => { during ??= slots().active; io.cancelResume("R-OLD"); };
+    const r = await io.resumeSquad("R-OLD");
+    assert.match(r.error, /cancel|stopped/i);
+    assert.equal(during, 3, "the claim counted while the attempt ran");
+    assert.deepEqual(sim.killed(), sim.opened().filter((a) => !["t11", "t12"].includes(a)));
+    assert.equal(card().column, column);
+    assert.equal(card().agent, null);
+    assert.deepEqual(slots(), { active: 2, waiting: 0, free: 0 });
+    assert.equal(bystanders(), by0);
+  });
+}

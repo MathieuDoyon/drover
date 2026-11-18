@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { add, addProject, claim, release, CLAIMING } from "./store.js";
-import { reconcile, activeFor, claimTtl } from "./runs.js";
+import { add, addProject, claim, release, applyCommand, CLAIMING } from "./store.js";
+import { reconcile, activeFor, slotSnapshot, slotsOf, resumeGuard, claimTtl } from "./runs.js";
 
 const { projects } = addProject([], { name: "A", repos: "/a" }, 1);
 const A = projects[0].id;
@@ -94,4 +94,42 @@ test("refill: after 1 run ends, the next report has exactly 1 slot more", () => 
   const slots = (alive) => 2 - activeFor(runs, tasks, A, new Map(), new Set(alive));
   assert.equal(slots(["t0", "t1"]), 0);
   assert.equal(slots(["t1"]), 1);
+});
+
+// ---- T-MWMIQMBO1BQ: Resume of a Review/Blocked card at full capacity keeps working (an owner action; resumeGuard has no slot check).
+const snap = (runs, tasks, alive, limit) => slotsOf(slotSnapshot(runs, tasks, new Map(), alive, limit), A);
+const UUID = "123e4567-e89b-42d3-a456-426614174000";
+const oldRun = (task, address) => ({ id: "R-OLD", task, project: A, started: 1, terminals: [{ address, agent: "wrangler", kind: "claude", session: UUID, role: "leader" }] });
+
+test("resume at capacity: a gone squad on a Review or Blocked card passes resumeGuard while 2 other runs fill the limit", () => {
+  for (const column of ["review", "blocked"]) {
+    const tasks = seed({ column: "doing" }, { column: "doing" }, { column }).map((t, i) => ({ ...t, id: "T-" + (i + 1) }));
+    const runs = [run("T-1", "t1"), run("T-2", "t2"), oldRun("T-3", "t3")];
+    const alive = new Set(["t1", "t2"]); // the old squad's terminal is gone
+    assert.equal(activeFor(runs, tasks, A, new Map(), alive), 2, "the limit is full");
+    assert.equal(resumeGuard({ tasks, runs, alive, resuming: new Set() }, "R-OLD").ok, true, column);
+  }
+});
+
+test("resume reservation: the claiming card counts once; a rollback (release) frees it and touches no other run", () => {
+  const tasks = seed({ column: "doing" }, { column: "review" }).map((t, i) => ({ ...t, id: "T-" + (i + 1) }));
+  const runs = [run("T-1", "t1"), oldRun("T-2", "t3")];
+  const alive = new Set(["t1"]);
+  const c = claim(tasks, "T-2", undefined, T0, alive); // what claimForResume does: doing + claiming
+  assert.equal(c.task.column, "doing");
+  assert.equal(snap(runs, c.tasks, alive, 2).active, 2, "T-1 + the claim");
+  const before = JSON.stringify(runs);
+  const r = release(c.tasks, "T-2", c.prev, T0 + 1);
+  assert.equal(r.tasks.find((t) => t.id === "T-2").column, "review");
+  assert.equal(snap(runs, r.tasks, alive, 2).active, 1, "released: only T-1");
+  assert.equal(JSON.stringify(runs), before);
+});
+
+test("a squad parked on a Review card whose card is moved back to doing counts again; the move is never refused", () => {
+  const tasks = seed({ column: "review" }).map((t) => ({ ...t, id: "T-1" }));
+  const runs = [run("T-1", "t1")];
+  const alive = new Set(["t1"]);
+  assert.equal(snap(runs, tasks, alive, 1).free, 1);
+  const moved = applyCommand(tasks, { op: "move", id: "T-1", column: "doing" }).tasks;
+  assert.equal(snap(runs, moved, alive, 1).free, 0);
 });

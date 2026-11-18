@@ -11,3 +11,13 @@ export function resolve(specifier, context, next) {
   if (specifier === "./query.js" && context.parentURL?.includes("/drover-config/")) return { url: new URL("../drover-github/query.js", here).href, shortCircuit: true };
   return next(specifier, context);
 }
+
+// Test spy: every call of runs.js slotSnapshot made through its EXPORT (a screen's render) bumps globalThis.__slotCalls.
+// Calls inside runs.js (activeFor, startGuard) use the inner function and are not counted. Production code is untouched.
+export async function load(url, context, next) {
+  const r = await next(url, context);
+  if (!url.endsWith("/_lib/runs.js") || r.format !== "module") return r;
+  const src = String(r.source).replace("export function slotSnapshot(", "function slotSnapshotInner(");
+  if (src === String(r.source)) return r;
+  return { ...r, source: `${src}\nexport const slotSnapshot = (...a) => { globalThis.__slotCalls = (globalThis.__slotCalls ?? 0) + 1; return slotSnapshotInner(...a); };\n` };
+}

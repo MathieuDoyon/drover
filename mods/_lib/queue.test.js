@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { add, addProject, applyCommand, attention, queue, squadFor, nextReport, claim, release } from "./store.js";
-import { droverOf, activeFor, startGuard, projectOfDrover } from "./runs.js";
+import { droverOf, activeFor, waitingFor, slotSnapshot, slotsOf, startGuard, projectOfDrover, resumeGuard, markEnded } from "./runs.js";
 
 const { projects } = addProject(addProject([], { name: "A", repos: "/a" }, 1).projects, { name: "B", repos: "/b" }, 2);
 const [A, B] = projects;
@@ -245,4 +245,111 @@ test("bind: uniqueness uses the effective project; a project-less task refuses -
   const now = Date.now();
   assert.match(g({ project: B.id }, { binding: { [B.id]: now } }).error, /already being bound/);
   assert.equal(g({ project: B.id }, { binding: { [B.id]: now - 10 * 60000 } }).ok, true); // stale reservation
+});
+
+// ---- T-MWMIQMBO1BQ: a card in Review or Blocked does not hold a parallel slot (its run is "waiting").
+const onCard = (id, column, extra = {}) => ({ id, title: id, project: A.id, column, ...extra });
+const snapAll = (runs, tasks, alive, limit) => slotSnapshot(runs, tasks, new Map(), alive, limit);
+const snap = (runs, tasks, alive, limit, p = A.id) => { const all = snapAll(runs, tasks, alive, limit); return { ...slotsOf(all, p), limit, waitingRunIds: all.waitingRunIds }; };
+const ALIVE = new Set(["t81", "t1", "t2", "t3"]);
+const full = (c1, c2) => ({ tasks: [onCard("T-1", c1), onCard("T-2", c2)], runs: [drv("t81", A.id), sq("T-1", A.id, "t1"), sq("T-2", A.id, "t2")] });
+
+test("activeFor: a run on a Review or Blocked card is waiting, not active; In progress counts", () => {
+  const runs = [sq("T-1", A.id, "t1"), sq("T-2", A.id, "t2"), sq("T-3", A.id, "t3")];
+  const tasks = [onCard("T-1", "review"), onCard("T-2", "blocked"), onCard("T-3", "doing")];
+  assert.equal(activeFor(runs, tasks, A.id, new Map(), ALIVE), 1);
+  assert.equal(waitingFor(runs, tasks, A.id, new Map(), ALIVE), 2);
+  const s = snap(runs, tasks, ALIVE, 2);
+  assert.deepEqual({ limit: s.limit, active: s.active, waiting: s.waiting, free: s.free }, { limit: 2, active: 1, waiting: 2, free: 1 });
+  assert.deepEqual([...s.waitingRunIds].sort(), ["RT-1", "RT-2"]);
+});
+
+test("slotSnapshot: archived, missing, claiming, no-task, other-project and ended cases", () => {
+  const runs = [sq("T-1", A.id, "t1"), sq("T-2", A.id, "t2"), sq("T-3", A.id, "t3"), sq("T-4", B.id, "t4"), drv("t81", A.id), sq("T-5", A.id, "t9")];
+  const tasks = [onCard("T-1", "review", { archived: true }), onCard("T-3", "blocked"), onCard("T-4", "review", { project: B.id }), onCard("T-5", "review"), { id: "T-6", project: A.id, column: "review", agent: "claiming" }];
+  const alive = new Set(["t81", "t1", "t2", "t3", "t4"]); // t9 ended
+  const s = snap(runs, tasks, alive, 5);
+  assert.equal(s.waiting, 1, "only T-3: archived (T-1), missing card (T-2), other project, ended (T-5) are never waiting");
+  assert.deepEqual([...s.waitingRunIds].sort(), ["RT-3", "RT-4"], "RT-4 is project B: in the all-project set, not in A numbers");
+  assert.equal(s.active, 3, "T-1 archived + T-2 no card count as before; the claiming card counts whatever its column");
+  assert.equal(s.free, 2);
+  assert.equal(snap([], [], alive, 2).free, 2);
+});
+
+test("slotSnapshot: one pass gives a bucket for every project, claim-only projects included; inputs untouched", () => {
+  const runs = [sq("T-1", A.id, "t1"), sq("T-2", B.id, "t2"), sq("T-3", B.id, "t3"), drv("t81", A.id)];
+  const tasks = [onCard("T-1", "doing"), onCard("T-2", "review", { project: B.id }), onCard("T-3", "doing", { project: B.id }), onCard("T-9", "doing", { project: "P-C", agent: "claiming" })];
+  const before = JSON.stringify([runs, tasks]);
+  const all = slotSnapshot(runs, tasks, new Map(), ALIVE, 2);
+  assert.deepEqual([...all.byProject.keys()].sort(), [A.id, B.id, "P-C"].sort());
+  assert.deepEqual(all.byProject.get(A.id), { active: 1, waiting: 0, free: 1 });
+  assert.deepEqual(all.byProject.get(B.id), { active: 1, waiting: 1, free: 1 });
+  assert.deepEqual(all.byProject.get("P-C"), { active: 1, waiting: 0, free: 1 });
+  assert.deepEqual([...all.waitingRunIds], ["RT-2"]);
+  assert.equal(all.limit, 2);
+  assert.deepEqual(slotsOf(all, "P-NONE"), { active: 0, waiting: 0, free: 2 });
+  assert.equal(JSON.stringify([runs, tasks]), before);
+});
+
+test("startGuard permitted: limit 2, both runs on Review/Blocked cards -> a Ready card starts", () => {
+  const x = seed(card("x"));
+  const f = full("review", "blocked");
+  const c = ctx([...f.tasks, ...x], f.runs, { alive: ALIVE });
+  assert.deepEqual(startGuard(c, { task: x[0].id, from: "t81" }), { ok: true });
+});
+
+test("startGuard refused: 2 runs on In progress cards -> no free slot; with one waiting the text says so", () => {
+  const x = seed(card("x"));
+  const f = full("doing", "doing");
+  const e = startGuard(ctx([...f.tasks, ...x], f.runs, { alive: ALIVE }), { task: x[0].id, from: "t81" }).error;
+  assert.match(e, /^no free slot: limit 2 reached/);
+  assert.doesNotMatch(e, /waiting/);
+  const runs3 = [...f.runs, sq("T-3", A.id, "t3")];
+  const e2 = startGuard(ctx([...f.tasks, onCard("T-3", "review"), ...x], runs3, { alive: ALIVE }), { task: x[0].id, from: "t81" }).error;
+  assert.match(e2, /^no free slot: limit 2 reached/);
+  assert.match(e2, /1 waiting in Review\/Blocked \(not counted\)/);
+  assert.ok(e2.includes("Only the owner") && e2.includes("drover config max-parallel <n>"));
+});
+
+test("a card moves back to In progress with the slots full: the move is accepted, active exceeds the limit, starts are refused, slots are 0", () => {
+  const x = seed(card("x"));
+  const f = full("doing", "doing");
+  const tasks = [...f.tasks, onCard("T-3", "review"), ...x];
+  const runs = [...f.runs, sq("T-3", A.id, "t3")];
+  assert.equal(snap(runs, tasks, ALIVE, 2).active, 2); // T-3 is waiting
+  const m = applyCommand(tasks, { op: "move", id: "T-3", column: "doing", from: "t12" });
+  assert.equal(m.error, undefined, "the move is never blocked by the limit");
+  assert.equal(m.task.column, "doing");
+  const after = m.tasks;
+  const s = snap(runs, after, ALIVE, 2);
+  assert.deepEqual({ active: s.active, waiting: s.waiting, free: s.free }, { active: 3, waiting: 0, free: 0 });
+  assert.equal(activeFor(runs, after, A.id, new Map(), ALIVE), 3);
+  assert.match(startGuard(ctx(after, runs, { alive: ALIVE }), { task: x[0].id, from: "t81" }).error, /no free slot/);
+  assert.equal(nextReport(after, projects, A.id, s.free, s.waiting), "ok: 0 slots");
+});
+
+test("no run is killed: activeFor, startGuard, nextReport and markEnded leave runs and the alive set untouched", () => {
+  const f = full("review", "doing");
+  const x = seed(card("x"));
+  const tasks = [...f.tasks, ...x];
+  const before = JSON.stringify({ r: f.runs, t: tasks });
+  const alive = new Set(ALIVE), live = new Map([["t1", "working"]]);
+  activeFor(f.runs, tasks, A.id, live, alive); waitingFor(f.runs, tasks, A.id, live, alive); slotSnapshot(f.runs, tasks, live, alive, 2);
+  startGuard(ctx(tasks, f.runs, { alive }), { task: x[0].id, from: "t81" });
+  nextReport(tasks, projects, A.id, 1, 1);
+  assert.equal(JSON.stringify({ r: f.runs, t: tasks }), before);
+  assert.deepEqual([...alive].sort(), [...ALIVE].sort());
+  // the parked run (card in Review, terminals alive) stays open: markEnded changes nothing
+  const withStart = f.runs.map((r) => ({ ...r, terminals: r.terminals.map((m) => ({ ...m, started: 1 })) }));
+  assert.equal(markEnded(withStart, live, alive, 99), withStart);
+});
+
+test("nextReport: the waiting count is shown after the slots, also at 0 slots; absent when 0", () => {
+  const tasks = seed(card("a1"));
+  assert.equal(nextReport(tasks, projects, A.id, 0, 2), "ok: 0 slots \u00b7 2 waiting");
+  assert.equal(nextReport(tasks, projects, A.id, 0, 0), "ok: 0 slots");
+  const r = nextReport(tasks, projects, A.id, 1, 3).split("\n");
+  assert.equal(r[0], "ok: 1 slots \u00b7 3 waiting");
+  assert.match(r[1], /a1/);
+  assert.equal(nextReport([], projects, A.id, 2, 0), "ok: 2 slots");
 });

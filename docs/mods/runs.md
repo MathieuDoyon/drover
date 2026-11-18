@@ -15,12 +15,14 @@ Change them in Drover Config (see [Configuration](../configuration.md)).
 | Setting | Meaning |
 | --- | --- |
 | `enabled` | Drover Config → `enabled` (on by default). Off hides the screen and blanks it; the data and the `drover` CLI stay. |
-| `max_parallel` | 2 (1-10). Squad runs active at once for each project. A card in Review or Blocked keeps its slot while its run is active. Set it in `Drover ▾ → Config` (Runs), or an agent can set it on your request: see [Parallel runs](#parallel-runs). |
+| `max_parallel` | 2 (1-10). Squad runs active at once for each project. A run whose card is in Review or Blocked is "waiting": it stays alive but takes no slot, and takes one again when the card moves back. Set it in `Drover ▾ → Config` (Runs), or an agent can set it on your request: see [Parallel runs](#parallel-runs). |
 | `kept` | 200 (10-5000). Ended runs remembered; a running run is never dropped. |
 
 ## Parallel runs
 
 When a start is refused with `no free slot: limit N reached`, the limit is `drover-runs.max_parallel`. It is machine-wide, counts each project on its own, and applies at once (no restart). Lowering it never stops a run that is already going; it only refuses new starts.
+
+A squad parked on a card in Review (waiting for a PR) or Blocked does not hold a slot. The refusal names them (`N waiting in Review/Blocked (not counted)`) and `drover next` prints `ok: N slots · W waiting`. When you move such a card back to In progress the move is never refused and no run is stopped: the run counts again, so a project can be over its limit (3 active with a limit of 2). Then new starts are refused and `drover next` reports 0 slots until a run ends or another card moves to Review or Blocked. A manual or CLI start and Resume are owner actions and do not check the limit (only a bound Drover's start does). A card that is archived or missing does not free its run's slot.
 
 You can raise it in `Drover ▾ → Config → Runs → Parallel runs`, or ask an agent to. The agent runs, in its terminal:
 

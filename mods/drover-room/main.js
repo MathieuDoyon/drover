@@ -7,7 +7,7 @@ import { agents, terminals, focused, run, theme, shared, setShared } from "herdr
 import { WAKE_KEY, setEnabled, setStatus, isOpen, wakeOrder, until, summary } from "./wake.js";
 import { projectOf } from "./store.js";
 import { machineOf } from "./remote.js";
-import { currentRun, wakesOf, liveStatuses, memberStatus, terminalName, runTitle, lineageOf, squadRows, openCommand } from "./runs.js";
+import { currentRun, slotSnapshot, wakesOf, liveStatuses, memberStatus, terminalName, runTitle, lineageOf, squadRows, openCommand } from "./runs.js";
 import { section as sectionOf, toggle, openNewWakeup } from "./ui.js";
 import { age, prLabel, projectLabel } from "./sources.js";
 import { bind, cfg, isEnabled, load as loadCfg, ready as cfgReady } from "./config.js";
@@ -98,17 +98,20 @@ export default class Room extends View {
     const t = theme();
     this.ensureStarted(cx);
     { const g = gated("drover-room"); if (g) { this.run = null; return g; } }
-    const r = (this.run = currentRun(focused(), loadRuns()));
+    const runs = loadRuns(); // one read of the runs per render, reused below
+    const r = (this.run = currentRun(focused(), runs));
     const root = v_flex().id("root").size_full().bg(t.surface).text_color(t.foreground).overflow_y_scrollbar();
     if (!r) return root.child(div().p(14).text_size(12).text_color(t.dim)
       .child("Not inside a run. Focus a run's agent or open its room (Runs → Open room)."));
     this.refresh(cx);
 
-    const task = load().find((x) => x.id === r.task);
+    const cards = load();
+    const task = cards.find((x) => x.id === r.task);
     const ctx = contexts()[r.id] ?? null;
     const issue = ctx?.issue ?? null;
     const live = liveStatuses(agents(), terminals());
     const alive = new Set(terminals().map((x) => x.address));
+    const waiting = slotSnapshot(runs, cards, live, alive).waitingRunIds.has(r.id); // once per render
     const color = { blocked: t.blocked, working: t.working, done: t.done, idle: t.idle, gone: t.dim };
     const stateColor = { new: t.dim, indeterminate: t.working, done: t.done };
     const prColor = { Open: t.done, Draft: t.dim, Merged: t.accent, Closed: t.blocked };
@@ -205,6 +208,8 @@ export default class Room extends View {
           .child(r.worktree ? `No PRs for ${r.worktree.branch}.` : "No worktree branch: PRs show for linked ones only."))))
 
       .child(section("Squad", r.terminals.length))
+      .when(waiting, (el) => el.child(div().id("waiting-slot").min_h(22).text_size(12).text_color(t.dim)
+        .child(`waiting (no slot): the card is in ${task.column === "blocked" ? "Blocked" : "Review"}, so this run holds no parallel slot`)))
       .when(this.resumeBusy === r.id || resumeState(r.id) === "live", (el) => el.child(h_flex().id("resume-status").min_h(26).gap(8).items_center()
         .child(div().text_size(12).text_color(t.muted).child("Resuming the squad…"))
         .child(div().id("resume-cancel").px(8).py(2).rounded(5).bg(t.raised).cursor_pointer().hover((x) => x.bg(t.hover)).text_size(11.5).text_color(t.muted)
@@ -219,7 +224,7 @@ export default class Room extends View {
       .when(this.resumeBusy !== r.id && resumeState(r.id) === "none" && canResume(r.id), (el) => el.child(h_flex().min_h(26).items_center()
         .child(div().id("resume-squad").px(8).py(2).rounded(5).bg(t.raised).cursor_pointer().hover((x) => x.bg(t.hover)).text_size(11.5).text_color(t.foreground)
           .on_click((_e, cx) => this.startResume(cx)).child("Resume squad"))))
-      .children(squadRows(lineageOf(r, loadRuns(), live, alive, Date.now())).map((m) => {
+      .children(squadRows(lineageOf(r, runs, live, alive, Date.now())).map((m) => {
         const row = h_flex().id(`m-${m.address}`).min_h(26).gap(8).items_center().rounded(6).pl(m.depth * 14)
           .when(m.dim, (el) => el.opacity(0.5))
           .when(m.focusable, (el) => el.cursor_pointer().hover((x) => x.bg(t.hover)).on_click(() => run(openCommand(m), { terminal: m.address })));

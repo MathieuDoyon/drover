@@ -418,8 +418,9 @@ export function squadFor(task) {
 }
 
 // The reply to `drover next`: free slots, then one line per card to start (at most the slots), then skip reasons.
-export function nextReport(tasks, projects, projectId, slots) {
-  const head = `ok: ${slots} slots`;
+// waiting: runs parked on Review/Blocked cards; they hold no slot and are only named here.
+export function nextReport(tasks, projects, projectId, slots, waiting = 0) {
+  const head = `ok: ${slots} slots${waiting > 0 ? ` \u00b7 ${waiting} waiting` : ""}`;
   if (slots <= 0) return head;
   const q = queue(tasks, projectId, projects);
   return [head, ...q.picks.slice(0, slots).map((t) => `${t.id} ${t.priority} squad=${squadFor(t)} ${t.title}`),

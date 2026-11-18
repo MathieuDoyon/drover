@@ -3,9 +3,9 @@
 import { View, div } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
 import { agents, terminals, run, theme, setShared, shared } from "herdr";
-import { RUNS_KEY, liveStatuses, runStatus, runTitle, lineageOf, squadRows, stopTargets, openCommand } from "./runs.js";
+import { RUNS_KEY, liveStatuses, runStatus, runTitle, slotSnapshot, slotLine, runBadge, lineageOf, squadRows, stopTargets, openCommand } from "./runs.js";
 import { age } from "./sources.js";
-import { load, loadRuns, edit, observeEnded, modSettings, resumeSquad, canResume, cancelResume, recoverResume, resumeState } from "./io.js";
+import { load, loadRuns, loadProjects, edit, observeEnded, modSettings, resumeSquad, canResume, cancelResume, recoverResume, resumeState } from "./io.js";
 import { bind, isEnabled, whenLoaded, ready as cfgReady } from "./config.js";
 import { gated } from "./ui.js";
 
@@ -55,13 +55,17 @@ export default class Runs extends View {
     const live = liveStatuses(agents(), terminals());
     const alive = new Set(terminals().map((x) => x.address));
     const tasks = new Map(load().map((x) => [x.id, x]));
-    const all = loadRuns().map((r) => ({ r, status: runStatus(r, live, alive) }));
+    const runs = loadRuns(), cards = load();
+    // One snapshot for the whole render: plain values go down to the cards (never computed per card).
+    const snap = slotSnapshot(runs, cards, live, alive);
+    const slotLines = loadProjects().map((p) => slotLine(snap.byProject.get(p.id), snap.limit, p.name)).filter(Boolean);
+    const all = runs.map((r) => ({ r, status: runStatus(r, live, alive), waiting: snap.waitingRunIds.has(r.id) }));
     const shown = all.filter((x) => this.showEnded || x.status !== "ended");
     const color = { blocked: t.blocked, working: t.working, stopped: t.done, ended: t.dim, gone: t.dim, running: t.idle, idle: t.idle, done: t.done };
     const link = (id, text, action) => div().id(id).h(22).px(7).flex().items_center().rounded(5).text_size(11.5).text_color(t.muted)
       .cursor_pointer().hover((s) => s.bg(t.raised).text_color(t.foreground)).on_click((_e, cx) => { action(); cx.notify(); }).child(text);
 
-    const card = ({ r, status }) => {
+    const card = ({ r, status, waiting }) => {
       const task = tasks.get(r.task);
       const stop = () => {
         if (this.confirm !== r.id) { this.confirm = r.id; return; }
@@ -70,9 +74,9 @@ export default class Runs extends View {
       };
       return v_flex().id(`run-${r.id}`).p(10).gap(6).rounded(9).bg(t.background).border_1().border_color(t.border)
         .child(h_flex().gap(8).items_center()
-          .child(div().w(8).h(8).rounded(4).bg(color[status]))
+          .child(div().w(8).h(8).rounded(4).bg(waiting ? t.dim : color[status]))
           .child(div().flex_1().truncate().text_size(13).child(runTitle(r, task)))
-          .child(div().text_size(11).text_color(color[status]).child(LABEL[status])))
+          .child(div().text_size(11).text_color(waiting ? t.dim : color[status]).child(runBadge(waiting, LABEL[status]))))
         .child(div().text_size(11).text_color(t.dim).truncate()
           .child([r.id, r.name, `started ${age(r.started)} ago`, task ? `column ${task.column}` : "task deleted", r.worktree?.branch].filter(Boolean).join(" · ")))
         .children(squadRows(lineageOf(r, all.map((x) => x.r), live, alive, Date.now())).map((m) => {
@@ -110,6 +114,7 @@ export default class Runs extends View {
       .child(h_flex().h(36).px(12).gap(8).items_center().border_b_1().border_color(t.border)
         .child(div().flex_1().text_size(13).font_semibold().child("Runs"))
         .child(link("ended", this.showEnded ? `Hide ended (${ended})` : `Show ended (${ended})`, () => { this.showEnded = !this.showEnded; })))
+      .children(slotLines.map((text, i) => div().id(`slots-${i}`).px(12).py(4).text_size(11.5).text_color(t.dim).child(text)))
       .child(shown.length === 0
         ? div().p(14).text_size(12).text_color(t.dim).child(all.length ? "No active runs." : "No runs yet. Press ▶ on a task.")
         : v_flex().id("list").flex_1().min_h(0).overflow_y_scrollbar().p(8).gap(8).children(shown.map(card)));
