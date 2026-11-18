@@ -47,3 +47,4 @@ The top block of the `drover` layout's right column (300px, above Tasks). Outsid
 - Inside a run it shows the card's linked issue properties.
 - `+` opens the wakeup dialog for that run.
 - `herdr-app check` on the mod passes.
+- The Squad section offers **Resume squad** on an ended run whose card is not Done/archived (`canResume` = `resumeGuard`); one click = one `resumeSquad` call; Cancel sets the durable attempt flag (`cancelResume`). A crashed attempt (`resumeState` = needs-recovery) shows **Resume needs recovery** with Recover (`recoverResume`) and Cancel (`recoverResume(…, {adopt:false})`); no tick ever kills or frees anything.

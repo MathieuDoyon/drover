@@ -46,3 +46,4 @@ A tab with one block per run, newest first: the run title (task or agent), its s
 - After a ▶ start the run appears with its members.
 - Stop asks twice before killing; Forget removes only an ended run.
 - `herdr-app check` on the mod passes.
+- A run that was resumed carries `resumedBy`; the orphan reaper skips it (the new run has its own new terminals). An ended run offers **Resume squad** when `canResume`; one click = one `resumeSquad` call; **Cancel resume** while an attempt runs; a crashed attempt shows **Resume needs recovery** with Recover and Cancel (manual only; `observeEnded` never touches an attempt).

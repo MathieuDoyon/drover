@@ -23,6 +23,10 @@ usage: drover tasks [tag|column] [--project <id|name>]   list tasks (id, column,
        drover start <T-…|-> <squad|agent> [--worktree] [--project <id|name>]   open a squad (or 1 agent) on a task, or none (-);
                                                   its leader reports to you ($HC_TERMINAL_ID);
                                                   --project (agent drover only) binds that Drover to a project (queue mode)
+       drover resume <R-…|T-…> [--recover|--cancel]   reopen a gone squad (leader + members) with their sessions: a run id, or a card id (its newest run);
+                                                  needs a card that is not Done or archived and an ended run. --cancel stops an attempt in flight;
+                                                  after a crash the card stays claimed until you run --recover (kills what the attempt owns, adopts or releases)
+                                                  or --cancel (abandons it). Nothing recovers by itself
        drover wake <terminal|T-…> <when> <message…>       once: now, 15m, 2h, 1d, 14:30, "tomorrow 9:00", "2026-11-12 09:00"
        drover wake <terminal|T-…> every <30m|2h|1d> <message…>   repeat (first time after one interval)
        drover wakes [terminal|T-…]                list wakeups (id, name, target, schedule, next, status, on/off)
@@ -306,6 +310,18 @@ case "${1:-}" in
       esac
     done
     send "{\"op\":\"start\",\"task\":$(json "$task"),\"runner\":$(json "$runner"),\"worktree\":$wt,\"project\":$(json "$project"),\"from\":$(json "${HC_TERMINAL_ID:-}")}" 120 ;;
+  resume)
+    shift; cancel=false; recover=false; ref=""
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --cancel) cancel=true; shift ;;
+        --recover) recover=true; shift ;;
+        *) [ -z "$ref" ] && [[ "$1" =~ ^[RT]-[A-Z0-9]+$ ]] || usage; ref="$1"; shift ;;
+      esac
+    done
+    [ -n "$ref" ] || usage
+    [ "$cancel" = true ] && [ "$recover" = true ] && usage
+    send "{\"op\":\"resume\",\"ref\":$(json "$ref"),\"cancel\":$cancel,\"recover\":$recover}" "${DROVER_RESUME_WAIT:-120}" ;;
   wakes)
     [ $# -le 2 ] || usage
     send "{\"op\":\"wakes\",\"target\":$(json "${2:-}")}" 5 ;;

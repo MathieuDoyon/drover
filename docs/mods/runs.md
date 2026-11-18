@@ -22,6 +22,10 @@ Change them in Drover Config (see [Configuration](../configuration.md)).
 
 Reads and writes `drover.runs`.
 
+## Resume squad
+
+An ended run whose card is not Done or archived has **Resume squad**; while an attempt runs it shows **Cancel resume**; after a crash it shows **Resume needs recovery** with **Recover** and **Cancel** (nothing recovers by itself). What it does, and when it refuses, is on the [Room page](room.md#resume-a-gone-squad). A resumed run keeps its history: the old run has `resumedBy` and is not touched by the orphan reaper.
+
 ## Needs
 
 `drover-agents` or Board/Tasks start the runs it lists.

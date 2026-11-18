@@ -1,5 +1,5 @@
 // Canonical copy lives in mods/_lib. Pure: agent profiles, squads, prompts and run status.
-import { repoOf, update, CLAIMING, columnName } from "./store.js";
+import { repoOf, update, CLAIMING, columnName, clearClaimToken } from "./store.js";
 import { cfg } from "./config.js";
 
 export const AGENTS_KEY = "drover.agents";
@@ -322,6 +322,112 @@ export function pickCodexSession(paths) {
 // The command that reopens a session by hand. null = unknown kind or id.
 export const resumeCommand = (kind, id) => (UUID.test(String(id)) ? { claude: `claude --resume ${id}`, codex: `codex resume ${id}` }[kind] ?? null : null);
 
+// ---- Resume a gone squad (T-MWLGPS2QJQL). All pure: io.js opens the terminals, these decide what to open and what to say.
+// A session flag the profile already carries: never overridden, so that attempt is skipped.
+const OWN_SESSION = { claude: ["--session-id", "--resume", "-r", "--continue", "-c", "--fork-session", "--from-pr"], codex: ["resume", "fork", "--last", "exec", "review"] };
+const hasOwnSession = (kind, args) => {
+  for (const a of args.slice(1)) {
+    if (a === "--") break;
+    if (OWN_SESSION[kind].some((f) => a === f || (f.startsWith("--") && a.startsWith(`${f}=`)))) return true;
+  }
+  return false;
+};
+// The argv that reopens one terminal's session with a profile's command: ONLY the resume flag is added
+// (Claude `--resume <id>` after argv[0]; Codex `resume <id>` subcommand), never a permission, sandbox or session flag.
+// { argv } or { skip: reason }. terminal: { kind, session } as recorded at launch.
+export function resumeArgv(profile, terminal) {
+  const args = argv(profile?.command), kind = agentKind(args), id = String(terminal?.session ?? "");
+  if (!UUID.test(id)) return { skip: "no session id recorded" };
+  if (!kind || kind !== terminal?.kind) return { skip: `the command is ${kind ?? "not claude or codex"}, the session is ${terminal?.kind ?? "unknown"} (kind differs)` };
+  if (hasOwnSession(kind, args)) return { skip: "the profile has its own session, resume or continue flag" };
+  return { argv: kind === "claude" ? [args[0], "--resume", id, ...args.slice(1)] : [args[0], "resume", id, ...args.slice(1)] };
+}
+const leaderOf = (run) => (run.terminals ?? []).find((t) => t.role === "leader");
+// The frozen profile of one run terminal, by its place in the run (the leader: config.leader; a member: the same index in
+// config.members, launch order). null when the config does not match the terminal's agent: never a guess.
+export function frozenFor(run, terminal) {
+  const c = run?.config;
+  if (!c) return null;
+  const ts = run.terminals ?? [], at = ts.indexOf(terminal);
+  if (at < 0) return null;
+  const lead = leaderOf(run);
+  const p = terminal === lead || terminal.role === "leader" ? c.leader : c.members?.[ts.filter((t, i) => i < at && t !== lead && t.role !== "leader").length];
+  return p && p.id === terminal.agent && p.command ? p : null;
+}
+// The attempts for one terminal, in order: the agent's CURRENT profile, then the run's FROZEN command (same session).
+// A command that would be tried twice is tried once. { candidates: [{ source, agent, argv, model }], error? }.
+export function resumeCandidates(config, run, terminal) {
+  const tries = [["current", config?.agents?.find((a) => a.id === terminal.agent)], ["frozen", frozenFor(run, terminal)]];
+  const candidates = [], why = [];
+  for (const [source, agent] of tries) {
+    if (!agent) { why.push(`${source}: no profile`); continue; }
+    const r = resumeArgv(agent, terminal);
+    if (r.skip) { why.push(`${source}: ${r.skip}`); continue; }
+    if (candidates.some((c) => c.argv.join("\0") === r.argv.join("\0"))) continue;
+    candidates.push({ source, agent, argv: r.argv, model: modelOf(agent.command) });
+  }
+  return candidates.length ? { candidates } : { candidates, error: `${terminal.name ?? terminal.agent} (${terminal.address}) cannot be resumed: ${why.join("; ")}` };
+}
+
+// Can this ended run be resumed now? c: { tasks, runs, alive: Set, resuming?: Set of run ids, attempt?: the caller's attempt id }.
+// Run it again before every irreversible step: the card may have moved to Done or been archived, deleted or claimed by someone else meanwhile.
+export function resumeGuard(c, runId) {
+  const run = c.runs.find((r) => r.id === runId);
+  if (!run) return { error: `no run ${runId}` };
+  if (!run.task) return { error: `${runId} has no card: only a run of a card can be resumed` };
+  if (run.resumedBy) return { error: `${runId} was already resumed as ${run.resumedBy}` };
+  if (c.resuming?.has(runId) && !c.attempt) return { error: `${runId} is already being resumed` };
+  const t = c.tasks.find((x) => x.id === run.task);
+  if (!t) return { error: `${run.task} (the card of ${runId}) was not found` };
+  if (t.archived) return { error: `${t.id} is archived` };
+  if (t.column === "done") return { error: `${t.id} is Done` };
+  if (t.agent === CLAIMING && !(c.attempt && t.claimToken === c.attempt)) return { error: `${t.id} is already starting` };
+  if (t.agent && t.agent !== CLAIMING && c.alive.has(t.agent)) return { error: `${t.id} already has agent ${t.agent}` };
+  const live = (run.terminals ?? []).find((m) => c.alive.has(m.address));
+  if (live) return { error: `${runId} is still running (${live.address})` };
+  const other = c.runs.find((r) => r.id !== runId && r.task === t.id && (r.terminals ?? []).some((m) => c.alive.has(m.address)));
+  if (other) return { error: `${t.id} has another run with a live terminal (${other.id})` };
+  if (!(run.terminals ?? []).length) return { error: `${runId} has no terminals` };
+  const bad = run.terminals.find((m) => !UUID.test(String(m.session)) || !m.kind);
+  if (bad) return { error: `${bad.name ?? bad.agent} (${bad.address}) has no session id recorded: it cannot be resumed` };
+  return { ok: true, run, task: t };
+}
+
+// The first message of a resumed agent. info: { task, role, token, map: [{ role, name, old, address }], leader: { old, address }, changes: [text] }.
+// The attempt token is a line the readiness check reads back from the terminal's argv (delivery proof).
+export const resumeToken = (token) => `drover-resume-attempt: ${token}`;
+export function resumePrompt(kind, info) {
+  const { task, role, token } = info, map = info.map ?? [];
+  const about = task ? ` for task ${task.id}: ${task.title}` : "";
+  if (kind === "leader") {
+    const lines = map.map((m) => `- ${m.address} ${m.name}: ${m.role} (was ${m.old})`).join("\n");
+    const changes = (info.changes ?? []).length ? (info.changes ?? []).map((c) => `- ${c}`).join("\n") : "- nothing else";
+    return `Your squad was resumed${about}. You are the leader (your session continues; your terminal address is new, run \`echo $HC_TERMINAL_ID\`: it was ${info.leader.old}).\n\n` +
+      `What changed while the squad was gone:\n${changes}\n- every terminal address is new; the old ones are dead\n\n` +
+      `Your members, new addresses (the same sessions, they wait for you):\n${lines || "- none"}\n` +
+      (map.length ? `Give them work with \`hc send ${map[0].address} "<text>"\`, wait with \`hc wait <address>\`, read with \`hc read <address>\`.\n` : "") +
+      `\nRun \`git status\` and re-read your lane log before you act: your context may be stale. Tell the person what you found in 1 line, then continue.\n\n${resumeToken(token)}`;
+  }
+  return `Your session was resumed${about}. Your role: ${role}. Your session continues, but the squad's terminal addresses changed: yours is new, and so is the leader's (it was ${info.leader.old}); the leader will message you from its new address.\n\n` +
+    `Do not start work yet. Wait for the squad leader to message you. First run \`git status\` and re-read the files you worked on: they may have changed.\n\n${resumeToken(token)}`;
+}
+
+// The terminal record of a resumed terminal: fresh (no ended, no reaped), built from what this attempt did.
+// sourceSession = the id that was resumed; session = the effective id (Codex may write a new rollout: io.js patches it, scoped).
+export const resumedTerminal = (address, old, f) =>
+  ({ address, agent: old.agent, name: old.name, role: old.role, model: f.model ?? null, started: f.started,
+    ...(old.env?.length ? { env: [...old.env] } : {}), session: old.session, kind: old.kind, sourceSession: old.session,
+    ...(typeof f.cwd === "string" && f.cwd.startsWith("/") ? { cwd: f.cwd } : {}), ...(f.parked ? { parked: true } : {}) });
+
+// The new run: built field by field, never spread from the old run (ended, reaped, space and terminals would leak into it).
+export const resumedRun = (old, f) => ({
+  id: f.id, task: old.task, project: old.project ?? null, title: old.title, runner: old.runner, name: old.name,
+  config: JSON.parse(JSON.stringify(old.config ?? null)), space: f.space ?? null, worktree: f.worktree ?? null,
+  terminals: f.terminals, started: f.started, reportTo: old.reportTo ?? null, resumedFrom: old.id,
+});
+// The saved list after a resume: the new run first, the old one kept as history with resumedBy (the reaper then skips it).
+export const linkResumed = (runs, run) => [run, ...runs.map((r) => (r.id === run.resumedFrom ? { ...r, resumedBy: run.id } : r))];
+
 // The record saved for each run terminal at launch. model = requested (from the frozen command), started = launch time.
 // envNames = variable names only, never values. extra: { session, kind, cwd }, each kept only when known (cwd only when absolute).
 export const terminalRecord = (address, agent, now, envNames, extra = {}) =>
@@ -418,6 +524,7 @@ export const stopTargets = (run, alive) => (run.terminals ?? []).filter((m) => a
 // (only a run with its own worktree space) that space is gone from a non-empty space list. An empty list is
 // "unknown", not "closed". Only terminals recorded in this run; never the leader, a pane worker, or one already reaped.
 export function orphanedWorkers(run, alive, spaceIds) {
+  if (run.resumedBy) return []; // a resumed run is history: its workers belong to the new run's attempt, never to the reaper
   const ts = run.terminals ?? [], leader = ts.find((m) => m.role === "leader");
   const orphaned = (run.worktree && run.space && spaceIds.size && !spaceIds.has(run.space)) || (leader && !alive.has(leader.address));
   return orphaned ? ts.filter((m) => m.parked && !m.reaped && m.role !== "leader").map((m) => m.address) : [];
@@ -532,13 +639,15 @@ export function startGuard(c, cmd) {
 // Reconcile one project's cards with its runs after a crash or a dead run. Pure: returns { tasks, lines }.
 // Never relaunches and never restores an archived or moved card. alive: Set of live terminal addresses.
 export const claimTtl = 5 * 60000;
-export function reconcile(tasks, runs, alive, now, projectId) {
+// holds: card ids that have a resume attempt on record (shared drover.resumes): such a claim is neither adopted nor expired here.
+export function reconcile(tasks, runs, alive, now, projectId, holds = new Set()) {
   const lines = [];
   let out = tasks;
-  const patch = (id, p) => { out = update(out, id, p, now).tasks; };
+  const patch = (id, p) => { out = clearClaimToken(update(out, id, p, now).tasks, id); }; // the claim ends here: so does its owner's identity
   for (const t of tasks) {
     if (t.project !== projectId || t.archived) continue;
     if (t.agent === CLAIMING) {
+      if (holds.has(t.id)) continue; // a resume owns this claim: adopting or expiring it is the manual Recover's job, never a queue read's
       const r = runs.filter((x) => x.task === t.id && (x.started ?? 0) >= (t.claimedAt ?? 0)).sort((a, b) => (b.started ?? 0) - (a.started ?? 0))[0];
       if (r) {
         patch(t.id, { agent: r.terminals[r.terminals.length - 1]?.address ?? null, run: r.id, claimedAt: null });

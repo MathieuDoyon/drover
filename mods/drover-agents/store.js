@@ -429,6 +429,10 @@ export function nextReport(tasks, projects, projectId, slots) {
 // Claim before any await: card to doing with agent "claiming" in one step, so a 2nd start sees it.
 // prev is what release() restores if the launch fails.
 export const CLAIMING = "claiming";
+// A claim's ownership identity (claimToken, set by a resume attempt) never outlives the claim it was made for:
+// every new claim, a release, an expiry and an adoption drop it, so an old attempt can never act on a newer claim.
+const withoutToken = (t) => { if (!t || !("claimToken" in t)) return t; const { claimToken: _t, ...rest } = t; return rest; };
+export const clearClaimToken = (tasks, id) => tasks.map((t) => (t.id === id ? withoutToken(t) : t));
 // alive: Set of live terminal addresses. An agent that is gone no longer owns the card (manual restart).
 export function claim(tasks, id, projectId, now, alive) {
   const cur = tasks.find((t) => t.id === id);
@@ -440,15 +444,16 @@ export function claim(tasks, id, projectId, now, alive) {
     if (cur.project !== projectId) return { error: `${id} is not in this project` };
   }
   const r = update(tasks, id, { column: "doing", agent: CLAIMING, claimedAt: now ?? Date.now() }, now);
-  return r.error ? r : { ...r, prev: { column: cur.column, order: cur.order } };
+  return r.error ? r : { tasks: clearClaimToken(r.tasks, id), task: withoutToken(r.task), prev: { column: cur.column, order: cur.order } };
 }
 
 // A launch failed: clear the claim. Put the column back only if the owner did not move the card meanwhile.
 export function release(tasks, id, prev, now) {
   const cur = tasks.find((t) => t.id === id);
   if (!cur || cur.agent !== CLAIMING) return { tasks };
-  if (cur.column !== "doing" || cur.archived) return update(tasks, id, { agent: null, claimedAt: null }, now);
-  const r = update(tasks, id, { column: prev.column, agent: null, claimedAt: null }, now);
+  const done = (r) => (r.error ? r : { tasks: clearClaimToken(r.tasks, id), task: withoutToken(r.task) });
+  if (cur.column !== "doing" || cur.archived) return done(update(tasks, id, { agent: null, claimedAt: null }, now));
+  const r = done(update(tasks, id, { column: prev.column, agent: null, claimedAt: null }, now));
   if (typeof prev.order !== "number") return r;
   const next = r.tasks.map((t) => (t.id === id ? { ...t, order: prev.order } : t));
   return { tasks: next, task: next.find((t) => t.id === id) };

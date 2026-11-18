@@ -12,7 +12,7 @@ import { section as sectionOf, toggle, openNewWakeup } from "./ui.js";
 import { age, prLabel, projectLabel } from "./sources.js";
 import { bind, cfg, isEnabled, load as loadCfg, ready as cfgReady } from "./config.js";
 import { gated } from "./ui.js";
-import { load, loadProjects, loadRuns, loadWakes, edit, openUrl, watchWakes, observeEnded, loadContext, mergeContext, CONTEXT_STALE, ROOM_KEY, modSettings } from "./io.js";
+import { load, loadProjects, loadRuns, loadWakes, edit, openUrl, watchWakes, observeEnded, resumeSquad, canResume, cancelResume, recoverResume, resumeState, loadContext, mergeContext, CONTEXT_STALE, ROOM_KEY, modSettings } from "./io.js";
 
 const contexts = () => shared(ROOM_KEY) ?? {};
 
@@ -52,6 +52,26 @@ export default class Room extends View {
     cx.write_to_clipboard(text);
     this.copied = address; cx.notify();
     cx.timer.after(1500, (cx) => { if (this.copied === address) { this.copied = null; cx.notify(); } });
+  }
+
+  // The Squad "Resume": one click = one resumeSquad call (the flag is set before the first await). A failure is notified by resumeSquad itself.
+  startResume(cx) {
+    const id = this.run?.id;
+    if (!id || this.resumeBusy) return;
+    this.resumeBusy = id;
+    cx.spawn(async (cx) => {
+      try { await resumeSquad(id); } finally { this.resumeBusy = null; cx.notify(); }
+    });
+    cx.notify();
+  }
+
+  // Recover / Cancel of a crashed attempt: one click = one call (the same busy flag). Nothing recovers by itself.
+  startRecover(adopt, cx) {
+    const id = this.run?.id;
+    if (!id || this.resumeBusy) return;
+    this.resumeBusy = id;
+    cx.spawn(async (cx) => { try { await recoverResume(id, { adopt }); } finally { this.resumeBusy = null; cx.notify(); } });
+    cx.notify();
   }
 
   // Only the run you are in, only when its data is refresh_minutes old (or missing), one at a time.
@@ -185,6 +205,20 @@ export default class Room extends View {
           .child(r.worktree ? `No PRs for ${r.worktree.branch}.` : "No worktree branch: PRs show for linked ones only."))))
 
       .child(section("Squad", r.terminals.length))
+      .when(this.resumeBusy === r.id || resumeState(r.id) === "live", (el) => el.child(h_flex().id("resume-status").min_h(26).gap(8).items_center()
+        .child(div().text_size(12).text_color(t.muted).child("Resuming the squad…"))
+        .child(div().id("resume-cancel").px(8).py(2).rounded(5).bg(t.raised).cursor_pointer().hover((x) => x.bg(t.hover)).text_size(11.5).text_color(t.muted)
+          .on_click((_e, cx) => { cancelResume(r.id); cx.notify(); }).child("Cancel"))))
+      .when(this.resumeBusy !== r.id && resumeState(r.id) === "recovering", (el) => el.child(div().id("resume-recovering").min_h(26).text_size(12).text_color(t.muted).child("Recovering…")))
+      .when(this.resumeBusy !== r.id && resumeState(r.id) === "needs-recovery", (el) => el.child(h_flex().id("resume-needs-recovery").min_h(26).gap(8).items_center()
+        .child(div().text_size(12).text_color(t.blocked).child("Resume needs recovery"))
+        .child(div().id("resume-recover").px(8).py(2).rounded(5).bg(t.raised).cursor_pointer().hover((x) => x.bg(t.hover)).text_size(11.5).text_color(t.foreground)
+          .on_click((_e, cx) => this.startRecover(true, cx)).child("Recover"))
+        .child(div().id("resume-abandon").px(8).py(2).rounded(5).bg(t.raised).cursor_pointer().hover((x) => x.bg(t.hover)).text_size(11.5).text_color(t.muted)
+          .on_click((_e, cx) => this.startRecover(false, cx)).child("Cancel"))))
+      .when(this.resumeBusy !== r.id && resumeState(r.id) === "none" && canResume(r.id), (el) => el.child(h_flex().min_h(26).items_center()
+        .child(div().id("resume-squad").px(8).py(2).rounded(5).bg(t.raised).cursor_pointer().hover((x) => x.bg(t.hover)).text_size(11.5).text_color(t.foreground)
+          .on_click((_e, cx) => this.startResume(cx)).child("Resume squad"))))
       .children(squadRows(lineageOf(r, loadRuns(), live, alive, Date.now())).map((m) => {
         const row = h_flex().id(`m-${m.address}`).min_h(26).gap(8).items_center().rounded(6).pl(m.depth * 14)
           .when(m.dim, (el) => el.opacity(0.5))

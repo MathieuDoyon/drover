@@ -2,7 +2,7 @@
 // The herdr side of the store: tasks persist in shared state (shared.json, written atomically).
 import { shared, setShared, openOverlay, exec, hc, readTextFile, writeTextFile, notify, focused, appHome, home, watchFolder, spaces, panes, agents, terminals } from "herdr";
 import * as fs from "fs/promises";
-import { KEY, SEEN_KEY, PROJECTS_KEY, firstSight, list, add, update, bySource, addCommand, applyCommand, columnName, repoOf, projectOf, projectKey, projectAddRequest, projectDiff, PROTOCOL, inboxGate, arrivalOf, addProject, projectNamed, nextReport, claim, release, editSize } from "./store.js";
+import { KEY, SEEN_KEY, PROJECTS_KEY, firstSight, list, add, update, bySource, addCommand, applyCommand, columnName, repoOf, projectOf, projectKey, projectAddRequest, projectDiff, PROTOCOL, inboxGate, arrivalOf, addProject, projectNamed, nextReport, claim, release, editSize, CLAIMING, clearClaimToken } from "./store.js";
 import { base64, httpProblem, jiraIssue, jiraKey, githubIssue, prItems } from "./sources.js";
 import { ownerError, createRemote, bindings as remoteBindings, mergeRemote, cacheKey } from "./remote.js";
 import { createWriter } from "./remote-write.js";
@@ -13,7 +13,7 @@ import { resolveWorkFolder, moveOffers, parseMove } from "./workfolder.js";
 import { bind as bindCfg, load as loadCfg, ready as cfgReady, cfg } from "./config.js";
 import { soulHash } from "./herd-export.js";
 import { exportName } from "./herd-share.js";
-import { AGENTS_KEY, RUNS_KEY, config, plan, argv, leaderPrompt, createCardsPrompt, memberPrompt, worktreeOf, terminalName, startGuard, projectOfDrover, isLiveDrover, activeFor, reconcile, runFolder, markEnded, orphanedWorkers, terminalRecord, agentKind, newUuid, withSessionFlag, withMarker, pickCodexSession, liveStatuses, launchArgv, parseAgentEnv, envProblem, BIND_KEY, droverChoices, defaultDrover, maxRuns, keptRuns, pruneRuns } from "./runs.js";
+import { AGENTS_KEY, RUNS_KEY, config, plan, argv, leaderPrompt, createCardsPrompt, memberPrompt, worktreeOf, terminalName, startGuard, projectOfDrover, isLiveDrover, activeFor, reconcile, runFolder, markEnded, orphanedWorkers, terminalRecord, agentKind, newUuid, withSessionFlag, withMarker, pickCodexSession, liveStatuses, memberStatus, resumeCandidates, resumeToken, resumeGuard, resumePrompt, resumedTerminal, resumedRun, linkResumed, sessionMarker, claimTtl, launchArgv, parseAgentEnv, envProblem, BIND_KEY, droverChoices, defaultDrover, maxRuns, keptRuns, pruneRuns } from "./runs.js";
 
 export const load = () => list(shared(KEY));
 
@@ -283,11 +283,11 @@ function patchSession(runId, address, session, kind) {
 }
 // Detached from launch(): never awaited by it. The runtime that launched owns the search: if it is reloaded first, the id stays unknown.
 async function discoverSessions(runId, pending) {
-  await Promise.all(pending.map(async ({ address, token }) => {
+  await Promise.all(pending.map(async ({ address, token, source }) => { // source = the id a resume continued: replaced only while it is still the session
     try {
       for (let i = 0; i < sessionSettle.tries; i++) {
         const id = await findCodexSession(token);
-        if (id) { if (patchSession(runId, address, id, "codex")) await labelSession(address, id); return; }
+        if (id) { if (source ? patchSourceSession(runId, address, source, id) : patchSession(runId, address, id, "codex")) await labelSession(address, id); return; }
         if (i < sessionSettle.tries - 1) await exec("sleep", [String(sessionSettle.ms / 1000)]); // no setTimeout in a mod: the host runs the wait
       }
     } catch { /* unknown stays unknown */ }
@@ -448,6 +448,503 @@ export async function launch(task, runner, { worktree, reportTo, project, create
     if (!reportTo) notify({ title: `${label} not started`, body: error, level: "error" });
     return { error };
   }
+}
+
+// ---- Resume a gone squad (T-MWLGPS2QJQL). Building blocks only: S2 composes them into the whole-squad flow.
+// The run's worktree, again. Reuses a live one, recreates a gone one from the run's branch (never -b), refuses anything else with the reason.
+// Git state is read from `worktree list --porcelain` (never from localized messages). No prune: only THIS path's stale registration is removed.
+const git = (args, repo) => exec("git", args, { cwd: repo });
+const isDir = async (p) => (await exec("test", ["-d", p]))?.code === 0;
+function worktreeEntries(text) {
+  return String(text ?? "").split(/\n\s*\n/).map((b) => {
+    const e = {};
+    for (const l of b.split("\n")) { if (l.startsWith("worktree ")) e.path = l.slice(9); else if (l.startsWith("branch ")) e.branch = l.slice(7); }
+    return e;
+  }).filter((e) => e.path);
+}
+// What is really at the path: a worktree whose root is that path, of the run's repo (same common git dir), on the run's branch.
+// The registry says only that git knows the path; the folder may since have been replaced by anything.
+async function verifyWorktree(path, branch, repo, registered) {
+  const q = (cwd, args) => git(["rev-parse", "--path-format=absolute", ...args], cwd);
+  const [top, common, mine, head] = await Promise.all([q(path, ["--show-toplevel"]), q(path, ["--git-common-dir"]), q(repo, ["--git-common-dir"]), git(["symbolic-ref", "--quiet", "HEAD"], path)]);
+  const out = (r) => String(r?.stdout ?? "").trim();
+  if (top?.code !== 0 || out(top) !== registered) throw new Error(`${path} is not the root of a worktree (something else is there now), so it was not reused`);
+  if (common?.code !== 0 || mine?.code !== 0 || out(common) !== out(mine)) throw new Error(`${path} belongs to another repository than ${repo}, so it was not reused`);
+  if (head?.code !== 0 || out(head) !== `refs/heads/${branch}`) throw new Error(`${path} is not on branch ${branch} (it has ${out(head).replace("refs/heads/", "") || "a detached HEAD"}), so it was not reused`);
+}
+export async function ensureWorktree(run) {
+  const w = run.worktree;
+  if (!w) { // no worktree on the run: reopen in the folder it recorded
+    const t = (run.terminals ?? []).find((m) => m.role === "leader" && m.cwd) ?? (run.terminals ?? []).find((m) => m.cwd);
+    if (!t?.cwd) throw new Error("this run recorded no folder to reopen in");
+    if (!(await isDir(t.cwd))) throw new Error(`the folder ${t.cwd} is gone`);
+    return { path: t.cwd, branch: null, repo: null, created: false };
+  }
+  const { repo, branch, path } = w, ref = `refs/heads/${branch}`;
+  if (!(await isDir(repo))) throw new Error(`the repo ${repo} is gone`);
+  const ls = await git(["worktree", "list", "--porcelain"], repo);
+  if (ls?.code !== 0) throw new Error(`cannot read the worktrees of ${repo}`);
+  const all = worktreeEntries(ls.stdout), here = all.find((e) => e.path === path), elsewhere = all.find((e) => e.branch === ref && e.path !== path);
+  if (elsewhere) throw new Error(`branch ${branch} is checked out at ${elsewhere.path}`);
+  const present = await isDir(path);
+  if (here) {
+    if (here.branch !== ref) throw new Error(`${path} is a worktree of another branch (${String(here.branch ?? "detached").replace("refs/heads/", "")}), not ${branch}`);
+    if (present) { await verifyWorktree(path, branch, repo, here.path); return { path, branch, repo, created: false }; }
+    const rm = await git(["worktree", "remove", "--force", path], repo); // drops only this missing path's registration
+    if (rm?.code !== 0) throw new Error(`could not drop the stale registration of ${path}`);
+  } else if (present) throw new Error(`${path} exists and is not a worktree of ${branch}`);
+  if ((await git(["show-ref", "--verify", "--quiet", ref], repo))?.code !== 0) throw new Error(`branch ${branch} no longer exists in ${repo}`);
+  const add = await git(["worktree", "add", path, branch], repo);
+  if (add?.code !== 0) throw new Error(`git worktree add failed: ${String(add?.stderr ?? "").trim().split("\n").pop()}`);
+  return { path, branch, repo, created: true };
+}
+
+// Durable attempt record, shared (drover.resumes[<old run id>]): written BEFORE the first open and updated with each opened address,
+// so a crashed attempt can be recovered by hand (Recover) and found by its token. token rides in every first message.
+export const RESUMES_KEY = "drover.resumes";
+export const resumeSettle = { tries: 20, ms: 1000 }; // the barrier: polls of the live list (ms apart; the host runs the wait)
+export const killSettle = { tries: 10, ms: 300 };
+const resumes = () => { const r = shared(RESUMES_KEY); return r && typeof r === "object" && !Array.isArray(r) ? r : {}; };
+// The lease: an attempt is alive while its heartbeat (renewed by its own work: every check, open, poll and park) is younger than this.
+const staleAfter = () => claimTtl + 2 * resumeSettle.tries * resumeSettle.ms;
+const beatOf = (a) => a?.heartbeat ?? a?.started ?? 0;
+export const attemptOf = (runId) => resumes()[runId] ?? null;
+export function beginAttempt(runId, taskId, now = Date.now()) {
+  const cur = attemptOf(runId);
+  if (cur) { // a record is never replaced on its own: a crashed attempt needs one manual Recover (it may still own terminals)
+    return fresh(cur, now) ? { error: `${runId} is already being resumed` }
+      : { error: `${runId} has an earlier resume attempt that stopped: it needs recovery (Recover, or drover resume ${runId} --recover)`, recoveryNeeded: true, recovery: cur };
+  }
+  const id = "A-" + newUuid().slice(0, 8);
+  const a = { id, attemptIds: [id], token: newUuid().replace(/-/g, ""), card: taskId, started: now, heartbeat: now, opened: [] };
+  setShared(RESUMES_KEY, { ...resumes(), [runId]: a });
+  return a;
+}
+export function attemptOpened(runId, attemptId, address, now = Date.now()) {
+  const cur = attemptOf(runId);
+  if (!cur || cur.id !== attemptId || cur.opened.includes(address)) return false;
+  setShared(RESUMES_KEY, { ...resumes(), [runId]: { ...cur, opened: [...cur.opened, address], launching: null, heartbeat: now } }); // the intent is resolved: the address is recorded
+  return true;
+}
+export function endAttempt(runId, attemptId) {
+  const cur = attemptOf(runId);
+  if (!cur || cur.id !== attemptId) return false;
+  const { [runId]: _gone, ...rest } = resumes();
+  setShared(RESUMES_KEY, rest);
+  return true;
+}
+
+// The card's claim, owned by one attempt: claim() plus a token. No await between the guard and this call.
+export function claimForResume(taskId, attemptId) {
+  const c = claim(load(), taskId, undefined, undefined, liveState().alive);
+  if (c.error) return c;
+  const t = update(c.tasks, taskId, { claimToken: attemptId });
+  if (t.error) return t;
+  setShared(KEY, t.tasks);
+  return { prev: c.prev };
+}
+export const holdsClaim = (taskId, attemptId) => { const t = load().find((x) => x.id === taskId); return !!t && t.agent === CLAIMING && t.claimToken === attemptId; };
+// Only the attempt that holds the claim releases it: a late attempt never clears a replacement claim.
+export function releaseResumeClaim(taskId, prev, attemptId) {
+  if (!holdsClaim(taskId, attemptId)) return false;
+  setShared(KEY, clearClaimToken(release(load(), taskId, prev).tasks, taskId));
+  return true;
+}
+
+// Codex may write a NEW rollout when it resumes. The effective `session` is replaced only while it still equals the id this attempt resumed (sourceSession),
+// so history, another terminal or a later change is never overwritten. A pruned run is not brought back.
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+export function patchSourceSession(runId, address, source, session) {
+  if (!UUID_RE.test(String(session))) return false;
+  const runs = loadRuns();
+  const mine = (r) => r.id === runId && r.terminals?.some((x) => x.address === address);
+  const t = runs.find(mine)?.terminals.find((x) => x.address === address);
+  if (!t || t.sourceSession !== source || t.session !== source) return false;
+  setShared(RUNS_KEY, runs.map((r) => (!mine(r) ? r : { ...r, terminals: r.terminals.map((x) => (x.address === address ? { ...x, session } : x)) })));
+  return true;
+}
+
+// The live list as evidence. An EMPTY list is the host not being ready (observeEnded treats it so), never "everything exited":
+// known=false then, and nothing may be concluded from it.
+const liveSnapshot = () => { const { alive } = liveState(); return { alive, known: alive.size > 0 }; };
+// Readiness of one reopened terminal: an AGENT status (idle/working/done, not a bare shell) on 2 reads in a row, then the first message delivered,
+// then the status read AGAIN (the terminal may have exited or blocked during the delivery read). blocked, gone or no answer within the bound = failed.
+// Nothing is ever typed into the terminal (a dialog is the person's).
+const READY = new Set(["idle", "working", "done"]);
+const sleep = (ms) => exec("sleep", [String(ms / 1000)]); // no setTimeout in a mod: the host runs the wait
+async function delivered(address, token) {
+  try {
+    const r = await hc(["get", address, "--json"]);
+    if (r?.code !== 0) return false;
+    const rec = JSON.parse(r.stdout);
+    if (rec?.first_message && typeof rec.first_message === "object") return rec.first_message.sent === true; // the host tracks it
+    return (rec?.argv ?? []).some((a) => String(a).includes(resumeToken(token))); // the task rides in argv: the process got it at start
+  } catch { return false; }
+}
+const statusNow = (address) => { const { live, alive } = liveState(); return memberStatus(address, live, alive); };
+async function barrier(address, token, beat) {
+  let ok = 0, sent = false;
+  for (let i = 0; i < resumeSettle.tries; i++) {
+    beat?.(); // the lease: this attempt is still working
+    const st = statusNow(address);
+    if (st === "gone") return { error: "the terminal exited" };
+    if (st === "blocked") return { error: "the terminal is blocked on a dialog (answer it by hand)" };
+    ok = READY.has(st) ? ok + 1 : 0;
+    if (ok >= 2) {
+      sent = await delivered(address, token);
+      const again = statusNow(address); // a fresh read at the return point, after the await
+      if (again === "gone") return { error: "the terminal exited while its first message was being checked" };
+      if (again === "blocked") return { error: "the terminal is blocked on a dialog (answer it by hand)" };
+      if (sent && READY.has(again)) return { ok: true };
+      if (!READY.has(again)) ok = 0;
+    }
+    if (i < resumeSettle.tries - 1) await sleep(resumeSettle.ms);
+  }
+  return { error: ok >= 2 || sent ? "its first message was not delivered" : "it did not report an agent status (not ready)" };
+}
+// terminal.kill, then PROOF it is gone: the host's own record says it is no longer live, or two non-empty lists in a row lack it.
+// An empty or unreadable list proves nothing. false = unknown: the caller fails closed (never a second session of one id).
+async function hostSaysDead(address) {
+  try {
+    const r = await hc(["get", address, "--json"]);
+    if (r?.code !== 0) return false; // no answer is not an answer
+    const st = JSON.parse(r.stdout)?.state;
+    return typeof st === "string" && st !== "live";
+  } catch { return false; }
+}
+async function killConfirmed(address) {
+  try { await herdr(["terminal.kill", "--terminal", address]); } catch { /* the proof below decides */ }
+  let absent = 0;
+  for (let i = 0; i < killSettle.tries; i++) {
+    const { alive, known } = liveSnapshot();
+    if (known && !alive.has(address)) absent++; else absent = 0;
+    if (absent >= 2 || (alive.has(address) || !known ? await hostSaysDead(address) : false)) return true;
+    if (i < killSettle.tries - 1) await sleep(killSettle.ms);
+  }
+  return false;
+}
+
+// Reopens ONE terminal of a gone run: the agent's current command first, the run's frozen command if that fails (same session, same resume flag only).
+// o: { cwd, prompt (carries the attempt token), token, name, space | spaceName (open a new space),
+//      check(): SYNC, returns a reason (or throws) to stop: asked right before every open and after the barrier,
+//      intent(): SYNC, called right before each open (persist the launch intent: an open whose answer is lost is then recoverable by token),
+//      beat(): SYNC, renews the attempt's lease on each poll,
+//      onOpen(address): SYNC, record ownership; returning false = rejected (the terminal is killed and the resume stops) }.
+// A failed attempt is killed and confirmed gone before the next one; an unconfirmed kill stops everything (failClosed): never 2 sessions of one id.
+// Returns { address, space, source, model, argv } or { error, killed, cancelled?, failClosed? }.
+export async function resumeTerminal(run, terminal, o) {
+  const c = resumeCandidates(loadConfig(), run, terminal);
+  if (c.error) return { error: c.error, killed: [] };
+  const killed = [], errors = [], who = `${terminal.name ?? terminal.agent}`;
+  const stopReason = () => { try { return o.check?.() || null; } catch (e) { return `the check failed: ${String(e?.message ?? e)}`; } };
+  const undo = async (address, why) => { // a terminal we opened must not outlive a stop
+    if (!(await killConfirmed(address))) return { error: `${who}: ${why}; terminal ${address} may still be alive (kill not confirmed)`, killed, cancelled: true, failClosed: true, address };
+    killed.push(address);
+    return { error: `${who}: ${why}`, killed, cancelled: true };
+  };
+  for (const cand of c.candidates) {
+    let out;
+    try {
+      const args = ["--argv", JSON.stringify(launchArgv(cand.agent.id, cand.argv, ENV_WRAPPER(), await hasAgentEnv(cand.agent.id))), "--task", o.prompt];
+      const why = stopReason(); // the last synchronous look before the irreversible open
+      if (why) return { error: `${who}: ${why}`, killed, cancelled: true };
+      o.intent?.(); // written before the open is issued
+      out = o.spaceName
+        ? await herdr(["space.new", "--name", o.spaceName, ...(o.cwd ? ["--folder", o.cwd] : []), "--tab", o.name, ...args])
+        : await herdr(["tab.new", "--name", o.name, ...(o.space ? ["--space", o.space] : []), ...(o.cwd ? ["--folder", o.cwd] : []), ...args]);
+    } catch (e) { errors.push(`${cand.source}: ${String(e?.message ?? e)}`); continue; } // nothing opened
+    const address = out.terminal;
+    if (o.onOpen?.(address) === false) return undo(address, "its ownership could not be recorded (the attempt was replaced)"); // before any await after the open
+    const r = await barrier(address, o.token, o.beat);
+    if (r.ok) {
+      const why = stopReason();
+      if (why) return undo(address, why);
+      return { address, space: out.space ?? o.space ?? null, source: cand.source, model: cand.model, argv: cand.argv };
+    }
+    errors.push(`${cand.source}: ${r.error}`);
+    const why = stopReason(); // a stop during the barrier: no fallback
+    if (!(await killConfirmed(address))) return { error: `${who}: terminal ${address} may still be alive (kill not confirmed), so no second one was opened; ${errors.join("; ")}`, killed, failClosed: true, address };
+    killed.push(address);
+    if (why) return { error: `${who}: ${why}`, killed, cancelled: true };
+  }
+  return { error: `${who} (${terminal.address}) did not resume: ${errors.join("; ")}`, killed };
+}
+
+// ---- Resume a whole gone squad (T-MWLGPS2QJQL S2). Composes the building blocks above.
+const resuming = new Set(); // run ids resumed by THIS runtime (the shared drover.resumes record covers the other mods)
+const fresh = (a, now = Date.now()) => !!a && now - beatOf(a) <= staleAfter();
+// Runs with an attempt on record (live or crashed), from any mod (the durable record), plus this runtime's own.
+const inFlight = () => new Set([...resuming, ...Object.keys(resumes())]); // a lapsed record counts too: it needs a manual Recover
+// Can the Resume button be offered for this run now? Same guard as the real thing; an unreadable live list says no.
+export function canResume(runId) {
+  const { alive, known } = liveSnapshot();
+  return known && resumeGuard({ tasks: load(), runs: loadRuns(), alive, resuming: inFlight() }, runId).ok === true;
+}
+// Stop for an attempt: the durable flag is read by the attempt's own checks before its next open/park/publish.
+export function cancelResume(runId) {
+  const cur = attemptOf(runId);
+  if (!cur) return false;
+  setShared(RESUMES_KEY, { ...resumes(), [runId]: { ...cur, cancel: true } });
+  return true;
+}
+const noteAttempt = (runId, id, patch) => { const cur = attemptOf(runId); if (cur?.id === id) setShared(RESUMES_KEY, { ...resumes(), [runId]: { ...cur, ...patch } }); };
+// A resume keeps the claim alive: its age counts from the last open, so a slow barrier never lets the claim expire under it.
+function refreshClaim(taskId, attemptId) {
+  if (!holdsClaim(taskId, attemptId)) return;
+  const r = update(load(), taskId, { claimedAt: Date.now() });
+  if (!r.error) setShared(KEY, r.tasks);
+}
+const short = (role) => String(role ?? "").split(/[.:(]/)[0].trim();
+
+// Reopens a gone run's whole squad: members first (each with its barrier), then the leader whose first message holds the new address
+// map and what changed, then the members are parked. The new run is saved only at the very end; anything failing before that kills
+// ONLY this attempt's terminals, releases the claim (only with this attempt's token) and leaves the old run untouched.
+// ref: a run id (R-…) or a card id (T-…, its newest run). Returns { run } or { error }.
+export async function resumeSquad(ref, { quiet = false } = {}) {
+  ref = String(ref ?? "");
+  const all = loadRuns();
+  const run = /^T-/.test(ref) ? all.filter((r) => r.task === ref).sort((a, b) => (b.started ?? 0) - (a.started ?? 0))[0] : all.find((r) => r.id === ref);
+  if (!run) return { error: `no run for ${ref}` };
+  // ---- no await from here to the claim: a second click, the CLI and another mod all see the claim and the attempt record
+  if (!liveSnapshot().known) return { error: "Herdr's terminal list is not ready: try again in a moment" };
+  const g = resumeGuard({ tasks: load(), runs: all, alive: liveState().alive, resuming: inFlight() }, run.id);
+  if (g.error) return { error: g.error };
+  const task = g.task;
+  const owned = ownerError(loadProjects(), task.project);
+  if (owned) return { error: owned };
+  const a = beginAttempt(run.id, task.id);
+  if (a.error) return { error: a.error };
+  const c = claimForResume(task.id, a.id);
+  if (c.error) { endAttempt(run.id, a.id); return { error: c.error }; }
+  noteAttempt(run.id, a.id, { prev: c.prev });
+  resuming.add(run.id);
+  // ----
+  const opened = [], dead = new Set(), pending = [], newT = [];
+  let lastBeat = 0;
+  const beat = (force = false) => { const t = Date.now(); if (force || t - lastBeat >= 5000) { lastBeat = t; noteAttempt(run.id, a.id, { heartbeat: t }); } };
+  // Synchronous: asked before every open and after every barrier. A reason = stop (cancel, replaced attempt or claim, the card Done/archived/deleted).
+  const stop = () => {
+    const rec = attemptOf(run.id);
+    if (!rec || rec.id !== a.id) return "the attempt was replaced";
+    if (rec.cancel) return "cancelled: stopped by the person";
+    const gg = resumeGuard({ tasks: load(), runs: loadRuns(), alive: liveState().alive, resuming: new Set(), attempt: a.id }, run.id);
+    if (gg.error) return gg.error;
+    if (!holdsClaim(task.id, a.id)) return "the claim on the card was replaced";
+    const cur = load().find((x) => x.id === task.id); // the card must still sit where the claim put it: any move by the owner aborts (their column is kept)
+    if (cur.column !== "doing" || cur.project !== task.project) return `the card was moved to ${columnName(cur.column)}`;
+    if (newT.length) { // every terminal this attempt already opened must still be there and not stuck on a dialog; an unknown list is NOT evidence
+      if (!liveSnapshot().known) return "Herdr's terminal list is not ready: could not confirm the new terminals are up";
+      for (const t of newT) {
+        const st = statusNow(t.address);
+        if (st === "gone") return `${t.name} (${t.address}) exited before the squad was complete`;
+        if (st === "blocked") return `${t.name} (${t.address}) is blocked on a dialog (answer it by hand)`;
+      }
+    }
+    refreshClaim(task.id, a.id); beat(true);
+    return null;
+  };
+  const onOpen = (address) => { opened.push(address); const ok = attemptOpened(run.id, a.id, address); if (ok) refreshClaim(task.id, a.id); return ok; };
+  const intent = () => noteAttempt(run.id, a.id, { launching: Date.now(), heartbeat: Date.now() });
+  const must = () => { const why = stop(); if (why) throw new Error(why); };
+  // The final check. An unknown (empty) list is NOT a pass: it is retried a bounded number of times, then the resume fails.
+  const verifyGroup = async () => {
+    for (let i = 0; i < resumeSettle.tries; i++) {
+      beat(true);
+      if (liveSnapshot().known) {
+        for (const t of newT) {
+          const st = statusNow(t.address);
+          if (st === "gone") throw new Error(`${t.name} (${t.address}) exited before the squad was complete`);
+          if (st === "blocked") throw new Error(`${t.name} (${t.address}) is blocked on a dialog (answer it by hand)`);
+        }
+        return;
+      }
+      if (i < resumeSettle.tries - 1) await sleep(resumeSettle.ms);
+    }
+    throw new Error("Herdr's terminal list is not ready: could not confirm the squad is up");
+  };
+  const use = (r) => { for (const k of r.killed ?? []) dead.add(k); if (r.error) throw new Error(r.error); return r; };
+  const rollback = async (why) => {
+    const stuck = [];
+    for (const addr of opened) if (!dead.has(addr)) { if (await killConfirmed(addr)) dead.add(addr); else stuck.push(addr); }
+    if (attemptOf(run.id)?.id === a.id && attemptOf(run.id).launching) { // an open whose answer never came back may have spawned a terminal: find it by token
+      const snap = liveSnapshot();
+      if (!snap.known || (await sweepOwned(a.token, snap.alive, snap.alive)).stuck) stuck.push("a terminal of an unfinished open");
+    }
+    resuming.delete(run.id);
+    if (stuck.length) return `${why}; ${stuck.join(", ")} may still be alive: the claim stays until you press Recover`; // record + claim kept for a manual Recover
+    releaseResumeClaim(task.id, c.prev, a.id);
+    endAttempt(run.id, a.id);
+    return why;
+  };
+  try {
+    const leaderOld = run.terminals.find((t) => t.role === "leader");
+    if (!leaderOld) throw new Error(`${run.id} has no leader recorded`);
+    const wt = await ensureWorktree(run);
+    must();
+    const folderOf = (t) => (run.worktree ? wt.path : t.cwd ?? wt.path);
+    const changes = [];
+    if (wt.created) changes.push(`the worktree was recreated from branch ${wt.branch} at ${wt.path}`);
+    let space = null;
+    const map = [];
+    const open = async (t, kind) => {
+      let prompt = resumePrompt(kind, { task, role: t.role, token: a.token, map, changes, leader: { old: leaderOld.address } });
+      let marker = null;
+      if (t.kind === "codex") { marker = newUuid().replace(/-/g, ""); prompt = `${prompt}\n\n${sessionMarker(marker)}`; } // lets discovery find a new rollout
+      const name = `${task.id} ${t.role === "leader" ? t.name : short(t.role)}`.slice(0, 40);
+      const r = use(await resumeTerminal(run, t, { cwd: folderOf(t), prompt, token: a.token, name, ...(space ? { space } : { spaceName: `${task.id} ${task.title}`.slice(0, 40) }), check: stop, onOpen, intent, beat }));
+      if (r.space) space = r.space;
+      if (marker) pending.push({ address: r.address, token: marker, source: t.session });
+      const rec = resumedTerminal(r.address, t, { model: r.model, started: Date.now(), cwd: folderOf(t) });
+      if (r.source === "frozen") changes.push(`${t.name} could not start with its current settings, so it runs its saved command`);
+      if (t.model && r.model && t.model !== r.model) changes.push(`${t.name} now runs ${r.model} (it ran ${t.model})`);
+      return { rec, address: r.address };
+    };
+    for (const t of run.terminals.filter((x) => x !== leaderOld)) {
+      const m = await open(t, "member");
+      newT.push(m.rec); map.push({ role: t.role, name: t.name, old: t.address, address: m.address });
+    }
+    const lead = await open(leaderOld, "leader");
+    newT.push(lead.rec);
+    must();
+    // Floating workers, as launch() does: park each member once the leader's tab is open. Recorded only when Herdr confirms the pane is gone.
+    const failed = [];
+    for (const t of newT) {
+      if (t.role === "leader") continue;
+      try { if (await parkConfirmed(t.address)) t.parked = true; else failed.push(t.address); } catch { failed.push(t.address); }
+      beat();
+    }
+    if (failed.length) notify({ title: `${task.id}: workers kept their tabs`, body: `Could not park ${failed.join(", ")}.`, level: "error" });
+    await verifyGroup(); // after the last await: the evidence is a known list that shows every new terminal up
+    must();
+    // ---- the commit: no await. The new run, the old run's link and the card in one go.
+    // The run first (bound to this attempt), then the card: a crash between them is adopted by a manual Recover, never killed.
+    const nrun = { ...resumedRun(run, { id: "R-" + Date.now().toString(36).toUpperCase(), started: Date.now(), space, terminals: newT,
+      worktree: run.worktree ? { ...run.worktree, path: wt.path } : null }), resumeAttempt: a.id };
+    const u = update(load(), task.id, { agent: lead.address, run: nrun.id, column: "doing", claimedAt: null });
+    if (u.error) throw new Error(u.error);
+    setShared(RUNS_KEY, pruneRuns(linkResumed(loadRuns(), nrun), keptRuns()));
+    setShared(KEY, clearClaimToken(u.tasks, task.id));
+    endAttempt(run.id, a.id);
+    resuming.delete(run.id);
+    if (pending.length && home()) void discoverSessions(nrun.id, pending);
+    return { run: nrun };
+  } catch (e) {
+    const error = await rollback(String(e?.message ?? e));
+    if (!quiet || /blocked/i.test(error)) notify({ title: `${task.id} not resumed`, body: error, level: "error" });
+    return { error };
+  }
+}
+
+// The inbox op behind `drover resume <R-…|T-…> [--recover|--cancel]`.
+async function resumeOp(cmd) {
+  const ref = String(cmd.ref ?? "");
+  if (!/^[RT]-[A-Z0-9]+$/.test(ref)) return `error: give a run id (R-…) or a card id (T-…)`;
+  if (cmd.recover === true && cmd.cancel === true) return "error: --recover and --cancel are one or the other";
+  const reply = (r) => (r.error ? `error: ${r.error}` : `ok: ${r.ok}`);
+  if (cmd.recover === true) return reply(await recoverResume(ref, { quiet: true }));
+  if (cmd.cancel === true) {
+    const runId = asRunId(ref);
+    if (runId && resumeState(runId) === "needs-recovery") return reply(await recoverResume(ref, { adopt: false, quiet: true })); // a crashed attempt: abandon it
+    return runId && cancelResume(runId) ? `ok: cancel requested for ${runId}` : `error: no resume in progress for ${ref}`;
+  }
+  const r = await resumeSquad(ref, { quiet: true });
+  if (r.error) return `error: ${r.error}`;
+  const lead = r.run.terminals[r.run.terminals.length - 1];
+  return `ok: ${r.run.id} leader ${lead.address} (${lead.name})` + r.run.terminals.slice(0, -1).map((m) => ` · ${short(m.role)} ${m.address}`).join("") + (r.run.worktree ? ` · worktree ${r.run.worktree.path} on ${r.run.worktree.branch}` : "");
+}
+
+// Who started this terminal? "owned" = its argv carries the attempt's token, "foreign" = it does not, "unknown" = the read failed or is malformed.
+// Unknown is never treated as foreign: recovery then keeps the record and the claim.
+async function ownership(address, token) {
+  try {
+    const r = await hc(["get", address, "--json"]);
+    if (r?.code !== 0) return "unknown";
+    const argv = JSON.parse(r.stdout)?.argv;
+    if (!Array.isArray(argv)) return "unknown";
+    return argv.some((x) => String(x).includes(resumeToken(token))) ? "owned" : "foreign";
+  } catch { return "unknown"; }
+}
+// Kills what an attempt owns among `addrs` (alive ones only). { stuck: true } when one is unknown or a kill is not confirmed;
+// { lost: true } when `fence()` says this caller no longer owns the attempt (re-asked after every await, before every kill).
+async function sweepOwned(token, addrs, alive, fence = () => true) {
+  let stuck = false;
+  const killed = [];
+  for (const addr of addrs) {
+    if (!alive.has(addr)) continue;
+    if (!fence()) return { lost: true, killed };
+    const own = await ownership(addr, token);
+    if (!fence()) return { lost: true, killed };
+    if (own === "unknown") { stuck = true; continue; }
+    if (own === "owned") { if (await killConfirmed(addr)) killed.push(addr); else stuck = true; }
+  }
+  return { stuck, killed };
+}
+
+// ---- Recovery is MANUAL (T-MWLGPS2QJQL, option B): nothing here runs on a tick. A crashed attempt keeps its claim and its record until the
+// person presses Recover (or Cancel), or runs `drover resume <R-…> --recover|--cancel`. It is fenced: the takeover writes a new attempt id
+// into the record and the claim (so the old attempt, if it is somehow still running, stops at its next check and can neither publish nor
+// release), and every continuation re-asks that it still owns both.
+//   needs-recovery = a record whose heartbeat lapsed and no live resume in this window; live = beating (or running here); recovering = a Recover is on it.
+export function resumeState(runId) {
+  const rec = attemptOf(runId);
+  if (!rec) return "none";
+  if (rec.recovering && fresh(rec)) return "recovering";
+  return resuming.has(runId) || fresh(rec) ? "live" : "needs-recovery";
+}
+const asRunId = (ref) => (/^T-/.test(ref) ? Object.entries(resumes()).find(([, a]) => a.card === ref)?.[0] : attemptOf(ref) ? ref : undefined);
+// adopt: finish a squad the attempt had already published (when the card still allows it); false (Cancel) always cleans the published squad up.
+export async function recoverResume(ref, { adopt = true, quiet = false } = {}) {
+  ref = String(ref ?? "");
+  const runId = asRunId(ref), rec = runId ? attemptOf(runId) : null;
+  const done = (r) => { if (!quiet) notify({ title: r.error ? `${ref} not recovered` : `${ref} recovered`, body: r.error ?? r.ok, level: r.error ? "error" : "info" }); return r; };
+  if (!rec) return { error: `no resume to recover for ${ref}` };
+  const st = resumeState(runId);
+  if (st === "live") return done({ error: resuming.has(runId) ? `${runId} is resuming in this window: cancel it instead` : `${runId} is still running (its heartbeat is recent): cancel it, or recover after it stops` });
+  if (st === "recovering") return done({ error: `${runId} is already being recovered` });
+  // ---- no await up to here: the takeover (the fence). A second click, another mod copy and the old attempt all see the new id.
+  const rid = "A-" + newUuid().slice(0, 8), cardId = rec.card, claimHeld = holdsClaim(cardId, rec.id);
+  setShared(RESUMES_KEY, { ...resumes(), [runId]: { ...rec, id: rid, attemptIds: [...(rec.attemptIds ?? [rec.id]), rid], recovering: true, heartbeat: Date.now() } });
+  if (claimHeld) { const u = update(load(), cardId, { claimToken: rid }); if (!u.error) setShared(KEY, u.tasks); }
+  const mine = () => attemptOf(runId)?.id === rid && (!claimHeld || holdsClaim(cardId, rid));
+  const giveBack = () => { if (attemptOf(runId)?.id === rid) noteAttempt(runId, rid, { recovering: null, heartbeat: 0 }); }; // can be tried again at once
+  try {
+    const snap = liveSnapshot();
+    if (!snap.known) { giveBack(); return done({ error: "Herdr's terminal list is not ready: nothing was changed, try again" }); }
+    const ids = rec.attemptIds ?? [rec.id];
+    const pub = loadRuns().find((r) => r.resumedFrom === runId && ids.includes(r.resumeAttempt));
+    const t = load().find((x) => x.id === cardId);
+    if (adopt && pub && t?.run === pub.id) { endAttempt(runId, rid); return done({ ok: `${pub.id} was already complete; the attempt record is closed` }); } // both writes landed
+    // Adoption is the same commit as a normal resume, so it asks the same questions now: the owner's move, Done, archive or delete win.
+    if (adopt && pub && t && !t.archived && t.column === "doing" && claimHeld && holdsClaim(cardId, rid) && (t.project ?? null) === (pub.project ?? null)) {
+      const leader = pub.terminals[pub.terminals.length - 1]?.address ?? null;
+      const u = update(load(), cardId, { agent: leader, run: pub.id, column: "doing", claimedAt: null });
+      if (u.error) { giveBack(); return done({ error: u.error }); }
+      setShared(KEY, clearClaimToken(u.tasks, cardId));
+      endAttempt(runId, rid);
+      return done({ ok: `adopted ${pub.id} (leader ${leader})` });
+    }
+    // Not adopting: clean up. What this attempt owns is found by its token: the recorded terminals, the published squad (if any) and,
+    // when an open was in flight, every live terminal that carries the token.
+    const addrs = new Set([...(rec.opened ?? []), ...(pub?.terminals ?? []).map((x) => x.address)]);
+    if (rec.launching) for (const x of snap.alive) addrs.add(x);
+    const sw = await sweepOwned(rec.token, addrs, snap.alive, mine);
+    if (sw.lost) return done({ error: "another window took this recovery over: nothing more was done here" });
+    if (sw.stuck) { giveBack(); return done({ error: "could not tell whose a terminal is, or could not confirm a kill: nothing was freed, try again" }); }
+    if (!mine()) return done({ error: "another window took this recovery over: nothing more was done here" });
+    if (pub) setShared(RUNS_KEY, loadRuns().filter((x) => x.id !== pub.id).map((x) => { if (x.id !== runId) return x; const { resumedBy: _r, ...rest } = x; return rest; }));
+    if (claimHeld) releaseResumeClaim(cardId, rec.prev ?? { column: "todo" }, rid); // the owner's column is kept when they moved, finished or archived the card
+    else if (pub) { // both publish writes had landed: undo only what the published squad set on the card, and only while the card still points at it
+      const cur = load().find((x) => x.id === cardId), lead = pub.terminals[pub.terminals.length - 1]?.address;
+      // Only the squad's own state: still on its run, and its leader or nobody is the agent. A CLAIMING card is a newer launch in flight (claim() keeps the old run id until it saves): never touched.
+      if (cur && cur.run === pub.id && cur.agent !== CLAIMING && (cur.agent == null || cur.agent === lead)) {
+        const u = update(load(), cardId, { run: runId, ...(cur.agent === lead ? { agent: null } : {}), ...(cur.column === "doing" && !cur.archived ? { column: rec.prev?.column ?? "todo" } : {}) });
+        if (!u.error) setShared(KEY, u.tasks);
+      }
+    }
+    endAttempt(runId, rid);
+    const note = rec.launching && !sw.killed.length ? " An open was in flight when it stopped and no terminal carrying its token was found: if one appears later, close it by hand." : "";
+    return done({ ok: `${pub ? `the published squad ${pub.id} was cleaned up; ` : ""}${sw.killed.length ? `killed ${sw.killed.join(", ")}; ` : ""}${claimHeld ? `released ${cardId}` : "record closed"}.${note}` });
+  } catch (e) { giveBack(); return done({ error: String(e?.message ?? e) }); }
 }
 
 // Squads ▶ Start. projectId = the "Opens in" project (null: the space's folder, unbound).
@@ -898,6 +1395,11 @@ async function drain() {
       reply = r.reply;
     } else if (cmd?.op === "start") {
       reply = await startFromAgent(cmd);
+    } else if (cmd?.op === "resume") {
+      // A resume takes minutes: it must not hold this loop, or a queued `resume --cancel` would wait for the very thing it cancels.
+      const out = path.replace(/\.json$/, ".result");
+      void resumeOp(cmd).then((r) => fs.writeFile(out, r)).catch((e) => fs.writeFile(out, `error: ${String(e?.message ?? e)}`).catch(() => {}));
+      continue;
     } else if (cmd?.op === "next") {
       reply = nextFor(cmd.from);
     } else if (cmd?.op === "project-add") {
@@ -964,7 +1466,7 @@ function nextFor(from) {
   const runs = loadRuns(), project = projectOfDrover(runs, String(from ?? ""));
   if (!project) return "error: you are not bound to a project (queue mode needs a Drover started with a project)";
   const { live, alive } = liveState();
-  const rec = reconcile(load(), runs, alive, Date.now(), project);
+  const rec = reconcile(load(), runs, alive, Date.now(), project, new Set(Object.values(resumes()).map((a) => a.card)));
   if (rec.lines.length) setShared(KEY, rec.tasks);
   const tasks = rec.tasks;
   return [nextReport(tasks, loadProjects(), project, Math.max(0, maxRuns() - activeFor(runs, tasks, project, live, alive))), ...rec.lines].join("\n");

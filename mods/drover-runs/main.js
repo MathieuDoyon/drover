@@ -5,7 +5,7 @@ import { v_flex, h_flex } from "gpui-base";
 import { agents, terminals, run, theme, setShared, shared } from "herdr";
 import { RUNS_KEY, liveStatuses, runStatus, runTitle, lineageOf, squadRows, stopTargets, openCommand } from "./runs.js";
 import { age } from "./sources.js";
-import { load, loadRuns, edit, observeEnded, modSettings } from "./io.js";
+import { load, loadRuns, edit, observeEnded, modSettings, resumeSquad, canResume, cancelResume, recoverResume, resumeState } from "./io.js";
 import { bind, isEnabled, whenLoaded, ready as cfgReady } from "./config.js";
 import { gated } from "./ui.js";
 
@@ -15,10 +15,27 @@ export default class Runs extends View {
   init(_props, cx) {
     this.confirm = null;
     this.showEnded = false;
+    this.resumeBusy = null;
     bind({ shared, modSettings });
     this.started = false;
     this.stopped = false; // seen off since the last render that was on
     whenLoaded("drover-runs", cx, (cx) => this.ensureStarted(cx));
+  }
+
+  // Resume squad on an ended run: one click = one resumeSquad call (the flag is set before the first await). A failure is notified by resumeSquad itself.
+  startResume(id, cx) {
+    if (this.resumeBusy) return;
+    this.resumeBusy = id;
+    cx.spawn(async (cx) => { try { await resumeSquad(id); } finally { this.resumeBusy = null; cx.notify(); } });
+    cx.notify();
+  }
+
+  // Recover / Cancel of a crashed attempt. One click = one call; nothing recovers by itself.
+  startRecover(id, adopt, cx) {
+    if (this.resumeBusy) return;
+    this.resumeBusy = id;
+    cx.spawn(async (cx) => { try { await recoverResume(id, { adopt }); } finally { this.resumeBusy = null; cx.notify(); } });
+    cx.notify();
   }
 
   // Idempotent. Off: no observeEnded (it can kill parked workers) and no timer. On: starts once; back from off, observes again.
@@ -76,6 +93,15 @@ export default class Runs extends View {
           .when(Boolean(r.worktree), (el) => el.child(div().flex_1().truncate().text_size(10.5).text_color(t.dim).child(r.worktree.path)))
           .when(!r.worktree, (el) => el.child(div().flex_1()))
           .when(status !== "ended", (el) => el.child(link(`stop-${r.id}`, this.confirm === r.id ? "Click again to kill all" : "Stop", stop)))
+          .when(status === "ended" && (this.resumeBusy === r.id || resumeState(r.id) === "live"), (el) => el.child(link(`resume-cancel-${r.id}`, "Cancel resume", () => cancelResume(r.id))))
+          .when(status === "ended" && this.resumeBusy !== r.id && resumeState(r.id) === "needs-recovery", (el) => el
+            .child(div().h(22).px(7).flex().items_center().text_size(11.5).text_color(t.blocked).child("Resume needs recovery"))
+            .child(div().id(`resume-recover-${r.id}`).h(22).px(7).flex().items_center().rounded(5).text_size(11.5).text_color(t.foreground).cursor_pointer().hover((x) => x.bg(t.raised))
+              .on_click((_e, cx) => this.startRecover(r.id, true, cx)).child("Recover"))
+            .child(div().id(`resume-abandon-${r.id}`).h(22).px(7).flex().items_center().rounded(5).text_size(11.5).text_color(t.muted).cursor_pointer().hover((x) => x.bg(t.raised))
+              .on_click((_e, cx) => this.startRecover(r.id, false, cx)).child("Cancel")))
+          .when(status === "ended" && this.resumeBusy !== r.id && resumeState(r.id) === "none" && canResume(r.id), (el) => el.child(div().id(`resume-${r.id}`).h(22).px(7).flex().items_center().rounded(5).text_size(11.5).text_color(t.muted)
+            .cursor_pointer().hover((x) => x.bg(t.raised).text_color(t.foreground)).on_click((_e, cx) => this.startResume(r.id, cx)).child("Resume squad")))
           .when(status === "ended", (el) => el.child(link(`forget-${r.id}`, "Forget", () => setShared(RUNS_KEY, loadRuns().filter((x) => x.id !== r.id))))));
     };
 
