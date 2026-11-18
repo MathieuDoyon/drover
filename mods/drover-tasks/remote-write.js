@@ -321,6 +321,7 @@ export function createWriter({ run, exec, getShared, setShared, now = Date.now, 
       }
       const r = await lookRun(["file", "read", "--on", e.machine, `${INBOX}/${name}.result`]);
       if (r?.code !== 0 || !entryOf(e.nonce)) return false;
+      if (!String(r.stdout ?? "")) return false; // an empty read: the consumer is still writing it
       settle(e, String(r.stdout ?? ""), `${name}.result`);
       return true;
     } finally { checking.delete(e.nonce); }

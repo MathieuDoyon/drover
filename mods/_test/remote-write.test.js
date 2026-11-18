@@ -799,3 +799,18 @@ test("T3 an answer that is not 'ok: protocol N' (N>=2) keeps writes off", async 
     hc.calls.length = 0;
   }
 });
+
+// T-MWMKWXEHKUC: a consumer's writeFile creates the .result empty first; reading it then must not settle the send.
+test("1c2 an empty result is not an answer: the send settles only once the reply text is there, and the file is kept until then", async () => {
+  await enable();
+  const n = hc.sends().length;
+  const p = w.send(M, PID, { op: "move", id: "T-AB1", column: "doing" });
+  await until(() => delivered(n + 1), "delivered");
+  hc.consume(() => ""); // the consumer created the file, nothing written yet
+  clock += 1000; await w.tick(); await drain();
+  assert.equal(hc.rms().length, 0, "an empty read removes nothing");
+  assert.equal(outcomes.length, 0, "an empty read settles nothing");
+  for (const k of Object.keys(hc.inbox)) if (k.endsWith(".result")) hc.inbox[k] = "ok: T-AB1 -> in-progress";
+  clock += 1000; await w.tick();
+  assert.equal((await p).status, "saved");
+});

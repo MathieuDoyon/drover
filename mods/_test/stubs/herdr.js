@@ -2,7 +2,10 @@
 const h = () => globalThis.__host;
 export const props = () => h().props;
 export const appHome = () => h().appHome;
-export const exec = (...a) => h().exec(...a);
+import { execFile } from "node:child_process";
+// `mv` runs for real (the inbox writer moves each reply into place with it) unless a test sets host.ownMv to model a failing one.
+const realMv = (args) => new Promise((resolve) => execFile("mv", args, { encoding: "utf8" }, (e, stdout, stderr) => resolve({ code: e ? (typeof e.code === "number" ? e.code : 1) : 0, stdout, stderr })));
+export const exec = (cmd, args, ...rest) => (cmd === "mv" && !h().ownMv ? realMv(args) : h().exec(cmd, args, ...rest));
 export const shared = (k) => h().state[k];
 export const setShared = (k, v) => { h().state[k] = v; };
 export const closeOverlay = (...a) => h().closeOverlay(...a);

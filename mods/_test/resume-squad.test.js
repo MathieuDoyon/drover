@@ -65,6 +65,25 @@ test("happy path: members first, then the leader whose first message holds the e
   for (const t of n.terminals) assert.equal(t.sourceSession, t.session);
 });
 
+test("T-MWMG01KB8MW: every resumed Claude terminal is labeled revive.session=<its session>", async () => {
+  const r = await io.resumeSquad("R-OLD");
+  assert.equal(r.error, undefined);
+  const labels = sim.hc.filter((a) => a[0] === "label");
+  const want = r.run.terminals.map((t) => ["label", t.address, `revive.session=${t.session}`]);
+  assert.equal(want.length, 3);
+  assert.deepEqual(labels.sort(), want.sort());
+});
+
+test("T-MWMG01KB8MW: after a frozen fallback only the terminal that stayed is labeled; a Codex terminal is not labeled by the resume itself", async () => {
+  sim.plan.push({ status: () => "blocked", delivered: () => false }); // member 1: the current command fails, the frozen one is used
+  host.state["drover.runs"] = [OLD({ terminals: [...OLD().terminals, T({ address: "t4", agent: "cx", name: "Codex", role: "Codex", kind: "codex", session: SID.a, parked: true })] })];
+  const r = await io.resumeSquad("R-OLD");
+  assert.equal(r.error, undefined);
+  const labels = sim.hc.filter((a) => a[0] === "label").map((a) => a[1]);
+  const claude = r.run.terminals.filter((t) => t.kind === "claude").map((t) => t.address);
+  assert.deepEqual(labels.sort(), claude.sort(), "no label for the killed attempt, none for Codex");
+});
+
 test("what changed: a frozen fallback and a model change are told to the leader", async () => {
   sim.plan.push({ status: () => "blocked", delivered: () => false }); // member 1: the current command fails
   const r = await io.resumeSquad("R-OLD");

@@ -89,8 +89,27 @@ test("rollback order: v2 drops the expired files left on disk with `expired` bef
   startLoop(); // v2 is (still) running
   assert.match(await answer("old-add"), /^error: expired: /);
   assert.match(await answer("old-move"), /^error: expired: /);
+  await answer("tmp-not-json"); // the loop answers files in order: until this one is answered its reply may still be staged in a hidden .tmp (a delivery in flight)
   assert.equal(snap(), before, "nothing was applied");
   for (const n of ["old-add", "old-move"]) assert.equal(existsSync(join(inbox, `${n}.json`)), false, `${n}.json is gone: a v1 finds nothing to apply`);
+  const post = await drainCheck();
+  assert.equal(post.code, 0, post.stdout);
+});
+
+// T-MWMKWXEHKUC: a reply is staged in a hidden `.<name>.<x>.tmp` before it is moved into place. The drain check must fail closed while that is in flight.
+test("the drain check fails closed while a reply is staged, and passes once it is delivered", async () => {
+  let release, held;
+  const gate = new Promise((r) => { release = r; }), atTmp = new Promise((r) => { held = r; });
+  const base = host.fsGuard;
+  host.fsGuard = (op, path) => { base(op, path); if (op === "writeFile" && path.endsWith(".tmp")) { writeFileSync(path, ""); held(); return gate; } }; // empty on disk, as fs.writeFile leaves it mid-write
+  drop("q-noop", { op: "noop" });
+  startLoop();
+  await atTmp;
+  const mid = await drainCheck();
+  assert.notEqual(mid.code, 0, "a reply is in flight");
+  assert.match(mid.stdout, /staging file/);
+  release();
+  await answer("q-noop");
   const post = await drainCheck();
   assert.equal(post.code, 0, post.stdout);
 });

@@ -811,6 +811,7 @@ export async function resumeSquad(ref, { quiet = false } = {}) {
       const name = `${task.id} ${t.role === "leader" ? t.name : short(t.role)}`.slice(0, 40);
       const r = use(await resumeTerminal(run, t, { cwd: folderOf(t), prompt, token: a.token, name, ...(space ? { space } : { spaceName: `${task.id} ${task.title}`.slice(0, 40) }), check: stop, onOpen, intent, beat }));
       if (r.space) space = r.space;
+      if (t.kind === "claude" && t.session) await labelSession(r.address, t.session); // Reader reads this label; Codex is labeled by discovery below
       if (marker) pending.push({ address: r.address, token: marker, source: t.session });
       const rec = resumedTerminal(r.address, t, { model: r.model, started: Date.now(), cwd: folderOf(t) });
       if (r.source === "frozen") changes.push(`${t.name} could not start with its current settings, so it runs its saved command`);
@@ -1447,8 +1448,23 @@ async function drain() {
       if (!r.error) setShared(KEY, r.tasks);
       reply = r.error ? `error: ${r.error}` : cmd.op === "project" ? `ok: ${r.task.id} project ${r.task.project ?? "none"}` : cmd.op === "link" ? `ok: ${r.task.id} source ${r.task.source?.url ?? "none"}` : cmd.op === "note-edit" || cmd.op === "note-rm" ? `ok: ${r.task.id} ${cmd.noteId} ${cmd.op === "note-rm" ? "removed" : "edited"}` : cmd.op === "note" || cmd.op === "edit" ? `ok: ${r.task.id} ${cmd.op === "note" ? `note ${r.task.notes.length}` : "edited"}` : `ok: ${r.task.id} -> ${columnName(r.task.column)}`;
     }
-    await fs.writeFile(path.replace(/\.json$/, ".result"), reply);
+    await writeReply(path.replace(/\.json$/, ".result"), reply);
   }
+}
+
+// A reader (the CLI, the remote writer) takes a .result the moment it exists, and fs.writeFile creates it empty first.
+// So the reply is staged in a hidden temp next to it and moved into place (rename is atomic). The runtime fs has no rename: `mv -f`, argv only.
+// Any failure falls back to the plain write: a reply is never lost. The temp is always removed (best effort).
+let replySeq = 0;
+async function writeReply(out, reply) {
+  const at = out.lastIndexOf("/") + 1;
+  const tmp = `${out.slice(0, at)}.${out.slice(at).replace(/\.result$/, "")}.${(++replySeq).toString(36)}${Math.random().toString(36).slice(2, 8)}.tmp`;
+  try {
+    await fs.writeFile(tmp, reply);
+    if ((await exec("mv", ["-f", tmp, out]))?.code === 0) return;
+  } catch {}
+  await fs.unlink(tmp).catch(() => {});
+  await fs.writeFile(out, reply);
 }
 
 // config-set (protocol 5): the only config write an agent has. Local only (never in the remote writer's ops). Synchronous: the compare and the write share one turn.

@@ -122,7 +122,7 @@ send() {  # body, seconds to wait for the answer, optional name suffix
   printf '%s\n' "$1" > "$dir/.$name.tmp"
   mv "$dir/.$name.tmp" "$dir/$name.json"
   for _ in $(seq $(( $2 * 4 ))); do
-    if [ -f "$dir/$name.result" ]; then
+    if [ -s "$dir/$name.result" ]; then  # non-empty: a consumer's writeFile creates the file empty first; an empty one is not an answer yet
       result="$(cat "$dir/$name.result")"; rm -f "$dir/$name.result"; echo "$result"
       [[ "$result" == ok:* ]]; exit
     fi

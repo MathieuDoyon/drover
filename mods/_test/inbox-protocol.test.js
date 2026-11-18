@@ -23,7 +23,9 @@ beforeEach(() => {
   statCalls = []; hold = null; noStat = false; resultWrites = []; onRead = null;
   host = globalThis.__host = { appHome: home, props: {}, notified: [], state: {}, agents: [], terminals: [], watchFolder: () => new Promise(() => {}) };
   host.fsGuard = (op, path) => {
+    // A reply is staged in a hidden `.<name>.<x>.tmp` and moved to <name>.result: that write is the reply write.
     if (op === "writeFile" && path.endsWith(".result")) resultWrites.push(path);
+    else if (op === "writeFile" && /\/\.[^/]+\.[a-z0-9]+\.tmp$/.test(path)) resultWrites.push(path.replace(/\/\.([^/]+)\.[a-z0-9]+\.tmp$/, "/$1.result"));
     if (op === "readFile" && path.endsWith(".json")) onRead?.(path);
   };
   host.exec = (cmd, args) => new Promise((resolve) => {
