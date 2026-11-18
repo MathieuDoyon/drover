@@ -1575,3 +1575,48 @@ test("the agent list shows the env count per agent, names and values stay out of
     assert.equal(JSON.stringify(rec.texts).includes(FAKE), false);
   } finally { globalThis.__rec = undefined; }
 });
+
+test("edit: after a start the open sidebar shows the assignee launch() stored (#53)", async () => {
+  const e = openEdit({ assignee: null });
+  assert.equal(e.assignee, null);
+  e.launch = async (c) => { host.state["drover.tasks"] = tasks().map((t) => ({ ...t, assignee: { kind: "squad", id: "cattle" }, column: "doing" })); return { id: "R-1" }; };
+  let notified = 0;
+  await e.startWithNote({ kind: "squad", id: "cattle" }, tasks()[0], "", { notify: () => notified++ });
+  assert.deepEqual(e.assignee, { kind: "squad", id: "cattle" });
+  assert.ok(notified > 0, "the dialog re-renders");
+});
+
+test("edit: a failed start leaves the sidebar assignee alone (#53)", async () => {
+  const e = openEdit({ assignee: null });
+  e.launch = async () => ({ error: "boom" });
+  await e.startWithNote({ kind: "squad", id: "cattle" }, tasks()[0], "", { notify() {} });
+  assert.equal(e.assignee, null);
+});
+
+const paint = (e) => e.render({ notify() {}, listener: () => () => {} });
+
+test("edit: an assignee stored by an external start (CLI/queue/Picker) shows in the open sidebar on the next render (#53)", () => {
+  const e = openEdit({ assignee: null });
+  paint(e);
+  assert.equal(e.assignee, null);
+  host.state["drover.tasks"] = tasks().map((t) => ({ ...t, assignee: { kind: "squad", id: "cattle" }, column: "doing" })); // launch() ran elsewhere
+  paint(e);
+  assert.deepEqual(e.assignee, { kind: "squad", id: "cattle" });
+});
+
+test("edit: a render never overwrites an assignee this editor holds when the stored one did not change (#53)", () => {
+  const e = openEdit({ assignee: null });
+  paint(e);
+  e.assignee = { kind: "agent", id: "w1" }; // a pick that has not been saved
+  paint(e);
+  assert.deepEqual(e.assignee, { kind: "agent", id: "w1" });
+});
+
+test("edit: a pick saved here stays after the next render (#53)", async () => {
+  const e = openEdit({ assignee: null });
+  paint(e);
+  await click((cx) => e.setProp("assignee", { kind: "squad", id: "cattle" }, cx)); await flush();
+  paint(e);
+  assert.deepEqual(e.assignee, { kind: "squad", id: "cattle" });
+  assert.deepEqual(tasks()[0].assignee, { kind: "squad", id: "cattle" });
+});

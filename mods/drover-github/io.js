@@ -372,7 +372,11 @@ export async function launch(task, runner, { worktree, reportTo, project, create
       config: { leader: p.leader, members: p.members }, space, worktree: wt, terminals, started: Date.now(), reportTo: reportTo ?? null,
     };
     setShared(RUNS_KEY, pruneRuns([run, ...loadRuns()], keptRuns())); // drops only ended runs beyond drover-runs.kept
-    if (task) save(update(load(), task.id, { agent: leader, run: run.id, column: "doing", claimedAt: null }));
+    if (task) {
+      // The squad that works the card becomes its assignee, unless the owner already chose one (read now: the card may have changed during the awaits above).
+      const current = load().find((x) => x.id === task.id);
+      save(update(load(), task.id, { agent: leader, run: run.id, column: "doing", claimedAt: null, ...(current && !current.assignee && runner ? { assignee: { kind: runner.kind, id: runner.id } } : {}) }));
+    }
     return run;
   } catch (e) {
     const error = String(e?.message ?? e);

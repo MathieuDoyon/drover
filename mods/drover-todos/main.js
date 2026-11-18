@@ -66,6 +66,7 @@ export class Editor {
     const last = shared("drover.agents.last")?.runner;
     this.runner = last?.kind === "agent" && last.id !== "drover" ? last.id : "claude"; // agent mode: who creates the cards
     this.assignee = normAssignee((this.task ?? this.fixedRemote)?.assignee); // { kind, id }: saved on the card; Create also starts it with it
+    this.seenAssignee = this.assignee ? `${this.assignee.kind}:${this.assignee.id}` : ""; // the stored assignee this editor last saw
     this.launch = launch; // injectable for tests
     this.remoteSender = remoteSend; // injectable for tests
     this.remoteReload = remoteReload; // injectable for tests
@@ -889,6 +890,7 @@ export class Editor {
     save(c);
     const run = await this.launch(c.task, choice, { ...(await startOptions()), note }).catch((e) => ({ error: String(e?.message ?? e) }));
     if (run?.error) save(release(load(), task.id, c.prev));
+    else { this.assignee = normAssignee(load().find((x) => x.id === task.id)?.assignee); cx?.notify?.(); } // launch() may have made the squad the assignee: show it
     return run;
   }
 
@@ -1094,9 +1096,21 @@ export class Editor {
     } finally { if (!this.closing) { this.submitting = false; this.starting = false; } acx.notify(); } });
   }
 
+  // Edit: another writer (a CLI/queue/Picker start) can change the stored assignee under the open dialog. Adopt it when the stored value
+  // moved since the editor last saw it; an assignee this editor holds that differs from the stored one (a pick that did not save) stays.
+  adoptAssignee() {
+    if (!this.task || this.fixedRemote || this.closing) return;
+    const stored = normAssignee(load().find((x) => x.id === this.task.id)?.assignee);
+    const key = stored ? `${stored.kind}:${stored.id}` : "";
+    if (this.seenAssignee === key) return;
+    this.seenAssignee = key;
+    this.assignee = stored;
+  }
+
   render(cx) {
     const t = theme();
     if (this.remote) this.takeLate(cx);
+    this.adoptAssignee();
     const field = (el) => el.px(10).rounded(8).border_1().border_color(t.input).bg(t.background).text_size(13).text_color(t.foreground);
     const projects = loadProjects(); // remote-bound ones too: a create there goes to the machine's inbox, never into a local card
     const projLabel = (p) => (p.remote ? `${p.name} · ${p.remote.machine}` : p.name);
