@@ -54,26 +54,27 @@ export default class Board extends View {
   }
 
   // Every column with the cards that pass the scope, filter and search.
-  allColumns() {
-    const projects = loadProjects();
-    const ctx = this.filterCtx(projects);
-    const shown = sorted(loadMerged().tasks.filter((x) => !x.archived && inScope(x, this.scope, projects) && matchesFilter(x, this.filters, ctx) && matches(x, this.query)));
-    const dflt = cfg("drover-board", "default_sort");
+  // `rs` is the render's snapshot (render() builds it once); event handlers pass none and read fresh.
+  allColumns(rs) {
+    const projects = rs?.projects ?? loadProjects();
+    const ctx = rs?.fctx ?? this.filterCtx(projects);
+    const shown = sorted((rs?.merged ?? loadMerged()).tasks.filter((x) => !x.archived && inScope(x, this.scope, projects) && matchesFilter(x, this.filters, ctx) && matches(x, this.query)));
+    const dflt = rs?.dflt ?? cfg("drover-board", "default_sort");
     return COLUMNS.map(([id, name]) => ({ id, name, cards: sortCards(shown.filter((x) => x.column === id), this.sort[id] ?? dflt) }));
   }
 
   // The columns on screen: those in visible_columns (Drover Config). Hiding is screen only: the tasks and the drover CLI keep all 6.
-  columns() {
-    const visible = this.visibleIds();
-    return this.allColumns().filter((col) => visible.includes(col.id));
+  columns(rs) {
+    const visible = rs?.visible ?? this.visibleIds();
+    return (rs?.all ?? this.allColumns(rs)).filter((col) => visible.includes(col.id));
   }
 
   visibleIds() { return cfg("drover-board", "visible_columns"); }
 
   // Cards a hidden column keeps out of sight, under the current scope, filter and search. Shown in the header so nothing hides silently.
-  hiddenCount() {
-    const visible = this.visibleIds();
-    return this.allColumns().filter((col) => !visible.includes(col.id)).reduce((n, col) => n + col.cards.length, 0);
+  hiddenCount(rs) {
+    const visible = rs?.visible ?? this.visibleIds();
+    return (rs?.all ?? this.allColumns(rs)).filter((col) => !visible.includes(col.id)).reduce((n, col) => n + col.cards.length, 0);
   }
 
   // Where New puts a card: Ready, or the first visible column when Ready is hidden (a new card must show).
@@ -124,23 +125,23 @@ export default class Board extends View {
   // Remote write controls (T-MWHVWR8TIJB): the state comes from io.js, the ops from remote-write-ui.js; remote-write.js builds the request.
   wstate(card) { return controlState(remoteWriteState(card.project)); }
   async rsend(localId, op, cx) { const o = await remoteSend(localId, op, cx); this.msg = outcomeText(o); cx.notify(); return o; }
-  remoteScopeId() { return this.scope.startsWith("project:") && loadMerged().remotes.find((r) => `project:${r.localId}` === this.scope)?.localId || null; }
+  remoteScopeId(merged = loadMerged()) { return this.scope.startsWith("project:") && merged.remotes.find((r) => `project:${r.localId}` === this.scope)?.localId || null; }
   // A new card on a remote project: the read-only card view opens in "new" mode (Save sends an add).
   newRemote(column, localId) {
     const r = loadMerged().remotes.find((x) => x.localId === localId);
     edit(null, column, undefined, undefined, undefined, { new: true, id: "", title: "", desc: "", column, priority: "P2", tags: [], notes: [], project: localId, remote: { machine: r?.machine ?? "" } });
   }
   // The "New" / "+" control: local scope opens the editor, a remote scope sends an add when writes are on, else it is off with the reason.
-  addControl(id, mk, localColumn) {
-    const rid = this.remoteScopeId();
+  addControl(id, mk, localColumn, rs) {
+    const rid = this.remoteScopeId(rs?.merged);
     if (!rid) return mk(null, () => edit(null, localColumn));
-    const w = controlState(remoteWriteState(rid));
+    const w = rs ? rs.gateOf(rid) : controlState(remoteWriteState(rid));
     return mk(w.on ? null : w.tip, w.on ? () => this.newRemote(localColumn, rid) : null);
   }
 
   isRemote(id) { return Boolean(loadMerged().tasks.find((x) => x.id === id)?.remote); }
   // The remote project the scope shows, if any: New is off there (the project lives on another machine).
-  remoteScope() { return this.scope.startsWith("project:") && loadMerged().remotes.some((r) => `project:${r.localId}` === this.scope); }
+  remoteScope(merged = loadMerged()) { return this.scope.startsWith("project:") && merged.remotes.some((r) => `project:${r.localId}` === this.scope); }
 
   key(e, cx) {
     const cols = this.columns().filter((col) => !this.collapsed.has(col.id));
@@ -179,11 +180,15 @@ export default class Board extends View {
     const merged = loadMerged();
     const staleNow = (x) => merged.remotes.some((r) => r.localId === x.project && r.state !== "fresh");
     const projects = loadProjects();
-    const cfg_ = loadConfig();
-    const hidden = this.hiddenCount();
-    // The write gate of a remote project, computed once per render (it reads the projects, the cache and the pending list): not once per card.
+    // One snapshot per render (T-MWL7FAABO29): every shared read the render needs happens here, once; nothing inside a card or column closure reads shared state.
+    // It lives only in this call. The write gate of a remote project is display-only and computed once per project (it reads the projects, the cache and the pending list).
     const gates = new Map();
     const gateOf = (pid) => { if (!gates.has(pid)) gates.set(pid, controlState(remoteWriteState(pid))); return gates.get(pid); };
+    const rs = { projects, merged, fctx: this.filterCtx(projects), visible: this.visibleIds(), dflt: cfg("drover-board", "default_sort"), gateOf };
+    rs.all = this.allColumns(rs);
+    const cfg_ = rs.fctx.config;
+    const hidden = this.hiddenCount(rs);
+    const cols = this.columns(rs);
     const card = (x, ci) => {
       const agent = x.agent ? live.get(x.agent) : null;
       const status = x.agent ? (agent?.status ?? "gone") : null;
@@ -220,7 +225,7 @@ export default class Board extends View {
           .when(Boolean(x.source?.url), (el) => el.child(icon(`o-${x.id}`, "arrow-up-right", () => openUrl(x.source.url))))
           .when(ci > 0, (el) => el.child(shift(-1)))
           .when(!x.agent && x.column !== "done", (el) => el.child(ro ? off(`s-${x.id}`, "play", OFF_TIP) : icon(`s-${x.id}`, "play",  () => pick(x.id))))
-          .when(ci < this.visibleIds().length - 1, (el) => el.child(shift(1))))
+          .when(ci < rs.visible.length - 1, (el) => el.child(shift(1))))
         .child(h_flex().gap(6).items_center().text_size(11.5).text_color(t.dim)
           .child(div().flex_1().min_w(0).truncate().text_color(status && status !== "gone" ? (t[status] ?? t.blocked) : t.dim).child(ro ? (x.agentText ?? "") : footerText(x, status, cfg_)))
           .child(div().flex_none().child(ago))
@@ -230,9 +235,9 @@ export default class Board extends View {
     // Slot line: only for a LOCAL project scope, from local tasks and runs (never the filtered columns or remote merged cards). One snapshot, outside every closure.
     const slotText = (() => {
       const id = this.scope.startsWith("project:") ? this.scope.slice(8) : null;
-      if (!id || !projects.some((p) => p.id === id) || this.remoteScope()) return "";
+      if (!id || !projects.some((p) => p.id === id) || this.remoteScope(merged)) return "";
       const state = liveStatuses(agents(), terminals()), alive = new Set(terminals().map((x) => x.address));
-      const snap = slotSnapshot(loadRuns(), load(), state, alive);
+      const snap = slotSnapshot(rs.fctx.runs, rs.fctx.tasks, state, alive);
       return slotLine(snap.byProject.get(id), snap.limit);
     })();
     const scopeLabel = SCOPES.find(([id]) => id === this.scope)?.[1] ?? projects.find((p) => `project:${p.id}` === this.scope)?.name ?? "All issues";
@@ -251,7 +256,7 @@ export default class Board extends View {
       .when(Boolean(right), (el) => el.child(div().flex_none().text_size(12).text_color(t.dim).whitespace_nowrap().child(right)))
       .when(Boolean(chevron), (el) => el.child(svg(I("chevron-right")).size(14).text_color(t.dim)));
     const scopeItem = (id, label, iconName) => mrow(`scope-${id}`, this.scope === id ? "check" : iconName, label, { check: this.scope === id, action: (cx) => { this.scope = id; this.dismissPops(); cx.notify(); } });
-    const fctx = this.filterCtx(projects);
+    const fctx = rs.fctx;
     const filterCount = Object.values(this.filters).reduce((n, v) => n + v.length, 0);
     const valueRow = (field, v) => {
       const on = (this.filters[field] ?? []).includes(v.value);
@@ -309,10 +314,10 @@ export default class Board extends View {
       .child(topBtn("view-board", "Board", (cx) => { this.view = "board"; cx.notify(); }, this.view === "board"))
       .child(topBtn("view-list", "List", (cx) => { this.view = "list"; cx.notify(); }, this.view === "list"))
       .child(this.addControl("new", (tip, go) => h_flex().id("new").h(28).px(12).gap(5).items_center().rounded(7).bg(t.solid).text_color(t.solid_foreground)
-        .text_size(12).when(Boolean(tip), (el) => el.opacity(0.5).tooltip(tip)).when(!tip, (el) => el.cursor_pointer().on_click(() => go())).child(svg(I("plus")).size(13)).child("New"), this.newColumn()));
+        .text_size(12).when(Boolean(tip), (el) => el.opacity(0.5).tooltip(tip)).when(!tip, (el) => el.cursor_pointer().on_click(() => go())).child(svg(I("plus")).size(13)).child("New"), this.newColumn(), rs));
     // List view: the same cards under the column headers, in one scrolling list. Sort and collapse come from the column state.
     const list = () => v_flex().id("list").flex_1().min_h(0).overflow_y_scrollbar().px(12).pb(12).gap(12)
-      .children(this.columns().map((col, ci) => {
+      .children(cols.map((col, ci) => {
         const folded = this.collapsed.has(col.id);
         return v_flex().id(`lcol-${col.id}`).gap(8).p(8).rounded(12).bg(t.surface)
           .child(h_flex().id(`lhead-${col.id}`).h(28).px(4).gap(8).items_center().cursor_pointer()
@@ -322,7 +327,7 @@ export default class Board extends View {
             .child(div().text_size(12).text_color(t.dim).child(String(col.cards.length)))
             .child(div().flex_1())
             .child(svg(I(folded ? "chevron-right" : "chevron-down")).size(14).text_color(t.muted))
-            .child(this.addControl(`ladd-${col.id}`, (tip, go) => tip ? off(`ladd-${col.id}`, "plus", tip) : icon(`ladd-${col.id}`, "plus", go), col.id)))
+            .child(this.addControl(`ladd-${col.id}`, (tip, go) => tip ? off(`ladd-${col.id}`, "plus", tip) : icon(`ladd-${col.id}`, "plus", go), col.id, rs)))
           .when(!folded, (el) => el.children(col.cards.map((x) => card(x, ci))));
       }));
 
@@ -341,7 +346,7 @@ export default class Board extends View {
       .children(merged.remotes.map((r) => div().id(`wstatus-${r.localId}`).mx(12).mb(6).text_size(11.5).text_color(t.dim)
         .child(`${r.name}: ${statusLine(remoteWriteState(r.localId))}${this.msg ? ` · ${this.msg}` : ""}`)))
       .child(this.view === "list" ? list() : h_flex().id("cols").flex_1().min_h(0).px(12).pb(12).gap(12).overflow_x_scrollbar()
-        .children(this.columns().map((col, ci) => {
+        .children(cols.map((col, ci) => {
           const tone = t[STATUS_ICON[col.id].tone];
           const glyph = svg(I(STATUS_SVG[col.id])).size(14).text_color(tone);
           if (this.collapsed.has(col.id)) {
@@ -350,7 +355,7 @@ export default class Board extends View {
               .on_click((_e, cx) => { this.collapsed.delete(col.id); cx.notify(); })
               .child(glyph).child(div().text_size(12).text_color(t.dim).child(String(col.cards.length))).child(svg(I("chevron-right")).size(14).text_color(t.muted));
           }
-          const mode = this.sort[col.id] ?? cfg("drover-board", "default_sort");
+          const mode = this.sort[col.id] ?? rs.dflt;
           const doneCount = col.id === "done" ? col.cards.filter((x) => !x.remote).length : 0;
           const item = (key, text, active, action, color) => mrow(`mi-${col.id}-${key}`, active ? "check" : null, text, { check: active, color, action });
           const menu = () => menuBox(`menu-${col.id}`, 220).mt(4)
@@ -376,7 +381,7 @@ export default class Board extends View {
                 .trigger(div().id(`more-${col.id}`).w(22).h(22).flex().items_center().justify_center().rounded(5).cursor_pointer()
                   .text_color(this.pop === `col:${col.id}` ? t.foreground : t.muted).hover((s) => s.bg(t.hover).text_color(t.foreground)).child(svg(I("ellipsis")).size(15)))
                 .content(this.pop === `col:${col.id}` ? menu() : div()))
-              .child(this.addControl(`add-${col.id}`, (tip, go) => tip ? off(`add-${col.id}`, "plus", tip) : icon(`add-${col.id}`, "plus", go), col.id)))
+              .child(this.addControl(`add-${col.id}`, (tip, go) => tip ? off(`add-${col.id}`, "plus", tip) : icon(`add-${col.id}`, "plus", go), col.id, rs)))
             .child(v_flex().id(`cards-${col.id}`).flex_1().min_h(0).overflow_y_scrollbar().px(8).pb(8).gap(8)
               .border_2().border_color(this.over?.col === col.id && this.over.before === null ? t.accent : t.surface)
               .on_mouse_move((_e, cx) => { cx.stop_propagation(); this.aim(col.id, null, cx); })

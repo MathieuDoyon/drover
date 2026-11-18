@@ -128,6 +128,21 @@ test("Board: writes frozen turns the controls off with 'writes frozen'", async (
   assert.match(view(b, cx, `wstatus-${LID}`).texts.join(" "), /writes frozen/);
 });
 
+test("Board: a remote arrow and a column drop built while writes were on stage nothing after writes freeze; the next render turns the arrow off (T-MWL7FAABO29)", async () => {
+  const cx = await ready();
+  const b = new Board(); b.init({}, cx); b.scope = `project:${LID}`;
+  b.drag = "T-R1";
+  const arrow = view(b, cx, "r-T-R1").node.args.on_click[0];
+  const drop = view(b, cx, "cards-review").node.args.on_mouse_up[1];
+  const n0 = om.step1.length;
+  IO.setRemoteWrites(LID, false);
+  arrow(null, cx); drop(null, cx); b.key({ key: "right", modifiers: { shift: true } }, cx);
+  await drain();
+  assert.equal(om.step1.length, n0, "nothing staged: the send boundary checks the live gate, not the render's");
+  const r = view(b, cx, "r-T-R1").node;
+  assert.ok(!clickable(r)); assert.equal(toolTip(r), "writes frozen");
+});
+
 const NEW = (extra = {}) => ({ new: true, id: "", title: "", desc: "", column: "todo", priority: "P2", tags: [], notes: [], project: LID, remote: { machine: M }, ...extra });
 const openRemote = (rc, edit = null) => { host.props = { overlay: "ov", edit, column: rc.column ?? "todo", remoteCard: rc }; };
 const sends = () => om.step1.map((x) => JSON.parse(x.args[3])).filter((b) => b.op !== "protocol");
