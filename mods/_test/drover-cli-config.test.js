@@ -125,7 +125,9 @@ test("a request that waited past its ttl (a restarted consumer) is refused, not 
   const name = `${Math.floor(Date.now() / 1000) - 3600}-9-stale`;
   writeFileSync(join(inbox, `${name}.json`), JSON.stringify({ op: "config-set", key: "drover-runs.max_parallel", value: 9, from: "t42", ttlMs: 60000 }));
   startConsumer();
-  await until(() => readdirSync(inbox).includes(`${name}.result`), "answered");
-  assert.match(readFileSync(join(inbox, `${name}.result`), "utf8"), /^error: expired/);
+  // the result file is created empty and then filled: wait for the text, not for the name (a slow runner read it between the two)
+  const result = () => (readdirSync(inbox).includes(`${name}.result`) ? readFileSync(join(inbox, `${name}.result`), "utf8") : "");
+  await until(() => result() !== "", "answered");
+  assert.match(result(), /^error: expired/);
   assert.equal(host.state[CFG], undefined);
 });

@@ -21,14 +21,36 @@ if [ "$from_worktree" != 1 ] && [ "$(git rev-parse --absolute-git-dir 2>/dev/nul
   exit 2
 fi
 # cp only when the bytes differ: an identical rewrite still changes the mtime, and Herdr reloads the mod.
-sync_file() { cmp -s "$1" "$2" || cp "$1" "$2"; }
+copied=0 # set when this run really rewrote a shared copy
+sync_file() { cmp -s "$1" "$2" || { cp "$1" "$2"; copied=1; }; }
 # Refresh the generated copies first: after an edit in _lib the tests (byte-equal copies) must see the new files.
 # The list of shared files is _lib/copies.txt (the self-contained test reads it too).
-{ cmp -s drover-github/query.js drover-config/query.js || install -m 644 drover-github/query.js drover-config/query.js; } # the dialog checks the default query with the GitHub parser
+{ [ ! -f drover-github/query.js ] || cmp -s drover-github/query.js drover-config/query.js || { install -m 644 drover-github/query.js drover-config/query.js; copied=1; }; } # the dialog checks the default query with the GitHub parser
 for mod in drover-*/; do
   mod="${mod%/}"
   while IFS= read -r f; do [ -n "$f" ] && sync_file "_lib/$f" "$mod/$f"; done < _lib/copies.txt
 done
+# Does a running Herdr hold older shared code than the disk now? Herdr is not known to re-import a changed _lib file on its in-place reload
+# (the card's incident: PROTOCOL 5 on disk, protocol 4 answered until the window was reopened). So: a hash of the shared set, kept in a hidden
+# stamp at the home root (outside mods/, so no mod file changes and nothing reloads). A new hash, or no stamp beside existing links, prints a
+# note BEFORE the test and check gates (a failed run may already have changed the linked files). The stamp is written only at the end of a good run.
+stamp="$home/.drover-lib-stamp"
+# No hasher (sha256sum on Linux, shasum on macOS, else cksum) or a missing _lib file: lib_hash stays empty: no stamp, never a failed install. query.js is optional (the GitHub mod may be absent).
+if command -v sha256sum >/dev/null 2>&1; then hasher="sha256sum"; elif command -v shasum >/dev/null 2>&1; then hasher="shasum -a 256"; elif command -v cksum >/dev/null 2>&1; then hasher="cksum"; else hasher=""; fi # cksum (POSIX, always there) only detects change, which is all the stamp needs
+lib_hash=""
+if [ -n "$hasher" ]; then
+  lib_hash="$( { while IFS= read -r f; do [ -n "$f" ] && cat "_lib/$f"; done < _lib/copies.txt; [ ! -f drover-github/query.js ] || cat drover-github/query.js; } 2>/dev/null | $hasher 2>/dev/null )" || lib_hash=""
+  { while IFS= read -r f; do [ -z "$f" ] || [ -f "_lib/$f" ] || exit 1; done < _lib/copies.txt; :; } || lib_hash=""
+fi
+have_links=0; for l in "$home"/mods/drover-*; do [ -L "$l" ] && have_links=1; done
+if [ -z "$lib_hash" ]; then
+  # Cannot fingerprint. Say so only when this run really rewrote a shared copy of an existing install: never a false alarm on an equal-byte run.
+  if [ "$copied" = 1 ] && [ "$have_links" = 1 ]; then
+    echo "NOTE: shared _lib files were updated, but their fingerprint could not be checked (no sha256sum/shasum, or a shared file is missing). A running Herdr may keep the old imported code: probe it (drover config max-parallel), and if it is stale, quit and reopen the Herdr window."
+  fi
+elif { { [ -f "$stamp" ] && [ "$(cat "$stamp")" != "$lib_hash" ]; } || { [ ! -f "$stamp" ] && [ "$have_links" = 1 ]; }; }; then
+  echo "NOTE: shared _lib code changed since the last install. A running Herdr may keep the old imported code: probe it (drover config max-parallel shows the limit, or the inbox protocol answer); if it is stale, quit and reopen the Herdr window (terminals survive: they live in herdr-core)."
+fi
 if [ "${DROVER_SKIP_TESTS:-}" != 1 ]; then
   # A failing test is shown (the last lines of the output), never hidden.
   if ! tests_out="$(node --test _lib/*.test.js _test/*.test.js 2>&1)"; then
@@ -53,3 +75,4 @@ done
 target="$home/layouts/drover.json"
 if [ -e "$target" ] && [ ! -L "$target" ]; then echo "skip layout: $target is not a symlink" >&2
 else { [ "$(readlink "$target" 2>/dev/null || true)" = "$PWD/_layouts/drover.json" ] || ln -sfn "$PWD/_layouts/drover.json" "$target"; } && echo "ok   layout drover"; fi
+[ -z "$lib_hash" ] || { printf '%s\n' "$lib_hash" > "$stamp.new" && mv -f "$stamp.new" "$stamp"; } # last: only a run that passed every gate counts as installed
