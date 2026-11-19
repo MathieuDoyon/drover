@@ -5,14 +5,14 @@ import { View, div } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
 import { agents, terminals, focused, run, theme, shared, setShared } from "herdr";
 import { WAKE_KEY, setEnabled, setStatus, isOpen, wakeOrder, until, summary } from "./wake.js";
-import { projectOf } from "./store.js";
+import { projectOf, assigneeText, COLUMNS } from "./store.js";
 import { machineOf } from "./remote.js";
 import { currentRun, slotSnapshot, wakesOf, liveStatuses, memberStatus, terminalName, runTitle, lineageOf, squadRows, openCommand } from "./runs.js";
 import { section as sectionOf, toggle, openNewWakeup } from "./ui.js";
 import { age, prLabel, projectLabel } from "./sources.js";
 import { bind, cfg, isEnabled, load as loadCfg, ready as cfgReady } from "./config.js";
 import { gated } from "./ui.js";
-import { load, loadProjects, loadRuns, loadWakes, edit, openUrl, watchWakes, observeEnded, resumeSquad, canResume, cancelResume, recoverResume, resumeState, loadContext, mergeContext, CONTEXT_STALE, ROOM_KEY, modSettings } from "./io.js";
+import { load, loadConfig, loadProjects, loadRuns, loadWakes, edit, openUrl, watchWakes, observeEnded, resumeSquad, canResume, cancelResume, recoverResume, resumeState, loadContext, mergeContext, CONTEXT_STALE, ROOM_KEY, modSettings } from "./io.js";
 
 const contexts = () => shared(ROOM_KEY) ?? {};
 
@@ -106,6 +106,7 @@ export default class Room extends View {
     this.refresh(cx);
 
     const cards = load();
+    const config = loadConfig(); // once per render: the assignee name
     const task = cards.find((x) => x.id === r.task);
     const ctx = contexts()[r.id] ?? null;
     const issue = ctx?.issue ?? null;
@@ -124,7 +125,7 @@ export default class Room extends View {
     const section = (title, count, extra) => sectionOf(t, title, count, extra);
     const prop = (k, v, dot, jump) => h_flex().id(`p-${k}`).h(26).gap(8).items_center().text_size(12.5)
       .when(Boolean(jump), (el) => el.cursor_pointer().rounded(6).hover((x) => x.bg(t.hover)).on_click(jump))
-      .child(div().w(76).flex_none().text_color(t.muted).child(k))
+      .child(div().w(104).flex_none().text_color(t.muted).child(k))
       .when(Boolean(dot), (el) => el.child(div().size(8).rounded(4).flex_none().bg(dot)))
       .child(div().flex_1().truncate().child(v));
     const linkRow = (id, url) => h_flex().id(id).py(5).gap(8).items_start().rounded(6).cursor_pointer().hover((x) => x.bg(t.hover)).on_click(() => openUrl(url));
@@ -168,10 +169,11 @@ export default class Room extends View {
 
       .child(section("Properties"))
       .when(Boolean(issue), (el) => el
-        .child(prop("Status", issue.status, stateColor[issue.category] ?? t.muted))
-        .child(prop("Assignee", issue.assignee ?? "Unassigned"))
+        .child(prop("Issue status", issue.status, stateColor[issue.category] ?? t.muted))
         .when(Boolean(issue.project), (el) => el.child(prop(projectLabel(issue), issue.project)))
-        .when(Boolean(issue.type), (el) => el.child(prop("Type", issue.type))))
+        .when(Boolean(issue.type), (el) => el.child(prop("Type", issue.type)))
+        .when(Boolean(issue.assignee), (el) => el.child(prop(`${issue.kind === "jira" ? "Jira" : "GitHub"} assignee`, issue.assignee))))
+      .child(prop("Assignee", assigneeText(task?.assignee, config) || "Unassigned")) // the card's assignee (the task dialog's), whatever the issue says
       .when(Boolean(projectOf(task, loadProjects())), (el) => el.child(prop("Project", projectOf(task, loadProjects()).name)))
       .when(!issue && !task?.source, (el) => el.child(prop("Issue", "No linked issue")))
       .child(prop("Agent", leader ? `${leader.name} · ${leaderStatus}` : "—", color[leaderStatus],
@@ -182,7 +184,7 @@ export default class Room extends View {
           s !== "gone" ? () => run("agent.focus", { terminal: r.reportTo }) : null));
       })
       .child(prop("Machine", machineOf(loadProjects(), projectOf(task, loadProjects())?.id, leader?.address)))
-      .child(prop("Column", r.task ? task?.column ?? "task deleted" : "No task"))
+      .child(prop("Column", r.task ? (task ? COLUMNS.find(([id]) => id === task.column)?.[1] ?? task.column : "task deleted") : "No task"))
       .when(Boolean(r.worktree), (el) => el.child(prop("Branch", r.worktree.branch)))
       .child(prop("Run", `${r.id} · started ${age(r.started)} ago`))
 

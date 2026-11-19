@@ -6,7 +6,7 @@ The right panel for the run you are inside: the linked issue's properties, the r
 
 ## What you see
 
-The top block of the `drover` layout's right column (300px, above Tasks). Outside a run it says "Not inside a run. Focus a run's agent or open its room (Runs → Open room)". Inside a run: issue properties (status, assignee, project, type), the agent, branch, the run's wakeups with toggles and a `+`, the parent issue, PRs with Open / Draft / Merged / Closed badges, and the squad members.
+The top block of the `drover` layout's right column (300px, above Tasks). Outside a run it says "Not inside a run. Focus a run's agent or open its room (Runs → Open room)". Inside a run: properties (the issue's status, project and type; the card's assignee; the issue's own GitHub/Jira assignee only when it has one; the column by its Board name), the agent, branch, the run's wakeups with toggles and a `+`, the parent issue, PRs with Open / Draft / Merged / Closed badges, and the squad members.
 
 ## How it behaves
 

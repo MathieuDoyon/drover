@@ -2,6 +2,8 @@
 
 `drover-room`. The right panel for the run you are in: the linked issue's properties, agent, branch, the run's wakeups, parent issue, PRs on the branch and the squad.
 
+Properties: **Assignee** is the card's assignee (what the task dialog shows; Unassigned when none). The linked issue's own assignee has its own row, **GitHub assignee** or **Jira assignee**, shown only when it has one. **Issue status** is the issue's state; **Column** uses the Board's names (In progress, Ready).
+
 ![Room](../../mods/drover-room/preview.png)
 
 ## Open it
