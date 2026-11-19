@@ -2,13 +2,14 @@
 // New / Edit opens a dialog overlay of this same mod (props.projectEdit: a project id, or null for a new one).
 import { View, div } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, TextareaState, Textarea } from "gpui-base";
-import { theme, setShared, props, closeOverlay, openOverlay, exec, notify, shared } from "herdr";
+import { theme, setShared, props, closeOverlay, openOverlay, exec, notify, shared, readTextFile, home } from "herdr";
 import { PROJECTS_KEY, addProject, updateProject, removeProject } from "./store.js";
 import { load, loadProjects, modSettings, remote, remoteWriteState, setRemoteWrites } from "./io.js";
 import { writesToggle } from "./remote-write-ui.js";
 import { withRemote, remoteOf } from "./remote.js";
 import { bind, isEnabled, whenLoaded, ready as cfgReady } from "./config.js";
 import { gated } from "./ui.js";
+import { lessonPaths } from "./lessons.js";
 
 const button = (t, id, text, primary, action) =>
   h_flex().id(id).h(30).px(12).items_center().rounded(7).cursor_pointer()
@@ -43,6 +44,16 @@ export class ProjectEditor {
     this.machine = InputState.new({ placeholder: "omarchy", value: r?.machine ?? "" });
     this.remoteId = InputState.new({ placeholder: "P-… (the project's id on that machine)", value: r?.projectId ?? "" });
     this.remoteMsg = null; this.binding = false; this.bindGen = 0;
+    this.org = InputState.new({ placeholder: "acme (optional)", value: p?.org ?? "" });
+    // Open lessons: the file is looked for once, here. render() only reads these fields. A file that appears later shows after the dialog is reopened.
+    this.savedOrg = p?.org ?? "";
+    this.lessonsPath = lessonPaths(`${home()}/.config/drover-herdr`, { org: this.savedOrg }).org?.lessons ?? null;
+    this.hasLessons = false; this.lessonsChecked = !this.lessonsPath;
+    if (this.lessonsPath) cx.spawn(async (acx) => {
+      try { this.hasLessons = (await readTextFile(this.lessonsPath)) != null; } catch { this.hasLessons = false; }
+      this.lessonsChecked = true;
+      if (!this.closed) acx.notify();
+    });
     this.name.focus();
     cx.timer.after(300, () => this.name.focus());
   }
@@ -51,7 +62,7 @@ export class ProjectEditor {
   async save(cx) {
     if (this.closed || this.saving) return;
     this.saving = true;
-    const f = { name: this.name.value(), repos: this.repos.value(), folders: this.folders.value(), branch: this.branch.value() };
+    const f = { name: this.name.value(), repos: this.repos.value(), folders: this.folders.value(), branch: this.branch.value(), org: this.org.value() };
     const apply = () => (this.project ? updateProject(loadProjects(), this.project.id, f) : addProject(loadProjects(), f));
     const r = apply();
     const bad = r.error || remoteOf(loadProjects(), this.project?.id) ? null : await badRepo(r.project.repos.map((x) => x.path)); // a remote project's paths are on the other machine
@@ -99,6 +110,13 @@ export class ProjectEditor {
     cx.notify();
   }
 
+  // Enabled only for the saved org, with the file there when the dialog opened. Opening reads and writes nothing.
+  lessonsReady() { return Boolean(this.lessonsPath && this.hasLessons && this.org.value().trim() === this.savedOrg); }
+
+  openLessons() {
+    if (this.lessonsReady()) exec("open", ["-t", this.lessonsPath]);
+  }
+
   close() {
     if (this.closed) return;
     this.closed = true; this.bindGen++;
@@ -127,6 +145,10 @@ export class ProjectEditor {
       .child(label("Repos (git, one path per line, first is the default)")).child(field(Textarea.new(this.repos)).py(6))
       .child(label("Folders (one path per line)")).child(field(Textarea.new(this.folders)).py(6))
       .child(label("Base branch")).child(field(Input.new(this.branch).h(34)))
+      .child(label("Org (optional: shared lessons)")).child(field(Input.new(this.org).h(34)))
+      .child(h_flex().pt(8).gap(8).items_center()
+        .child(button(t, "open-lessons", "Open lessons", false, () => this.openLessons()).opacity(this.lessonsReady() ? 1 : 0.5))
+        .when(!this.lessonsReady(), (e) => e.child(div().id("lessons-note").text_size(12).text_color(t.muted).child(this.org.value().trim() && this.org.value().trim() !== this.savedOrg ? "none yet (save the org first)" : "none yet"))))
       .when(Boolean(this.project), (el) => el
         .child(label("Remote: machine (hc machine ls) and the project's id there. Its cards show here; with writes on you can change them from here."))
         .child(h_flex().gap(8).child(field(Input.new(this.machine).h(34).w(160))).child(field(Input.new(this.remoteId).h(34).flex_1())))
