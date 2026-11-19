@@ -30,6 +30,7 @@ usage: drover tasks [tag|column] [--project <id|name>]   list tasks (id, column,
                                                   needs a card that is not Done or archived and an ended run. --cancel stops an attempt in flight;
                                                   after a crash the card stays claimed until you run --recover (kills what the attempt owns, adopts or releases)
                                                   or --cancel (abandons it). Nothing recovers by itself
+       drover doctor [--home <dir>]               read-only check of this install: mods linked, _lib copies, souls, stale loaded code hint, CLI on PATH (one line each; exit 1 on a FAIL; fixes nothing)
        drover wake <terminal|T-…> <when> <message…>       once: now, 15m, 2h, 1d, 14:30, "tomorrow 9:00", "2026-11-12 09:00"
        drover wake <terminal|T-…> every <30m|2h|1d> <message…>   repeat (first time after one interval)
        drover wakes [terminal|T-…]                list wakeups (id, name, target, schedule, next, status, on/off)
@@ -251,9 +252,105 @@ with os.fdopen(fd, "wb") as f: f.write(sys.stdin.buffer.read())' "$out" || exit 
     *) usage ;;
   esac
 }
+# drover doctor: a READ-ONLY report (no write, no exec of herdr/hc/gh, no network; works without Herdr). One line per check:
+#   <ok|FAIL|WARN|skip>  <check>  <detail>      detail: at most 100 chars, fixed phrases, trusted names (mods, souls) and counts only.
+# It never prints a path read from the disk, a file's content or an environment value. Exit 0 = no FAIL, 1 = a FAIL, 2 = usage.
+# The repo is where this script really lives (mods/<mod>/bin/drover, symlinks followed), so it works from the linked home and from a test tree.
+# The hash recipe is mods/install.sh's, byte for byte (mods/_test/drover-cli-doctor.test.js runs the real installer to guard drift).
+doctor_ok=0; doctor_warn=0; doctor_fail=0
+doctor_emit() {  # status check detail
+  local d="${3//$'\n'/ }"
+  case "$1" in ok) doctor_ok=$((doctor_ok + 1)) ;; WARN) doctor_warn=$((doctor_warn + 1)) ;; FAIL) doctor_fail=$((doctor_fail + 1)) ;; esac
+  printf '%s  %s  %s\n' "$1" "$2" "${d:0:100}"
+}
+doctor_real() {  # the real path of a file: the symlink chain followed (readlink without -f: not portable to macOS)
+  local s="$1" d
+  while [ -L "$s" ]; do d="$(cd -P "$(dirname "$s")" && pwd)"; s="$(readlink "$s")"; case "$s" in /*) ;; *) s="$d/$s" ;; esac; done
+  d="$(cd -P "$(dirname "$s")" && pwd)"; printf '%s/%s\n' "$d" "$(basename "$s")"
+}
+doctor_first() {  # "<first entry>[ (+N more)]" from a newline-separated list, whole entries only
+  local first="${1%%$'\n'*}" n="$2"
+  printf '%s' "$first"; [ "$n" -le 1 ] || printf ' (+%d more)' "$((n - 1))"
+}
+doctor() {
+  local dhome="$home" me rm m t name total=0 nbad=0 bad="" anymiss=0 f cur manifest_ok=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --home) [ $# -ge 2 ] || usage; dhome="$2"; shift 2 ;;
+      *) usage ;;
+    esac
+  done
+  me="$(doctor_real "${BASH_SOURCE[0]}")"
+  rm="$(cd -P "$(dirname "$me")/../.." && pwd)"   # the repo's mods/ folder
+  # 1. mods-linked: every repo mod has a symlink in the home that resolves to it. DROVER_SKIP_MODS is install-time only: a missing link is a FAIL.
+  for m in "$rm"/drover-*/; do
+    m="${m%/}"; [ -d "$m" ] || continue; name="${m##*/}"; total=$((total + 1)); t="$dhome/mods/$name"
+    if [ -L "$t" ]; then
+      [ "$(cd -P "$t" 2>/dev/null && pwd)" = "$m" ] || { nbad=$((nbad + 1)); bad="$bad$name points elsewhere"$'\n'; }
+    elif [ -e "$t" ]; then nbad=$((nbad + 1)); bad="$bad$name not a link"$'\n'
+    else nbad=$((nbad + 1)); anymiss=1; bad="$bad$name missing"$'\n'; fi
+  done
+  if [ "$total" -eq 0 ]; then doctor_emit FAIL mods-linked "no drover mod found next to this script"
+  elif [ "$nbad" -eq 0 ]; then doctor_emit ok mods-linked "$total mods linked to this repo"
+  else
+    # short and whole: the count, the first failure, then the hint (only a really missing mod mentions DROVER_SKIP_MODS)
+    doctor_emit FAIL mods-linked "$nbad of $total mods: $(doctor_first "$bad" "$nbad"); run install.sh$([ "$anymiss" = 1 ] && printf ' (no DROVER_SKIP_MODS)')"
+  fi
+  # 2. lib-copies: each mod's copy of a shared _lib file is byte-equal to _lib's (list: _lib/copies.txt), and drover-config/query.js to drover-github/query.js.
+  # A manifest that cannot be read is a FAIL (never a pass by an empty loop): every later read of it is gated on manifest_ok, so no shell diagnostic can print a path.
+  [ -f "$rm/_lib/copies.txt" ] && [ -r "$rm/_lib/copies.txt" ] && manifest_ok=1
+  if [ "$manifest_ok" != 1 ]; then doctor_emit FAIL lib-copies "_lib/copies.txt is missing or unreadable"
+  else
+    nbad=0; bad=""
+    for m in "$rm"/drover-*/; do
+      m="${m%/}"; [ -d "$m" ] || continue; name="${m##*/}"
+      while IFS= read -r f; do
+        [ -n "$f" ] || continue
+        cmp -s "$rm/_lib/$f" "$m/$f" 2>/dev/null || { nbad=$((nbad + 1)); bad="$bad$name/$f"$'\n'; }
+      done < "$rm/_lib/copies.txt"
+    done
+    if [ -f "$rm/drover-github/query.js" ] && ! cmp -s "$rm/drover-github/query.js" "$rm/drover-config/query.js" 2>/dev/null; then nbad=$((nbad + 1)); bad="${bad}drover-config/query.js"$'\n'; fi
+    if [ "$nbad" -eq 0 ]; then doctor_emit ok lib-copies "every shared copy equals _lib"
+    else doctor_emit FAIL lib-copies "differs: $nbad files, first ${bad%%$'\n'*}; run install.sh"; fi
+  fi
+  # 3. souls: each soul the repo lists, and _herd.md, exists in the home and is not empty.
+  nbad=0; bad=""; total=0
+  for f in _herd.md $(cd "$rm/drover-agents/souls" 2>/dev/null && ls -- *.md 2>/dev/null | grep -v '^_herd\.md$' || true); do
+    total=$((total + 1)); t="$dhome/mods/drover-agents/souls/$f"
+    if [ ! -e "$t" ]; then nbad=$((nbad + 1)); bad="$bad$f missing"$'\n'
+    elif [ ! -s "$t" ]; then nbad=$((nbad + 1)); bad="$bad$f empty"$'\n'; fi
+  done
+  if [ "$nbad" -eq 0 ]; then doctor_emit ok souls "$total souls present"
+  else doctor_emit FAIL souls "$nbad of $total: $(doctor_first "$bad" "$nbad")"; fi
+  # 4. lib-stamp: the fingerprint of the shared set vs the stamp install.sh wrote. A hint, never a FAIL: a running Herdr cannot be probed without a write.
+  local hasher="" lib_hash="" stamp="$dhome/.drover-lib-stamp" have_links=0 l
+  if command -v sha256sum >/dev/null 2>&1; then hasher="sha256sum"; elif command -v shasum >/dev/null 2>&1; then hasher="shasum -a 256"; elif command -v cksum >/dev/null 2>&1; then hasher="cksum"; fi
+  if [ -n "$hasher" ] && [ "$manifest_ok" = 1 ]; then
+    lib_hash="$( { while IFS= read -r f; do [ -n "$f" ] && cat "$rm/_lib/$f"; done < "$rm/_lib/copies.txt"; [ ! -f "$rm/drover-github/query.js" ] || cat "$rm/drover-github/query.js"; } 2>/dev/null | $hasher 2>/dev/null )" || lib_hash=""
+    ( while IFS= read -r f; do [ -z "$f" ] || [ -f "$rm/_lib/$f" ] || exit 1; done < "$rm/_lib/copies.txt" ) || lib_hash=""   # a subshell: the exit must not end doctor
+  fi
+  for l in "$dhome"/mods/drover-*; do [ -L "$l" ] && have_links=1; done
+  if [ -z "$hasher" ]; then doctor_emit skip lib-stamp "cannot fingerprint: no sha256sum, shasum or cksum"
+  elif [ -z "$lib_hash" ]; then doctor_emit skip lib-stamp "cannot fingerprint: a shared _lib file is missing or unreadable"
+  elif [ -f "$stamp" ]; then
+    if [ "$(cat "$stamp" 2>/dev/null)" = "$lib_hash" ]; then doctor_emit ok lib-stamp "same as the last install (a running Herdr is not probed)"
+    else doctor_emit WARN lib-stamp "_lib changed since install; Herdr may hold old code (not probed): reopen the window"; fi
+  elif [ "$have_links" = 1 ]; then doctor_emit WARN lib-stamp "no install stamp; Herdr may hold old code (not probed): reopen the window"
+  else doctor_emit skip lib-stamp "no install stamp yet"; fi
+  # 5. cli-path: `drover` on PATH is this very file (an agent may call it by full path, so only a WARN).
+  cur="$(command -v drover 2>/dev/null)" || cur=""
+  if [ -z "$cur" ] || [ ! -f "$cur" ]; then doctor_emit WARN cli-path "not on PATH (agents can still call it by full path)"
+  elif [ "$(doctor_real "$cur")" = "$me" ]; then doctor_emit ok cli-path "on PATH"
+  else doctor_emit WARN cli-path "PATH copy is another file"; fi
+  # 6. hooks: the slot for B4a (the hook check); nothing to look at before it exists.
+  doctor_emit skip hooks "not installed (B4a)"
+  printf 'doctor: %d ok, %d warn, %d fail\n' "$doctor_ok" "$doctor_warn" "$doctor_fail"
+  [ "$doctor_fail" -eq 0 ]
+}
 case "${1:-}" in
   agents) agents "${@:2}" ;;
   config) config "${@:2}" ;;
+  doctor) doctor "${@:2}" ;;
   tasks) read_shared tasks "${@:2}" ;;
   task) [ $# -eq 2 ] || usage; read_shared task "$2" ;;
   squads) read_shared squads ;;
