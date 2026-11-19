@@ -208,3 +208,73 @@ test("_herd.md: rule 12 lets an agent change the limit only on the owner's plain
   assert.ok(h.includes("| Parallel runs limit | `drover config max-parallel`"), "tools table row");
   assert.ok(h.indexOf("12. **The parallel-runs limit") < h.indexOf("## 5. Honesty"), "rule 12 is in the hard rules");
 });
+
+// --- #57 L6: the retro step (lessons only) ---
+const retro = () => {
+  const t = soul("drover");
+  const i = t.indexOf("## Retro (lessons)");
+  assert.ok(i >= 0, "retro heading present");
+  const rest = t.slice(i + 3);
+  const j = rest.search(/\n## /);
+  return j < 0 ? t.slice(i) : t.slice(i, i + 3 + j);
+};
+
+test("drover soul: retro section names step 7b, the retro command and the three triggers", () => {
+  const d = soul("drover");
+  const r = retro();
+  assert.match(d, /\*\*7b\. Retro\.\*\*/);
+  assert.match(d.match(/\*\*7\. Bring the herd in\.\*\*[^\n]*/)[0], /7b/);
+  assert.match(r, /bring(?:s|ing)? the herd in/i);
+  assert.match(r, /`retro`/);
+  assert.match(r, /on demand/i);
+  assert.match(r, /all pass, close/);
+  assert.match(d.match(/\n6\. At a drive close[^\n]*/)[0], /retro/);
+});
+
+test("drover soul: retro runs drover-lessons check on stdin before it shows any candidate", () => {
+  const r = retro();
+  const c = r.indexOf("drover-lessons check");
+  assert.ok(c >= 0, "check named");
+  assert.ok(c < r.search(/\bshow/i), "check comes before the display wording");
+  assert.match(r, /stdin/);
+  assert.match(r, /never argv/i);
+});
+
+test("drover soul: retro checks an edit/refine candidate with no scope flag and re-checks revised text", () => {
+  const r = retro();
+  assert.match(r, /edit or refine candidate[^\n.]*`check` with no scope flag/);
+  assert.match(r, /run it again on any text the person revises/i);
+});
+
+// drover-lessons (FLAGS / build_scope in mods/drover-agents/bin/drover-lessons): every verb but check needs exactly one of --org/--project/--agent.
+const scopeless = (text) => [...text.matchAll(/`drover-lessons ([a-z|]+)([^`]*)`/g)].filter((m) => m[1] !== "check" && !/<scope>|--org|--project|--agent/.test(m[2])).map((m) => m[0]);
+test("drover soul: every drover-lessons call in the retro except check carries a scope", () => {
+  const r = retro();
+  const verbs = [...r.matchAll(/`drover-lessons ([a-z|]+)/g)].map((m) => m[1]);
+  for (const v of ["list", "stale", "add", "edit|rm|confirm"]) assert.ok(verbs.includes(v), `${v} call present`);
+  assert.deepEqual(scopeless(r), []);
+  assert.deepEqual(scopeless(r.replace("stale --days 90 <scope>", "stale --days 90")), ["`drover-lessons stale --days 90`"], "a scope-less stale is caught");
+});
+
+test("drover soul: retro never reads or quotes agent transcripts", () => {
+  assert.match(retro(), /never read or quote agent transcripts/i);
+});
+
+test("drover soul: retro offers the five choices, with --expect only on edit/rm/confirm, labels and advisory wording", () => {
+  const r = retro();
+  for (const s of ["add", "edit", "remove", "confirm", "skip", "--expect", "before/after", "new", "duplicate", "refines", "contradicts", "advisory", "org", "project", "agent"]) assert.ok(r.includes(s), s);
+  assert.match(r, /`add`[^\n]*no `--expect`|`add` takes no `--expect`/);
+  assert.doesNotMatch(r, /perm-propose|permission proposal/i);
+});
+
+test("drover soul: retro section is small and the soul stays under 115 lines", () => {
+  assert.ok(retro().trimEnd().split("\n").length <= 30, "retro section <= 30 lines");
+  assert.ok(soul("drover").split("\n").length <= 115, "soul <= 115 lines");
+});
+
+test("docs: lessons guide exists, is linked from the README and the agents anchor exists", () => {
+  const g = readFileSync(new URL("../../docs/guides/lessons.md", import.meta.url), "utf8");
+  for (const s of ["drover-lessons check", "advisory", "transcripts", "../agents.md#lessons-writer"]) assert.ok(g.includes(s), s);
+  assert.ok(readFileSync(new URL("../../docs/README.md", import.meta.url), "utf8").includes("(guides/lessons.md)"));
+  assert.ok(readFileSync(new URL("../../docs/agents.md", import.meta.url), "utf8").includes("\n## Lessons writer"));
+});
