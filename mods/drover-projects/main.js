@@ -47,13 +47,19 @@ export class ProjectEditor {
     this.org = InputState.new({ placeholder: "acme (optional)", value: p?.org ?? "" });
     // Open lessons: the file is looked for once, here. render() only reads these fields. A file that appears later shows after the dialog is reopened.
     this.savedOrg = p?.org ?? "";
-    this.lessonsPath = lessonPaths(`${home()}/.config/drover-herdr`, { org: this.savedOrg }).org?.lessons ?? null;
+    const paths = lessonPaths(`${home()}/.config/drover-herdr`, { org: this.savedOrg, project: p?.id });
+    this.lessonsPath = paths.org?.lessons ?? null;
     this.hasLessons = false; this.lessonsChecked = !this.lessonsPath;
-    if (this.lessonsPath) cx.spawn(async (acx) => {
-      try { this.hasLessons = (await readTextFile(this.lessonsPath)) != null; } catch { this.hasLessons = false; }
-      this.lessonsChecked = true;
+    this.projectLessonsPath = paths.project; // null for a new project: it has no id yet
+    this.hasProjectLessons = false; this.projectLessonsChecked = !this.projectLessonsPath;
+    const probe = (path, found, checked) => cx.spawn(async (acx) => {
+      let has = false;
+      try { has = (await readTextFile(path)) != null; } catch { has = false; }
+      this[found] = has; this[checked] = true;
       if (!this.closed) acx.notify();
     });
+    if (this.lessonsPath) probe(this.lessonsPath, "hasLessons", "lessonsChecked");
+    if (this.projectLessonsPath) probe(this.projectLessonsPath, "hasProjectLessons", "projectLessonsChecked");
     this.name.focus();
     cx.timer.after(300, () => this.name.focus());
   }
@@ -117,6 +123,13 @@ export class ProjectEditor {
     if (this.lessonsReady()) exec("open", ["-t", this.lessonsPath]);
   }
 
+  // Enabled only for a saved project, with the file there when the dialog opened.
+  projectLessonsReady() { return Boolean(this.projectLessonsPath && this.hasProjectLessons); }
+
+  openProjectLessons() {
+    if (this.projectLessonsReady()) exec("open", ["-t", this.projectLessonsPath]);
+  }
+
   close() {
     if (this.closed) return;
     this.closed = true; this.bindGen++;
@@ -147,8 +160,11 @@ export class ProjectEditor {
       .child(label("Base branch")).child(field(Input.new(this.branch).h(34)))
       .child(label("Org (optional: shared lessons)")).child(field(Input.new(this.org).h(34)))
       .child(h_flex().pt(8).gap(8).items_center()
-        .child(button(t, "open-lessons", "Open lessons", false, () => this.openLessons()).opacity(this.lessonsReady() ? 1 : 0.5))
+        .child(button(t, "open-lessons", "Org lessons", false, () => this.openLessons()).opacity(this.lessonsReady() ? 1 : 0.5))
         .when(!this.lessonsReady(), (e) => e.child(div().id("lessons-note").text_size(12).text_color(t.muted).child(this.org.value().trim() && this.org.value().trim() !== this.savedOrg ? "none yet (save the org first)" : "none yet"))))
+      .child(h_flex().pt(8).gap(8).items_center()
+        .child(button(t, "open-project-lessons", "Project lessons", false, () => this.openProjectLessons()).opacity(this.projectLessonsReady() ? 1 : 0.5))
+        .when(!this.projectLessonsReady(), (e) => e.child(div().id("project-lessons-note").text_size(12).text_color(t.muted).child(this.project ? "none yet" : "none yet (save the project first)"))))
       .when(Boolean(this.project), (el) => el
         .child(label("Remote: machine (hc machine ls) and the project's id there. Its cards show here; with writes on you can change them from here."))
         .child(h_flex().gap(8).child(field(Input.new(this.machine).h(34).w(160))).child(field(Input.new(this.remoteId).h(34).flex_1())))

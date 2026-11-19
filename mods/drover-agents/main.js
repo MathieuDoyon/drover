@@ -2,7 +2,8 @@
 // Dialog modes: props.pick (▶ on a task), props.agent / props.squad (editors).
 import { View, div } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, TextareaState, Textarea, Popover } from "gpui-base";
-import { props, closeOverlay, openOverlay, theme, shared, setShared, notify, exec, appHome, home, hc, focused } from "herdr";
+import { props, closeOverlay, openOverlay, theme, shared, setShared, notify, exec, appHome, home, hc, focused, readTextFile } from "herdr";
+import { lessonPaths } from "./lessons.js";
 import { AGENTS_KEY, START_IN_KEY, saveAgent, saveSquad, removeFrom, addDefaults, defaultDrover, droverLabel, envProblem } from "./runs.js";
 import { bind, isEnabled, whenLoaded, ready as cfgReady } from "./config.js";
 import { gated } from "./ui.js";
@@ -51,8 +52,19 @@ class AgentEditor {
     this.envError = null;
     this.keys = 0;
     this.busy = false;
+    // Open lessons: the file is looked for once (probeLessons, own spawn). render() only reads these fields.
+    this.lessonsPath = this.agent ? lessonPaths(`${home()}/.config/drover-herdr`, { agent: this.agent.id }).agent : null;
+    this.hasLessons = false; this.lessonsChecked = !this.lessonsPath;
     this.name.focus();
   }
+  // One existence read, independent of load(): a failing env file or lessons read never affects the other.
+  async probeLessons() {
+    if (!this.lessonsPath) return;
+    try { this.hasLessons = (await readTextFile(this.lessonsPath)) != null; } catch { this.hasLessons = false; }
+    this.lessonsChecked = true;
+  }
+  lessonsReady() { return Boolean(this.lessonsPath && this.hasLessons); }
+  openLessons() { if (this.lessonsReady()) exec("open", ["-t", this.lessonsPath]); }
   // Called once with a live context: reads the saved variable names (never values).
   async load() {
     if (!this.agent) return;
@@ -145,6 +157,9 @@ class AgentEditor {
           .child(div().flex_none().text_size(11.5).text_color(t.muted).child("Open ↗"))] : []),
       u.label(a?.soul ? "Extra instructions (sent after the soul)" : "Instructions"), u.field(Textarea.new(this.instructions)).py(6),
       this.envSection(t, u),
+      h_flex().pt(12).gap(8).items_center()
+        .child(u.button("open-lessons", "Open lessons", false, () => this.openLessons()).opacity(this.lessonsReady() ? 1 : 0.5))
+        .when(!this.lessonsReady(), (e) => e.child(div().id("lessons-note").text_size(12).text_color(t.muted).child(a ? "none yet" : "none yet (save the agent first)"))),
       this.error ? div().pt(10).text_size(12).text_color(t.blocked).child(this.error) : div(),
       h_flex().pt(18).gap(8)
         .when(Boolean(a), (el) => el.child(u.button("del", "Delete", false, (_e, cx) => this.remove(cx))))
@@ -448,6 +463,7 @@ export default class Agents extends View {
     const p = props() ?? {};
     this.dialog = p.pick ? new Picker() : p.agent !== undefined ? new AgentEditor() : p.squad !== undefined ? new SquadEditor() : p.export ? new ExportDialog() : p.import ? new ImportDialog() : null;
     if (this.dialog?.load) cx.spawn(async (cx) => { await this.dialog.load(); cx.notify(); });
+    if (this.dialog?.probeLessons) cx.spawn(async (cx) => { await this.dialog.probeLessons(); cx.notify(); });
     // The pickers and editors are dialogs other screens open: they are not the Squads screen and are never switched off.
     if (this.dialog) cx.timer?.every?.(30000, () => { observeEnded(); });
     else whenLoaded("drover-agents", cx, (cx) => this.ensureStarted(cx));
