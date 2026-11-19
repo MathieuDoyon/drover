@@ -847,3 +847,90 @@ test("racing: repeated 10-writer rounds on fresh files never lose an add (lock c
     rmSync(cfg, { recursive: true, force: true });
   }
 });
+
+// ---- L7: staleness pass guards ----
+const AGED = [
+  "### L-01 Old one\nb1 (added 2020-01-01)", "### L-02 Old but confirmed\nb2 (added 2020-01-01 · confirmed " + today() + ")",
+  "### L-03 Undated\nb3", "### L-04 Fresh\nb4 (added " + today() + ")",
+].join("\n\n") + "\n";
+const snap = (root) => tree(root).map((r) => { const p = join(root, r); const s = lstatSync(p); return [r, s.isFile() ? read(p) : "", s.mtimeMs]; });
+
+test("read-only verbs (list, list --full, stale, stale --days, check) change no byte, mtime or file", () => {
+  const cfg = scratch();
+  seed(cfg, AGED);
+  const before = snap(cfg);
+  for (const args of [["list", ...ORG], ["list", ...ORG, "--full"], ["stale", ...ORG], ["stale", ...ORG, "--days", "1"], ["stale", ...ORG, "--days", "0"]]) {
+    assert.equal(run(cfg, args).code, 0, args.join(" "));
+  }
+  assert.equal(run(cfg, ["check"], cand("A new generic lesson", "body")).code, 0);
+  assert.deepEqual(snap(cfg), before);
+  assert.ok(!existsSync(file(cfg, "lessons.md.prev")) && !existsSync(file(cfg, "lessons.md.lock")), "no .prev or lock created");
+});
+
+test("only an approved confirm refreshes a date: add/edit/rm on other entries leave the target's dates alone", () => {
+  const cfg = scratch();
+  seed(cfg, AGED);
+  const datesOf = (id) => { const e = parsed(file(cfg)).entries.find((x) => `L-${String(x.n).padStart(2, "0")}` === id); return e && [e.added, e.confirmed]; };
+  const l1 = datesOf("L-01"), l2 = datesOf("L-02");
+  assert.equal(run(cfg, ["add", ...ORG], cand("Another lesson", "body")).code, 0);
+  assert.equal(run(cfg, ["edit", "L-04", ...ORG, "--expect", tokenOf(cfg, "L-04")], cand("Fresh renamed", "b4")).code, 0);
+  assert.equal(run(cfg, ["rm", "L-03", ...ORG, "--expect", tokenOf(cfg, "L-03")]).code, 0);
+  assert.deepEqual(datesOf("L-01"), l1);
+  assert.deepEqual(datesOf("L-02"), l2);
+  assert.deepEqual(l1, ["2020-01-01", null]);
+});
+
+test("same-entry rule: edit clears confirmed; confirm with the right token changes only that entry's date", () => {
+  const cfg = scratch();
+  seed(cfg, AGED);
+  const e = run(cfg, ["edit", "L-02", ...ORG, "--expect", tokenOf(cfg, "L-02")], cand("Old but confirmed", "b2"));
+  assert.equal(e.code, 0, e.all);
+  const x = parsed(file(cfg)).entries.find((y) => y.title === "Old but confirmed");
+  assert.equal(x.confirmed, null);
+  const before = read(file(cfg));
+  const c = run(cfg, ["confirm", "L-02", ...ORG, "--expect", tokenOf(cfg, "L-02")]);
+  assert.equal(c.code, 0, c.all);
+  const after = read(file(cfg));
+  const bl = before.split("\n"), al = after.split("\n");
+  assert.equal(bl.length, al.length);
+  const diff = bl.map((l, i) => [l, al[i]]).filter(([a, b]) => a !== b);
+  assert.equal(diff.length, 1, "exactly one line changed");
+  assert.match(diff[0][1], new RegExp(`confirmed ${today()}`));
+});
+
+test("a stale or wrong token on confirm or edit exits 2 and leaves the file byte-equal", () => {
+  const cfg = scratch();
+  seed(cfg, AGED);
+  const tok = tokenOf(cfg, "L-01");
+  const before = read(file(cfg));
+  for (const verb of ["confirm", "edit"]) {
+    const r = run(cfg, [verb, "L-01", ...ORG, "--expect", "0".repeat(64)], cand("Old one", "b1"));
+    assert.equal(r.code, 2, verb);
+    assert.match(r.err, /^stale: re-review/);
+    assert.equal(read(file(cfg)), before);
+  }
+  // stale listed the token, then the entry changed: the old token is refused
+  assert.equal(run(cfg, ["edit", "L-01", ...ORG, "--expect", tok], cand("Old one reworded", "b1")).code, 0);
+  const mid = read(file(cfg));
+  const r = run(cfg, ["confirm", "L-01", ...ORG, "--expect", tok]);
+  assert.equal(r.code, 2);
+  assert.equal(read(file(cfg)), mid);
+});
+
+test("stale flow end to end: an old entry is listed; confirm drops it; its unconfirmed neighbour stays", () => {
+  const cfg = scratch();
+  seed(cfg, AGED);
+  const ids = () => run(cfg, ["stale", ...ORG]).out.trim().split("\n").filter(Boolean).map((l) => l.split("\t")[0]);
+  assert.deepEqual(ids(), ["L-01", "L-03"]);
+  const c = run(cfg, ["confirm", "L-01", ...ORG, "--expect", tokenOf(cfg, "L-01")]);
+  assert.equal(c.code, 0, c.all);
+  assert.deepEqual(ids(), ["L-03"]);
+  assert.deepEqual(parsed(file(cfg)).entries.find((e) => e.title === "Undated"), parsed(file(cfg)).entries[2]);
+});
+
+test("stale needs a scope: no scope exits 1 and creates nothing", () => {
+  const cfg = scratch();
+  const r = run(cfg, ["stale", "--days", "90"]);
+  assert.equal(r.code, 1);
+  assert.deepEqual(tree(cfg), []);
+});
