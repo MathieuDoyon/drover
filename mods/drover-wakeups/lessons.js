@@ -105,6 +105,53 @@ function splitMeta(line) {
   return { text: line.slice(0, m.index), added, source, confirmed };
 }
 
+// ---- UTF-8 without TextEncoder/TextDecoder (the mod runtime has neither) ----
+
+// UTF-8 byte length. A lone surrogate counts 3, as the encoder's U+FFFD does.
+export function utf8Length(str) {
+  if (typeof str !== "string") return 0;
+  let n = 0;
+  for (let i = 0; i < str.length; i++) {
+    const c = str.charCodeAt(i);
+    if (c < 0x80) n += 1;
+    else if (c < 0x800) n += 2;
+    else if (c >= 0xd800 && c < 0xdc00 && i + 1 < str.length && (str.charCodeAt(i + 1) & 0xfc00) === 0xdc00) { n += 4; i++; }
+    else n += 3;
+  }
+  return n;
+}
+
+// The longest prefix of `str` that is at most `max` UTF-8 bytes; never ends inside a character or a surrogate pair.
+export function utf8Cut(str, max) {
+  if (typeof str !== "string") return "";
+  let n = 0;
+  for (let i = 0; i < str.length; i++) {
+    const c = str.charCodeAt(i);
+    let w = 3, units = 1;
+    if (c < 0x80) w = 1;
+    else if (c < 0x800) w = 2;
+    else if (c >= 0xd800 && c < 0xdc00 && i + 1 < str.length && (str.charCodeAt(i + 1) & 0xfc00) === 0xdc00) { w = 4; units = 2; }
+    if (n + w > max) return str.slice(0, i);
+    n += w;
+    i += units - 1;
+  }
+  return str;
+}
+
+// The UTF-8 bytes of `str` (lone surrogates as U+FFFD), as a plain array.
+function utf8Bytes(str) {
+  const out = [];
+  for (const ch of str) {
+    let cp = ch.codePointAt(0);
+    if (cp >= 0xd800 && cp < 0xe000) cp = 0xfffd;
+    if (cp < 0x80) out.push(cp);
+    else if (cp < 0x800) out.push(0xc0 | (cp >> 6), 0x80 | (cp & 63));
+    else if (cp < 0x10000) out.push(0xe0 | (cp >> 12), 0x80 | ((cp >> 6) & 63), 0x80 | (cp & 63));
+    else out.push(0xf0 | (cp >> 18), 0x80 | ((cp >> 12) & 63), 0x80 | ((cp >> 6) & 63), 0x80 | (cp & 63));
+  }
+  return out;
+}
+
 // ---- fingerprint ----
 
 const FNV_OFFSET = 0xcbf29ce484222325n;
@@ -118,7 +165,7 @@ export function entryHash(entry) {
   const body = Array.isArray(entry?.body) ? entry.body : [];
   const text = `${canonId(idNumber(entry))}\n${sanitize(entry?.title)}\n${body.map(sanitize).join("\n")}`.normalize("NFC");
   let h = FNV_OFFSET;
-  for (const b of new TextEncoder().encode(text)) h = ((h ^ BigInt(b)) * FNV_PRIME) & MASK64;
+  for (const b of utf8Bytes(text)) h = ((h ^ BigInt(b)) * FNV_PRIME) & MASK64;
   return h.toString(16).padStart(16, "0");
 }
 
@@ -134,12 +181,9 @@ export function titleKey(title) {
 // exact-cap text keeps its last entry only if a complete boundary follows it. A complete, short file is returned as is.
 export function boundText(text, { truncated = false } = {}) {
   if (typeof text !== "string") return "";
-  const bytes = new TextEncoder().encode(text);
-  const over = bytes.length > FILE_READ_MAX_BYTES;
+  const over = utf8Length(text) > FILE_READ_MAX_BYTES;
   if (!over && !truncated) return text;
-  let end = Math.min(bytes.length, FILE_READ_MAX_BYTES);
-  while (end > 0 && end < bytes.length && (bytes[end] & 0xc0) === 0x80) end--;
-  const lines = new TextDecoder().decode(bytes.subarray(0, end)).split("\n");
+  const lines = utf8Cut(text, FILE_READ_MAX_BYTES).split("\n");
   // the last element is a possibly partial line: only the lines before it can be boundaries
   for (let j = lines.length - 2; j >= 0; j--) {
     if (lines[j].trim() === "" || lines[j].startsWith("###")) return j === 0 ? "" : `${lines.slice(0, j).join("\n")}\n`;

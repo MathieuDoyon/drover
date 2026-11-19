@@ -1,0 +1,94 @@
+#!/usr/bin/env -S python3 -I
+# drover-lessons-read --root <abs config dir> <relative path>...
+# Reads the lesson files (orgs/<org>/lessons.md, projects/<id>/lessons.md, agents/<id>.lessons.md) for the launch loader. The mod runtime
+# has no lstat, no open and no partial read, so "bounded" and "symlink-safe" cannot be done in JS: this helper does it.
+#   READ-ONLY. It never creates, writes, renames or deletes anything, and never prints anything but the JSON below.
+#   Each path is walked below the root one component at a time, every component opened relative to the descriptor of its parent:
+#   directories with O_DIRECTORY|O_NOFOLLOW, the file with O_NOFOLLOW|O_NONBLOCK (a FIFO does not block) and then fstat must say a regular
+#   file. A symlink at any component below the root, a directory, a FIFO, a device, a missing or unreadable file, or non-UTF-8 text gives null.
+#   Because every step uses the descriptor opened in the step before, a component swapped for a link after its check cannot redirect the read.
+#   The root itself and everything above it may be links (system aliases such as /tmp).
+#   At most 65537 bytes are read from a file: 65536 are the limit, the extra byte tells "there is more". A multibyte character cut by the
+#   cap is dropped. Output: one JSON object { "<path as given>": { "text": "...", "truncated": bool } | null, ... }, ASCII only.
+# Exit 1 only for bad arguments (reason on stderr). Test hook: with DROVER_LESSONS_READ_PAUSE=<dir> it prints "step <n> <part>" to stderr
+# before opening each component of a path and waits (at most 10 s) for the file <dir>/go-<n>; it writes nothing.
+import json, os, stat, sys, time
+
+CAP = 65537
+
+
+def fail(reason):
+    sys.stderr.write("drover-lessons-read: " + reason + "\n")
+    sys.exit(1)
+
+
+def pause(n, part):
+    ctl = os.environ.get("DROVER_LESSONS_READ_PAUSE")
+    if not ctl:
+        return
+    sys.stderr.write("step %d %s\n" % (n, part))
+    sys.stderr.flush()
+    end = time.monotonic() + 10
+    while not os.path.exists(os.path.join(ctl, "go-%d" % n)) and time.monotonic() < end:
+        time.sleep(0.001)
+
+
+def read_file(root_fd, rel):
+    parts = rel.split("/")
+    fds = []
+    try:
+        cur = root_fd
+        for n, part in enumerate(parts):
+            pause(n, part)
+            last = n == len(parts) - 1
+            flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | (os.O_NONBLOCK if last else os.O_DIRECTORY)
+            cur = os.open(part, flags, dir_fd=cur)
+            fds.append(cur)
+        if not stat.S_ISREG(os.fstat(cur).st_mode):
+            return None
+        data = b""
+        while len(data) < CAP:
+            chunk = os.read(cur, CAP - len(data))
+            if not chunk:
+                break
+            data += chunk
+        truncated = len(data) >= CAP
+        for cut in range(4 if truncated else 1):
+            try:
+                text = (data[: len(data) - cut] if cut else data).decode("utf-8")
+                return {"text": text, "truncated": truncated}
+            except UnicodeDecodeError:
+                continue
+        return None
+    except OSError:
+        return None
+    finally:
+        for fd in fds:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+
+
+def main(argv):
+    if len(argv) < 3 or argv[0] != "--root":
+        fail("usage: drover-lessons-read --root <abs dir> <relative path>...")
+    root, rels = argv[1], argv[2:]
+    if "\0" in root or not os.path.isabs(root):
+        fail("the root must be an absolute path")
+    for rel in rels:
+        if not rel or "\0" in rel or rel.startswith("/") or any(p in ("", ".", "..") for p in rel.split("/")):
+            fail("a path must be relative, with no empty, . or .. part")
+    try:
+        root_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    except OSError:
+        root_fd = None
+    out = {}
+    for rel in rels:
+        out[rel] = read_file(root_fd, rel) if root_fd is not None else None
+    if root_fd is not None:
+        os.close(root_fd)
+    sys.stdout.write(json.dumps(out) + "\n")
+
+
+main(sys.argv[1:])

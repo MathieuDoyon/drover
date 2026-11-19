@@ -12,6 +12,7 @@ import * as HE from "./herd-export.js";
 import { resolveWorkFolder, moveOffers, parseMove } from "./workfolder.js";
 import { bind as bindCfg, load as loadCfg, ready as cfgReady, cfg, KEY as CONFIG_KEY, configGet, configSet } from "./config.js";
 import { soulHash } from "./herd-export.js";
+import { lessonPaths, boundText } from "./lessons.js";
 import { exportName } from "./herd-share.js";
 import { AGENTS_KEY, RUNS_KEY, config, plan, argv, leaderPrompt, createCardsPrompt, memberPrompt, worktreeOf, terminalName, startGuard, projectOfDrover, isLiveDrover, slotSnapshot, slotsOf, reconcile, runFolder, markEnded, orphanedWorkers, terminalRecord, agentKind, newUuid, withSessionFlag, withMarker, pickCodexSession, liveStatuses, memberStatus, resumeCandidates, resumeToken, resumeGuard, resumePrompt, resumedTerminal, resumedRun, linkResumed, sessionMarker, claimTtl, launchArgv, parseAgentEnv, envProblem, BIND_KEY, droverChoices, defaultDrover, maxRuns, keptRuns, pruneRuns } from "./runs.js";
 
@@ -375,6 +376,39 @@ export async function moveWorkFolder(from, to) {
   } catch (e) { return { error: String(e?.message ?? e) }; }
 }
 
+// ---- Lessons loader (T-MWMS8RGSWJC, #57 L4). Called by launch() only, never by a render. The runtime fs follows symlinks and reads whole
+// files, so the read-only helper drover-lessons-read does the bounded, symlink-safe reading. Any failure gives no lessons, never a failed launch.
+const LESSONS_BIN = () => `${appHome()}/mods/drover-agents/bin/drover-lessons-read`;
+const LESSONS_TIMEOUT_MS = 5000;
+const lessonsFailed = (e) => { try { globalThis.console?.log?.(`drover-agents lessons: read failed: ${reasonCode(e)}`); } catch {} };
+// runProj: the run's project (task-bound runs too; ctx.project is null for them), or null. agentIds: the squad's agents. Returns ctx.lessons or null.
+async function loadLessons(runProj, agentIds) {
+  try {
+    if (!home()) return null;
+    const configDir = WORKFOLDER_ROOT();
+    const rel = (p) => p.slice(configDir.length + 1);
+    const layers = lessonPaths(configDir, { org: runProj?.org, project: runProj?.id });
+    const orgRel = layers.org ? Object.fromEntries(Object.entries(layers.org).map(([k, p]) => [k, rel(p)])) : null;
+    const projectRel = layers.project ? rel(layers.project) : null;
+    const agentRel = {};
+    for (const id of agentIds ?? []) { const p = lessonPaths(configDir, { agent: id }).agent; if (p) agentRel[id] = rel(p); }
+    const asked = [...Object.values(orgRel ?? {}), ...(projectRel ? [projectRel] : []), ...Object.values(agentRel)];
+    if (!asked.length) return null;
+    const r = await exec(LESSONS_BIN(), ["--root", configDir, ...asked], { timeout: LESSONS_TIMEOUT_MS });
+    if (r?.code !== undefined && r.code !== 0) throw new Error(`exit ${r.code}`);
+    const got = JSON.parse(r?.stdout ?? "");
+    if (!got || typeof got !== "object" || Array.isArray(got)) throw new Error("bad answer");
+    const text = (path) => { const v = path ? got[path] : null; return v && typeof v.text === "string" ? boundText(v.text, { truncated: v.truncated === true }) : null; };
+    const lessons = {
+      configDir, orgSlug: orgRel ? runProj.org : null, projectId: projectRel ? runProj.id : null,
+      org: orgRel ? Object.fromEntries(Object.entries(orgRel).map(([k, p]) => [k, text(p)])) : null,
+      project: text(projectRel), agents: Object.fromEntries(Object.entries(agentRel).map(([id, p]) => [id, text(p)])),
+    };
+    const any = Object.values(lessons.org ?? {}).some((t) => t !== null) || lessons.project !== null || Object.values(lessons.agents).some((t) => t !== null);
+    return any ? lessons : null;
+  } catch (e) { lessonsFailed(e); return null; }
+}
+
 export async function launch(task, runner, { worktree, reportTo, project, create, folder: chosen, note } = {}) {
   const label = task?.id ?? "Run";
   try {
@@ -403,6 +437,7 @@ export async function launch(task, runner, { worktree, reportTo, project, create
     const folder = runFolder(wt?.path, chosen ?? repoOf({ project: runProject }, loadProjects()), boss?.cwd);
     if (!wf) wf = await workFolderFor({ mode: "repo", runId, worktree: wt?.path, repo: projRepo ?? folder, project: runProj });
     ctx.workFolder = wf?.path ?? null;
+    ctx.lessons = create ? null : await loadLessons(runProj, [p.leader.id, ...p.members.map((m) => m.id)]); // the one-shot card creator gets no block
     const pending = []; // Codex terminals whose session id is looked up after the run is saved
     const open = async (agent, prompt) => {
       const kind = agentKind(agent.command);

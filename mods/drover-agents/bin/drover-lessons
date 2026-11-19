@@ -1,0 +1,829 @@
+#!/usr/bin/env -S python3 -I
+# drover-lessons <verb> <scope> [flags]    verbs: check | add | edit | rm | confirm | list | stale
+# The one writer of the lessons files (format: mods/_lib/lessons.js). Scope is exactly one of
+#   --org <slug> [--kind lessons|workflows|squads]   <config>/orgs/<slug>/<kind>.md
+#   --project <id>                                    <config>/projects/<id>/lessons.md
+#   --agent <id>                                      <config>/agents/<id>.lessons.md
+# --config <abs dir> overrides the config dir (default $HOME/.config/drover-herdr). No other file is ever opened.
+#   check [--text-file F]       validate the candidate (format, secret scan, dedup when a scope is given); prints ok. Writes nothing.
+#   add [--source <id>]         candidate on stdin: line 1 title, lines 2-4 body. Appends under a lock. Prints "<id> TAB <sha256>".
+#   edit <id> --expect <sha>    candidate on stdin; keeps id, added, source; clears confirmed (an edited text is re-confirmed).
+#   rm <id> --expect <sha>      removes one entry.
+#   confirm <id> --expect <sha> sets confirmed = today; nothing else. Refused on an undated entry.
+#   list [--full]               id, sha256 (the --expect token), added, confirmed, title; --full adds the entry text.
+#   stale [--days N=90]         entries whose confirmed (else added) date is older than N days, or undated.
+# The text comes on stdin (<= 4096 bytes) or in --text-file (a regular file you own, no group/other bits). Never on argv, never
+# printed: a refusal names the rule, never the value. --expect is the SHA-256 of the canonical entry text as the owner saw it;
+# a changed or missing entry exits 2 with "stale: re-review" and changes nothing.
+# Writes: every directory below the config dir is walked with O_NOFOLLOW file descriptors (a symlink anywhere is refused and a swap
+# between steps cannot redirect a write); flock on <file>.lock; the new text goes to a private temp file, the old one is kept as
+# .<file>.prev, then one rename. Dirs 0700, files 0600. Exit: 0 ok, 1 refused or error, 2 stale.
+# A scan cannot prove an entry is clean: the owner reads the exact text first.
+import datetime
+import errno
+import fcntl
+import hashlib
+import os
+import re
+import stat
+import sys
+import time
+import unicodedata
+
+MAX_FILE = 65536
+MAX_INPUT = 4096
+TITLE_MAX = 120
+BODY_MAX = 3
+ENTRY_MAX = 400
+N_MAX = 999999
+KINDS = ("lessons", "workflows", "squads")
+JS_WS = " \t\n\r\x0b\x0c                 　﻿"
+
+
+class Fail(Exception):
+    def __init__(self, msg, code=1):
+        Exception.__init__(self, msg)
+        self.msg = msg
+        self.code = code
+
+
+def refuse(why):
+    raise Fail("refused: " + why)
+
+
+def usage(why="bad arguments"):
+    raise Fail("usage: " + why + " (see the header of drover-lessons)")
+
+
+# ---- text model: a port of mods/_lib/lessons.js (the tests compare the two) ----
+
+_WS = re.compile("[\t\n\r\f\x0b\u0085  -     　]")
+_DROP = re.compile("[\u0000-\u001f\u007f-\u009f­؜᠎​-‏‪-‮⁠-⁯﻿]")
+_RAW_FORBIDDEN = re.compile("[\u0000-\u001f\u007f-\u009f  ]")
+_HEADER = re.compile(r"### L-([0-9]{1,6}) (.+)")
+_BAD_TITLE_CHARS = re.compile(r"[<>`]")
+_BAD_TITLE_START = re.compile(r"[#\->]")
+_LAYER_MARK = re.compile(r"\[(org|project|agent)\]", re.I)
+_DATE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
+_SOURCE = re.compile(r"[A-Za-z0-9-]{1,40}")
+_META = re.compile(r"\s*\(added ([^()]*)\)\Z")
+
+
+def u16(s):
+    return len(s.encode("utf-16-le")) // 2
+
+
+def nfc(s):
+    return unicodedata.normalize("NFC", s)
+
+
+def sanitize(s):
+    s = _WS.sub(" ", s)
+    s = _DROP.sub("", s)
+    s = re.sub(r" {2,}", " ", s)
+    return s.strip(JS_WS)
+
+
+def canon_id(n):
+    return "L-" + str(n).zfill(2)
+
+
+def title_key(title):
+    return nfc(sanitize(title)).lower()
+
+
+def parse_header(line):
+    if _RAW_FORBIDDEN.search(line):
+        return None
+    m = _HEADER.fullmatch(line)
+    if not m:
+        return None
+    n = int(m.group(1))
+    if n < 1 or n > N_MAX:
+        return None
+    title = nfc(sanitize(m.group(2)))
+    if not title or u16(title) > TITLE_MAX:
+        return None
+    if _BAD_TITLE_CHARS.search(title) or _BAD_TITLE_START.match(title) or _LAYER_MARK.search(title):
+        return None
+    return n, title
+
+
+def valid_date(s):
+    if not _DATE.fullmatch(s):
+        return None
+    y, m, d = int(s[:4]), int(s[5:7]), int(s[8:10])
+    if y < 100:
+        return None
+    try:
+        datetime.date(y, m, d)
+    except ValueError:
+        return None
+    return s
+
+
+def split_meta(line):
+    m = _META.search(line)
+    if not m:
+        return None
+    rest = m.group(1).split(" · ")
+    added = valid_date(rest.pop(0))
+    if not added:
+        return None
+    source = confirmed = None
+    if rest and not rest[0].startswith("confirmed "):
+        source = rest.pop(0)
+        if not _SOURCE.fullmatch(source):
+            return None
+    if rest:
+        if len(rest) > 1 or not rest[0].startswith("confirmed "):
+            return None
+        confirmed = valid_date(rest[0][10:])
+        if not confirmed:
+            return None
+    return line[: m.start()], added, source, confirmed
+
+
+def parse(text):
+    """-> (entries, skipped). Each entry: n, id, title, body, added, source, confirmed, start, end (line range)."""
+    lines = text.split("\n")
+    plain = [l[:-1] if l.endswith("\r") else l for l in lines]
+    entries, skipped, seen, i = [], 0, set(), 0
+    while i < len(plain):
+        if not plain[i].startswith("###"):
+            i += 1
+            continue
+        start, j = i, i + 1
+        while j < len(plain) and plain[j].strip(JS_WS) != "" and not plain[j].startswith("###"):
+            j += 1
+        i = j
+        header, raw = plain[start], plain[start + 1 : j]
+        h = parse_header(header)
+        if not h or h[0] in seen or len(raw) > BODY_MAX or u16("\n".join([header] + raw)) > ENTRY_MAX:
+            skipped += 1
+            continue
+        body = [nfc(sanitize(l)) for l in raw]
+        added = source = confirmed = None
+        last = split_meta(body[-1]) if body else None
+        if last:
+            body[-1] = last[0].strip(JS_WS)
+            added, source, confirmed = last[1], last[2], last[3]
+        kept = [b for b in body if b]
+        if not kept:
+            skipped += 1
+            continue
+        seen.add(h[0])
+        entries.append({"n": h[0], "id": canon_id(h[0]), "title": h[1], "body": kept, "added": added, "source": source,
+                        "confirmed": confirmed, "start": start, "end": j, "raw": "\n".join([header] + raw)})
+    return entries, skipped
+
+
+def format_entry(n, title, body, added, source, confirmed):
+    """The canonical text of one entry; raises ValueError for anything lessons.js formatEntry would refuse."""
+    h = parse_header("### " + canon_id(n) + " " + title)
+    if not h or h[1] != nfc(title):
+        raise ValueError("title")
+    if not 1 <= len(body) <= BODY_MAX:
+        raise ValueError("body lines")
+    lines = []
+    for l in body:
+        if not l or l != nfc(sanitize(l)) or l.startswith("###") or split_meta(l):
+            raise ValueError("body line")
+        lines.append(l)
+    if added is None and (source is not None or confirmed is not None):
+        raise ValueError("metadata needs added")
+    if added is not None:
+        if not valid_date(added):
+            raise ValueError("added")
+        if source is not None and not _SOURCE.fullmatch(source):
+            raise ValueError("source")
+        if confirmed is not None and not valid_date(confirmed):
+            raise ValueError("confirmed")
+        lines[-1] += " (added " + added + ((" · " + source) if source is not None else "") + ((" · confirmed " + confirmed) if confirmed is not None else "") + ")"
+    text = "\n".join(["### " + canon_id(n) + " " + h[1]] + lines)
+    if u16(text) > ENTRY_MAX:
+        raise ValueError("too long")
+    back, skipped = parse(text)
+    if skipped or len(back) != 1:
+        raise ValueError("does not round-trip")
+    return text
+
+
+def canonical(e):
+    """The text the --expect token is computed over: the canonical form, or the stored lines when it has none."""
+    try:
+        return format_entry(e["n"], e["title"], e["body"], e["added"], e["source"], e["confirmed"])
+    except ValueError:
+        return None
+
+
+def token(e):
+    return hashlib.sha256((canonical(e) or e["raw"]).encode("utf-8")).hexdigest()
+
+
+# ---- secret scan (fail closed; the reason is the rule's name, never the matched text) ----
+
+SCAN = [
+    ("looks like a token (gh" "p_)", re.compile(r"gh" r"p_")),
+    ("looks like a token (github" "_pat_)", re.compile(r"github" r"_pat_")),
+    ("looks like a token (gho_)", re.compile(r"gho_")),
+    ("looks like a token (sk-)", re.compile(r"(?<![A-Za-z0-9])sk-")),
+    ("looks like a token (xox)", re.compile(r"(?<![A-Za-z0-9])xox")),
+    ("looks like a token (AKIA)", re.compile(r"AKIA")),
+    ("looks like a bearer token", re.compile(r"Bearer\s")),
+    ("looks like a JWT", re.compile(r"eyJ")),
+    ("looks like a private key", re.compile(r"-----BEGIN")),
+    ("has a URL with credentials", re.compile(r"://[^/\s?#]*@")),
+    ("has a URL with a query or fragment", re.compile(r"://\S*[?#]")),
+    ("has a long hex run", re.compile(r"[0-9a-fA-F]{32,}")),
+    ("has a long base64 run", re.compile(r"[A-Za-z0-9+/]{32,}")),
+    ("has an email address", re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}")),
+    ("has a code fence", re.compile(r"```")),
+]
+
+
+def scan(parts):
+    for why, rx in SCAN:
+        if any(rx.search(p) for p in parts):
+            refuse(why)
+    return None
+
+
+def read_text_file(path):
+    if "\0" in path:
+        usage("bad text file")
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)  # NONBLOCK: a pipe never hangs the open
+    except OSError:
+        refuse("cannot read the text file")
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_uid != os.geteuid() or st.st_mode & 0o077 or st.st_size > MAX_INPUT:
+            refuse("the text file must be a private regular file of at most %d bytes" % MAX_INPUT)
+        return read_all(fd, MAX_INPUT + 1)
+    finally:
+        os.close(fd)
+
+
+def read_all(fd, limit):
+    chunks, total = [], 0
+    while total < limit:
+        b = os.read(fd, min(65536, limit - total))
+        if not b:
+            break
+        chunks.append(b)
+        total += len(b)
+    return b"".join(chunks)
+
+
+def candidate(opts):
+    """stdin (or --text-file) -> (title, body lines); never echoes the text."""
+    if "text-file" in opts:
+        data = read_text_file(opts["text-file"])
+    else:
+        data = sys.stdin.buffer.read(MAX_INPUT + 1)
+    if len(data) > MAX_INPUT:
+        refuse("the text is longer than %d bytes" % MAX_INPUT)
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError:
+        refuse("the text is not valid UTF-8")
+    lines = [l[:-1] if l.endswith("\r") else l for l in text.rstrip("\r\n").split("\n")]
+    parts = lines + ([opts["source"]] if opts.get("source") is not None else [])
+    scan(parts)
+    if len(lines) - 1 > BODY_MAX:
+        refuse("more than %d body lines" % BODY_MAX)
+    if sum(len(l) for l in lines) > ENTRY_MAX:
+        refuse("longer than %d characters" % ENTRY_MAX)
+    if len(lines) < 2 or any(l == "" for l in lines):
+        refuse("a lesson is a title line and 1-%d non-empty body lines" % BODY_MAX)
+    return lines[0], lines[1:]
+
+
+# ---- paths: every step through a held directory fd, no symlink anywhere ----
+
+def clean_config(path):
+    if "\0" in path or not os.path.isabs(path):
+        usage("--config must be an absolute path")
+    parts = [p for p in path.split("/") if p]
+    if any(p in (".", "..") for p in parts):
+        usage("--config must not contain . or ..")
+    return "/" + "/".join(parts)
+
+
+def open_config(path, create):
+    """The config dir as a held fd. Walks from "/" through descriptors only: existing parents may be links (system aliases),
+    the config dir itself may not; whatever is created here is opened with O_NOFOLLOW and checked before the one fchmod."""
+    parts = [p for p in path.split("/") if p]
+    fd = os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    for i, part in enumerate(parts):
+        last = i == len(parts) - 1
+        try:
+            nfd = config_step(fd, part, create, last)
+        finally:
+            os.close(fd)
+        if nfd is None:
+            return None
+        fd = nfd
+    return fd
+
+
+def config_step(pfd, name, create, last):
+    base = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC
+    try:
+        fd = os.open(name, base | (os.O_NOFOLLOW if last else 0), dir_fd=pfd)
+    except FileNotFoundError:
+        if not create:
+            return None
+        try:
+            os.mkdir(name, 0o700, dir_fd=pfd)
+        except FileExistsError:
+            pass  # another writer created it first; it is opened and checked below
+        except OSError:
+            refuse("cannot create the config dir")
+        try:
+            fd = os.open(name, base | os.O_NOFOLLOW, dir_fd=pfd)
+        except OSError:
+            refuse("the config dir is a symlink or not a directory")
+        if os.fstat(fd).st_uid != os.geteuid():
+            os.close(fd)
+            refuse("a directory is not owned by you")
+        os.fchmod(fd, 0o700)
+        return fd
+    except OSError:
+        refuse("the config dir is a symlink or not a directory")
+    if last and os.fstat(fd).st_uid != os.geteuid():
+        os.close(fd)
+        refuse("a directory is not owned by you")
+    return fd
+
+
+def open_dir(name, dfd):
+    try:
+        fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=dfd)
+    except OSError:
+        refuse("a path part is a symlink or not a directory")
+    if os.fstat(fd).st_uid != os.geteuid():
+        os.close(fd)
+        refuse("a directory is not owned by you")
+    return fd
+
+
+def open_sub(pfd, name, create):
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+    try:
+        fd = os.open(name, flags, dir_fd=pfd)
+    except FileNotFoundError:
+        if not create:
+            return None
+        try:
+            os.mkdir(name, 0o700, dir_fd=pfd)
+        except FileExistsError:
+            pass
+        except OSError:
+            refuse("cannot create a directory")
+        try:
+            fd = os.open(name, flags, dir_fd=pfd)
+        except OSError:
+            refuse("a path part is a symlink or not a directory")
+    except OSError:
+        refuse("a path part is a symlink or not a directory")
+    if os.fstat(fd).st_uid != os.geteuid():
+        os.close(fd)
+        refuse("a directory is not owned by you")
+    if create:
+        os.fchmod(fd, 0o700)
+    return fd
+
+
+def open_chain(config, chain, create):
+    fd = open_config(config, create)
+    if fd is None:
+        return None
+    for name in chain:
+        nfd = open_sub(fd, name, create)
+        os.close(fd)
+        if nfd is None:
+            return None
+        fd = nfd
+    return fd
+
+
+def open_creating(name, flags, dfd):
+    """O_CREAT open through the held dir fd. macOS can answer a creating open in a busy directory with a transient ENOENT
+    although the directory exists (seen with 10 writers renaming and creating in one dir); retry a bounded number of times."""
+    for attempt in range(20):
+        try:
+            return os.open(name, flags | os.O_CREAT, 0o600, dir_fd=dfd)
+        except FileNotFoundError:
+            if attempt == 19:
+                raise
+            time.sleep(0.002 * (attempt + 1))
+
+
+def take_lock(dfd, fname):
+    try:
+        fd = open_creating(fname + ".lock", os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dfd)
+    except OSError:
+        refuse("the lock file cannot be opened (a symlink is refused)")
+    st = os.fstat(fd)
+    if not stat.S_ISREG(st.st_mode) or st.st_uid != os.geteuid() or st.st_nlink != 1:
+        os.close(fd)
+        refuse("the lock file is not a plain file of yours")
+    os.fchmod(fd, 0o600)
+    fcntl.flock(fd, fcntl.LOCK_EX)
+    return fd
+
+
+def plain_or_absent(dfd, name):
+    try:
+        st = os.stat(name, dir_fd=dfd, follow_symlinks=False)
+    except FileNotFoundError:
+        return
+    if not stat.S_ISREG(st.st_mode) or st.st_uid != os.geteuid() or st.st_nlink != 1:
+        refuse("a lessons file name is a symlink, a link or not a plain file")
+
+
+def clean_strays(dfd, fname):
+    prefix = "." + fname + ".tmp."
+    for n in os.listdir(dfd):
+        if n.startswith(prefix):
+            try:
+                os.unlink(n, dir_fd=dfd)
+            except OSError:
+                pass
+
+
+def read_file(dfd, fname):
+    """-> text or None when the file does not exist."""
+    try:
+        fd = os.open(fname, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=dfd)
+    except FileNotFoundError:
+        return None
+    except OSError:
+        refuse("the lessons file is a symlink or cannot be opened")
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1 or st.st_uid != os.geteuid():
+            refuse("the lessons file is not a plain file of yours")
+        if st.st_size > MAX_FILE:
+            refuse("the lessons file is larger than %d bytes" % MAX_FILE)
+        data = read_all(fd, MAX_FILE + 1)
+    finally:
+        os.close(fd)
+    if len(data) > MAX_FILE:
+        refuse("the lessons file is larger than %d bytes" % MAX_FILE)
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError:
+        refuse("the lessons file is not valid UTF-8")
+
+
+def write_private(dfd, name, data):
+    fd = open_creating(name, os.O_WRONLY | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, dfd)
+    try:
+        view = memoryview(data)
+        while view:
+            view = view[os.write(fd, view):]
+        os.fchmod(fd, 0o600)
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def publish(dfd, fname, old, new):
+    if len(new.encode("utf-8")) > MAX_FILE:
+        refuse("the result would be larger than %d bytes" % MAX_FILE)
+    tmp = "." + fname + ".tmp." + str(os.getpid())
+    prev_tmp = tmp + ".prev"
+    prev = "." + fname + ".prev"
+    try:
+        write_private(dfd, tmp, new.encode("utf-8"))
+        if old is not None:
+            write_private(dfd, prev_tmp, old.encode("utf-8"))
+            os.replace(prev_tmp, prev, src_dir_fd=dfd, dst_dir_fd=dfd)
+        os.replace(tmp, fname, src_dir_fd=dfd, dst_dir_fd=dfd)
+    except OSError:
+        for n in (tmp, prev_tmp):
+            try:
+                os.unlink(n, dir_fd=dfd)
+            except OSError:
+                pass
+        refuse("cannot write the lessons file (nothing was changed)")
+    try:
+        os.fsync(dfd)
+    except OSError as e:
+        # Only "this file system cannot sync a directory" is tolerated; any other error means the rename may not survive a crash.
+        if e.errno not in (errno.EINVAL, errno.ENOTSUP):
+            raise Fail("error: published, but durability is uncertain (the directory sync failed); run list to check")
+
+
+# ---- scope and arguments ----
+
+def safe_segment(v):
+    return bool(v.strip(JS_WS)) and v not in (".", "..") and not re.search(r"[/\\\x00-\x1f\x7f]", v)
+
+
+def safe_id(v):
+    return u16(v) <= 100 and not v.startswith(".") and safe_segment(v)
+
+
+class Scope:
+    def __init__(self, chain, fname):
+        self.chain, self.fname = chain, fname
+
+
+def build_scope(opts, required):
+    given = [k for k in ("org", "project", "agent") if k in opts]
+    if len(given) > 1 or (required and not given):
+        usage("give exactly one of --org, --project, --agent")
+    if "kind" in opts and given != ["org"]:
+        usage("--kind goes with --org only")
+    if not given:
+        return None
+    k = given[0]
+    v = opts[k]
+    if k == "org":
+        kind = opts.get("kind", "lessons")
+        if kind not in KINDS:
+            usage("--kind is one of lessons, workflows, squads")
+        if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,39}", v) or not safe_segment(v):
+            usage("bad org slug")
+        return Scope(["orgs", v], kind + ".md")
+    if not safe_id(v):
+        usage("bad id")
+    if k == "project":
+        return Scope(["projects", v], "lessons.md")
+    return Scope(["agents"], v + ".lessons.md")
+
+
+FLAGS = {
+    "check": ({"org", "project", "agent", "kind", "source", "text-file", "config"}, 0),
+    "add": ({"org", "project", "agent", "kind", "source", "text-file", "config"}, 0),
+    "edit": ({"org", "project", "agent", "kind", "expect", "text-file", "config"}, 1),
+    "rm": ({"org", "project", "agent", "kind", "expect", "config"}, 1),
+    "confirm": ({"org", "project", "agent", "kind", "expect", "config"}, 1),
+    "list": ({"org", "project", "agent", "kind", "full", "config"}, 0),
+    "stale": ({"org", "project", "agent", "kind", "days", "config"}, 0),
+}
+BOOL_FLAGS = {"full"}
+
+
+def parse_args(argv):
+    if not argv or argv[0] not in FLAGS:
+        usage("unknown verb")
+    verb = argv[0]
+    allowed, npos = FLAGS[verb]
+    opts, pos, i = {}, [], 1
+    while i < len(argv):
+        a = argv[i]
+        if a.startswith("--"):
+            name = a[2:]
+            if name not in allowed or name in opts:
+                usage("unknown or repeated flag")
+            if name in BOOL_FLAGS:
+                opts[name] = True
+                i += 1
+            else:
+                if i + 1 >= len(argv):
+                    usage("a flag needs a value")
+                opts[name] = argv[i + 1]
+                i += 2
+        else:
+            pos.append(a)
+            i += 1
+    if len(pos) != npos:
+        usage("wrong number of ids")
+    n = None
+    if npos:
+        m = re.fullmatch(r"L-([0-9]{1,6})", pos[0])
+        if not m or not 1 <= int(m.group(1)) <= N_MAX:
+            usage("bad entry id")
+        n = int(m.group(1))
+    if verb in ("edit", "rm", "confirm"):
+        e = opts.get("expect", "")
+        if not re.fullmatch(r"[0-9a-fA-F]{64}", e):
+            usage("--expect <sha256> is required")
+        opts["expect"] = e.lower()
+    if "days" in opts and not re.fullmatch(r"[0-9]{1,6}", opts["days"]):
+        usage("--days is a whole number")
+    if "source" in opts and not _SOURCE.fullmatch(opts["source"]):
+        refuse("bad source id")
+    if "config" in opts:
+        opts["config"] = clean_config(opts["config"])
+    else:
+        home = os.environ.get("HOME", "")
+        if not home:
+            usage("no HOME and no --config")
+        opts["config"] = clean_config(os.path.join(home, ".config", "drover-herdr"))
+    return verb, n, opts, build_scope(opts, verb != "check")
+
+
+# ---- verbs ----
+
+def today():
+    return datetime.date.today().isoformat()
+
+
+def append_entry(text, entry):
+    if text == "":
+        return entry + "\n"
+    if not text.endswith("\n"):
+        text += "\n"
+    if not text.endswith("\n\n"):
+        text += "\n"
+    return text + entry + "\n"
+
+
+def replace_block(text, e, new_lines):
+    lines = text.split("\n")
+    lines[e["start"] : e["end"]] = new_lines
+    if not new_lines:
+        i = e["start"]
+        if i < len(lines) - 1 and lines[i].strip(JS_WS) == "" and (i == 0 or lines[i - 1].strip(JS_WS) == ""):
+            del lines[i]
+    return "\n".join(lines)
+
+
+def no_duplicate(entries, title, skip_n=None):
+    key = title_key(title)
+    if any(e["n"] != skip_n and title_key(e["title"]) == key for e in entries):
+        refuse("duplicate title")
+
+
+def entry_text(n, title, body, added, source, confirmed):
+    """The entry about to be published: every field is scanned (also retained and stored ones), then formatted."""
+    scan([title] + list(body) + ([source] if source is not None else []))
+    try:
+        return format_entry(n, title, body, added, source, confirmed)
+    except ValueError:
+        refuse("not a valid lesson (title and body format)")
+
+
+def writable(text):
+    entries, skipped = parse(text)
+    if skipped:
+        refuse("the file has malformed or duplicate entries, fix by hand")
+    return entries
+
+
+def row(e):
+    return "\t".join([e["id"], token(e), e["added"] or "-", e["confirmed"] or "-", e["title"]])
+
+
+def show(e, full):
+    out = row(e) + "\n"
+    if full:
+        out += "".join("    " + l + "\n" for l in (canonical(e) or e["raw"]).split("\n"))
+    return out
+
+
+def stored(scope, config):
+    """Read-only view of the scope's file: text or None. Creates nothing."""
+    dfd = open_chain(config, scope.chain, False)
+    if dfd is None:
+        return None
+    try:
+        return read_file(dfd, scope.fname)
+    finally:
+        os.close(dfd)
+
+
+def locked(scope, config, change):
+    dfd = open_chain(config, scope.chain, True)
+    lock = None
+    try:
+        lock = take_lock(dfd, scope.fname)
+        clean_strays(dfd, scope.fname)
+        plain_or_absent(dfd, "." + scope.fname + ".prev")
+        old = read_file(dfd, scope.fname)
+        new, message = change(old if old is not None else "")
+        publish(dfd, scope.fname, old, new)
+        return message
+    finally:
+        if lock is not None:
+            os.close(lock)
+        os.close(dfd)
+
+
+def find(entries, n, expect):
+    e = next((x for x in entries if x["n"] == n), None)
+    if e is None or token(e) != expect:
+        raise Fail("stale: re-review", 2)
+    return e
+
+
+def verb_check(opts, scope):
+    title, body = candidate(opts)
+    try:
+        format_entry(1, title, body, today(), opts.get("source"), None)
+    except ValueError:
+        refuse("not a valid lesson (title and body format)")
+    if scope is not None:
+        text = stored(scope, opts["config"])
+        if text:
+            no_duplicate(parse(text)[0], title)
+    return "ok\n"
+
+
+def verb_add(opts, scope):
+    title, body = candidate(opts)
+
+    def change(text):
+        entries = writable(text)
+        n = max([e["n"] for e in entries] + [0]) + 1
+        if n > N_MAX:
+            refuse("the id space is exhausted")
+        no_duplicate(entries, title)
+        entry = entry_text(n, title, body, today(), opts.get("source"), None)
+        return append_entry(text, entry), canon_id(n) + "\t" + hashlib.sha256(entry.encode("utf-8")).hexdigest() + "\n"
+
+    return locked(scope, opts["config"], change)
+
+
+def verb_edit(n, opts, scope):
+    title, body = candidate(opts)
+
+    def change(text):
+        entries = writable(text)
+        e = find(entries, n, opts["expect"])
+        no_duplicate(entries, title, n)
+        entry = entry_text(n, title, body, e["added"] or today(), e["source"] if e["added"] else None, None)
+        return replace_block(text, e, entry.split("\n")), canon_id(n) + "\t" + hashlib.sha256(entry.encode("utf-8")).hexdigest() + "\n"
+
+    return locked(scope, opts["config"], change)
+
+
+def verb_rm(n, opts, scope):
+    def change(text):
+        e = find(writable(text), n, opts["expect"])
+        return replace_block(text, e, []), "removed " + e["id"] + "\n"
+
+    return locked(scope, opts["config"], change)
+
+
+def verb_confirm(n, opts, scope):
+    def change(text):
+        e = find(writable(text), n, opts["expect"])
+        if e["added"] is None:
+            refuse("undated entry, edit it first")
+        if canonical(e) is None:
+            refuse("the entry is not in the canonical form, edit it first")
+        entry = entry_text(n, e["title"], e["body"], e["added"], e["source"], today())
+        return replace_block(text, e, entry.split("\n")), canon_id(n) + "\t" + hashlib.sha256(entry.encode("utf-8")).hexdigest() + "\n"
+
+    return locked(scope, opts["config"], change)
+
+
+def verb_list(opts, scope):
+    text = stored(scope, opts["config"])
+    if not text:
+        return ""
+    return "".join(show(e, "full" in opts) for e in parse(text)[0])
+
+
+def verb_stale(opts, scope):
+    text = stored(scope, opts["config"])
+    if not text:
+        return ""
+    days = int(opts.get("days", "90"))
+    now = datetime.date.today()
+    out = ""
+    for e in parse(text)[0]:
+        d = e["confirmed"] or e["added"]
+        if d is None or (now - datetime.date.fromisoformat(d)).days > days:
+            out += row(e) + "\n"
+    return out
+
+
+def main(argv=None):
+    argv = sys.argv[1:] if argv is None else argv
+    verb = argv[0] if argv else ""
+    try:
+        verb, n, opts, scope = parse_args(argv)
+        if verb == "check":
+            out = verb_check(opts, scope)
+        elif verb == "add":
+            out = verb_add(opts, scope)
+        elif verb == "edit":
+            out = verb_edit(n, opts, scope)
+        elif verb == "rm":
+            out = verb_rm(n, opts, scope)
+        elif verb == "confirm":
+            out = verb_confirm(n, opts, scope)
+        elif verb == "list":
+            out = verb_list(opts, scope)
+        else:
+            out = verb_stale(opts, scope)
+    except Fail as f:
+        (sys.stdout if verb == "check" and f.code == 1 and f.msg.startswith("refused") else sys.stderr).write(f.msg + "\n")
+        return f.code
+    except OSError:
+        sys.stderr.write("refused: cannot access the lessons files\n")
+        return 1
+    sys.stdout.write(out)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -83,6 +83,21 @@ Where agents write plans, scouts, reviews and lane logs. Drover Config → Gener
 
 It never overwrites and lists the names that already exist.
 
+## Lessons writer
+
+`drover-agents/bin/drover-lessons <verb> <scope>` is the only writer of the lessons files (format: `mods/_lib/lessons.js`). Scope is exactly one of `--org <slug> [--kind lessons|workflows|squads]` (`orgs/<slug>/<kind>.md`), `--project <id>` (`projects/<id>/lessons.md`) or `--agent <id>` (`agents/<id>.lessons.md`) under `~/.config/drover-herdr` (`--config <abs dir>` overrides it). It opens no other file.
+
+| Verb | What it does |
+|---|---|
+| `check` | Validates a candidate (format, secret scan, duplicate title when a scope is given). Writes nothing |
+| `add [--source <id>]` | Appends a new entry; prints its id and token |
+| `edit <id> --expect <token>` | Replaces the text, keeps id, added and source, clears `confirmed` |
+| `rm <id> --expect <token>` | Removes the entry |
+| `confirm <id> --expect <token>` | Sets `confirmed` to today (refused on an undated entry) |
+| `list [--full]`, `stale [--days N]` | Entries with their tokens; the entries not confirmed (else added) for N days (default 90), or undated |
+
+Guarantees: the text comes on stdin (4096 bytes at most) or from a private `--text-file`, never argv, and is never printed. A refusal names the rule, never the value. Writes hold an `flock`, replace the file atomically and keep the old one as `.<file>.prev`; dirs are 0700 and files 0600; a symlink or a hardlink anywhere is refused. `--expect` is the SHA-256 of the entry as the owner saw it (`list` prints it): if the entry changed or is gone, the writer exits 2 with `stale: re-review` and changes nothing. Dedup refuses an exact normalised-title duplicate. The secret scan fails closed on token prefixes, `Bearer`, JWTs, key blocks, credentials or query strings in URLs, long hex or base64 runs, emails, code fences, more than 3 body lines and more than 400 characters. **A scan cannot prove an entry is clean**: the owner reads the exact text before anything is added. Lessons are never part of the herd export.
+
 ## Optional: an agent with its own GitHub account
 
 See the [agent identity guide](guides/agent-identity.md) (for example a reviewer that approves PRs). You run it yourself; no agent handles the token.
