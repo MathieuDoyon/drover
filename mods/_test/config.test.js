@@ -311,7 +311,7 @@ test("the copy list (_lib/copies.txt) has config-schema.js and config.js; a copy
   try {
     const dest = join(tmp, "home", "mods", "drover-x");
     mkdirSync(dest, { recursive: true });
-    for (const f of ["_lib/config-schema.js", "_lib/config.js", "_lib/store.js", "_lib/sources.js"]) copyFileSync(join(MODS, f), join(dest, f.split("/")[1]));
+    for (const f of ["_lib/config-schema.js", "_lib/config.js", "_lib/store.js", "_lib/sources.js", "_lib/lessons.js", "_lib/workfolder.js"]) copyFileSync(join(MODS, f), join(dest, f.split("/")[1]));
     const copy = await import(pathToFileURL(join(dest, "config.js")).href);
     copy.setSharedReader(() => ({}));
     assert.equal(copy.cfg("drover-github", "limit"), 100);

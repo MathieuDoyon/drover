@@ -46,3 +46,23 @@ test("projectDiff: equality on the whole normalized request; names the fields th
   const two = { ...p, repos: [{ path: "/r", default: true }, { path: "/second" }] };
   assert.deepEqual(projectDiff(two, req()), ["repo"], "a project with more repos is not the same request");
 });
+
+test("projectAddRequest: a request carrying org is refused (any value, even empty); one without is unchanged", () => {
+  for (const org of ["acme", "Bad Slug", "", null, 5]) {
+    const r = ok({ org });
+    assert.match(r.error ?? "", /org/i, JSON.stringify(org));
+    assert.equal(r.value, undefined);
+  }
+  assert.deepEqual(ok({}), { value: { name: "n", repo: "/r", branch: "", folders: [] } });
+});
+
+test("projectDiff org: compared only when the request carries the key", () => {
+  const base = { repos: [{ path: "/r", default: true }], branch: "main", folders: [] };
+  const req = (o = {}) => ({ repo: "/r", branch: "main", folders: [], ...o });
+  assert.deepEqual(projectDiff({ ...base, org: "acme" }, req({ org: "beta" })), ["org"]);
+  assert.deepEqual(projectDiff({ ...base, org: "acme" }, req({ org: "acme" })), []);
+  assert.deepEqual(projectDiff(base, req({ org: "x" })), ["org"]);
+  assert.deepEqual(projectDiff({ ...base, org: "acme" }, req({ org: "" })), ["org"]);
+  assert.deepEqual(projectDiff(base, req({ org: "" })), []);
+  assert.deepEqual(projectDiff({ ...base, org: "acme" }, req()), [], "inbox request has no org key: never reports org");
+});

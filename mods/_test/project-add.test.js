@@ -223,3 +223,19 @@ test("g. the op is not in any laptop remote whitelist (nothing sends it remotely
   const out = spawnSync("grep", ["-rln", "project-add", new URL("..", import.meta.url).pathname, "--include=*.js", "--exclude=*.test.js"], { encoding: "utf8" }).stdout.split("\n").filter(Boolean);
   assert.deepEqual(out.map((f) => f.split("/mods/")[1]).filter((f) => !/^(_lib\/(io|store)\.js|drover-[a-z]+\/(io|store)\.js)$/.test(f)), []);
 });
+
+test("h. org on the inbox is refused (never silently dropped); nothing is written; an org-bound project's org-less replay stays idempotent", async () => {
+  const repo = mkRepo();
+  for (const org of ["acme", "Bad Slug", ""]) {
+    const r = await send({ name: "multi", repo, org });
+    assert.match(r, /^error: .*org/i, JSON.stringify(org));
+  }
+  assert.deepEqual(projects(), []);
+  const first = await send({ name: "multi", repo });
+  const id = projects()[0].id;
+  assert.match(first, /^ok: P-\S+ project multi$/);
+  host.state[PKEY] = projects().map((p) => ({ ...p, org: "acme" }));
+  assert.equal(await send({ name: "multi", repo }), `ok: ${id} exists`);
+  assert.match(await send({ name: "multi", repo, org: "acme" }), /^error: .*org/i);
+  assert.equal(projects()[0].org, "acme");
+});

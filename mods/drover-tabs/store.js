@@ -2,6 +2,7 @@
 // so mods/install.sh copies this file into each drover-* mod. Edit it here only.
 // Pure: no herdr import, so `node --test mods/_lib` runs it.
 import { parseSourceUrl } from "./sources.js";
+import { isOrgSlug } from "./lessons.js";
 
 export const KEY = "drover.tasks";
 export const COLUMNS = [
@@ -534,7 +535,10 @@ function validateProject(projects, fields, selfId) {
   if (!name) return { error: "Name is required" };
   if (projects.some((p) => p.id !== selfId && sameName(p.name, name))) return { error: `A project named ${name} exists` };
   const repos = [...new Set(lines(fields.repos))].map((path, i) => (i ? { path } : { path, default: true }));
-  return { value: { name, repos, folders: [...new Set(lines(fields.folders))], branch: String(fields.branch ?? "").trim() || "main" } };
+  let org = fields.org; // optional: absent or blank = no key at all, so a project without an org is unchanged
+  if (typeof org === "string") org = org.trim();
+  if (org !== undefined && org !== "" && !isOrgSlug(org)) return { error: "Org must be a slug: lowercase letters, digits and dashes, 1-40 characters, starting with a letter or digit" };
+  return { value: { name, repos, folders: [...new Set(lines(fields.folders))], branch: String(fields.branch ?? "").trim() || "main", ...(org ? { org } : {}) } };
 }
 
 export function addProject(projects, fields, now = Date.now()) {
@@ -556,6 +560,7 @@ export function projectAddRequest(cmd) {
   const raw = cmd.folders ?? [];
   if (!Array.isArray(raw) || raw.length > FOLDERS_MAX) return { error: `folders must be a list of at most ${FOLDERS_MAX} absolute paths` };
   if (!raw.every(goodPath)) return { error: `every folder must be an absolute path (at most ${PATH_MAX} characters, no line break)` };
+  if ("org" in cmd) return { error: "org is not accepted here; set it in the project dialog" }; // refused, never silently dropped
   const branch = cmd.branch == null ? "" : cmd.branch;
   if (typeof branch !== "string" || badText(branch) || branch.startsWith("-") || branch !== branch.trim()) return { error: "branch is not a valid branch name" };
   return { value: { name, repo: cmd.repo, branch, folders: [...new Set(raw)] } };
@@ -568,6 +573,7 @@ export function projectDiff(project, req) {
   if (project.branch !== req.branch) diff.push("branch");
   const a = [...project.folders].sort(), b = [...req.folders].sort();
   if (a.length !== b.length || a.some((f, i) => f !== b[i])) diff.push("folders");
+  if ("org" in req && (req.org ?? "") !== (project.org ?? "")) diff.push("org"); // the inbox request has no org key: never reported
   return diff;
 }
 
@@ -577,6 +583,7 @@ export function updateProject(projects, id, fields) {
   const v = validateProject(projects, { ...cur, ...fields }, id);
   if (v.error) return v;
   const project = { ...cur, ...v.value };
+  if (!("org" in v.value)) delete project.org; // a cleared org: dropped on the new object only, never on cur
   return { projects: projects.map((p) => (p.id === id ? project : p)), project };
 }
 

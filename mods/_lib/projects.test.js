@@ -86,3 +86,35 @@ test("edit op replaces only the given fields; empty title or no field is refused
   assert.ok(applyCommand(a.tasks, { op: "edit", id: a.task.id }).error);
   assert.ok(applyCommand(a.tasks, { op: "edit", id: "T-NONE", title: "x" }).error);
 });
+
+test("org: invalid slugs are refused by add and update, projects unchanged", () => {
+  const bad = ["Acme", "../x", "a b", "x".repeat(41), "-a", 5, {}, ["a"]];
+  const { projects, project } = mk();
+  for (const org of bad) {
+    const a = addProject(projects, { name: "Other", org });
+    assert.match(a.error ?? "", /org/i, JSON.stringify(org));
+    assert.equal(a.projects, undefined);
+    const frozen = Object.freeze(projects.map((p) => Object.freeze({ ...p })));
+    const u = updateProject(frozen, project.id, { org });
+    assert.match(u.error ?? "", /org/i, JSON.stringify(org));
+    assert.equal(u.projects, undefined);
+  }
+});
+
+test("org: a valid slug is stored; a project without org has no org key; other updates keep org; clearing removes it", () => {
+  const plain = mk();
+  assert.equal("org" in plain.project, false);
+  assert.deepEqual(Object.keys(plain.project).sort(), ["branch", "created", "folders", "id", "name", "repos"]);
+  for (const blank of [undefined, "", "  "]) assert.equal("org" in mk({ org: blank }).project, false, JSON.stringify(blank));
+  const { projects, project } = mk({ org: "acme-1" });
+  assert.equal(project.org, "acme-1");
+  const kept = updateProject(projects, project.id, { branch: "dev" });
+  assert.equal(kept.project.org, "acme-1");
+  const frozen = Object.freeze(projects.map((p) => Object.freeze({ ...p })));
+  const cleared = updateProject(frozen, project.id, { org: "" });
+  assert.equal("org" in cleared.project, false);
+  assert.equal("org" in cleared.projects[0], false);
+  assert.equal(frozen[0].org, "acme-1", "the input project is untouched");
+  const changed = updateProject(projects, project.id, { org: "beta" });
+  assert.equal(changed.project.org, "beta");
+});
