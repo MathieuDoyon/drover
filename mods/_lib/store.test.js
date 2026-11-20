@@ -39,8 +39,8 @@ test("attention: a stopped agent is never ready for review", () => {
   const agents = (status) => new Map([["t1", { status }]]);
   assert.equal(attention(t, agents("working")).group, "working");
   assert.equal(attention(t, agents("blocked")).group, "needs");
-  assert.equal(attention(t, agents("done")).group, "needs");
-  assert.equal(attention(t, new Map()).group, "needs");
+  assert.equal(attention(t, agents("done")).group, "working", "a stopped agent on a live terminal is not Needs you (Rev 4)");
+  assert.equal(attention(t, new Map()).group, "needs", "gone on an In-progress card");
   assert.equal(attention({ ...t, column: "review" }, agents("done")).group, "review");
   assert.equal(attention({ ...t, column: "done" }, agents("done")), null);
 });
@@ -626,14 +626,14 @@ test("Blocked is a real column between Review and Done", () => {
   assert.equal(reorder(tasks, task.id, "blocked", null, 2).tasks[0].column, "blocked");
 });
 
-test("a blocked card keeps its agent and shows as Blocked in the Needs you group", () => {
+test("a blocked card keeps its agent and sits in the parked Blocked group", () => {
   const seed = add([], { title: "x", column: "doing" }, 1).tasks.map((t) => ({ ...t, agent: "t9", run: "R-1" }));
   const id = seed[0].id;
   assert.equal(applyCommand(seed, { op: "move", id, column: "blocked" }, 2).tasks[0].agent, "t9");
   const blocked = { column: "blocked", agent: "t9", archived: false };
   const at = attention(blocked, new Map([["t9", { status: "working" }]]));
-  assert.deepEqual(at, { group: "needs", reason: "Blocked" });
-  assert.deepEqual(attention({ ...blocked, agent: null }, new Map()), { group: "needs", reason: "Blocked" });
+  assert.deepEqual(at, { group: "blocked", reason: "Blocked" });
+  assert.deepEqual(attention({ ...blocked, agent: null }, new Map()), { group: "blocked", reason: "Blocked" });
 });
 
 test("updatedAgo: relative time like 'Updated 15h ago'", () => {

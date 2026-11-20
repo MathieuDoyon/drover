@@ -176,6 +176,16 @@
               "background": "chrome",
               "children": [
                 {
+                  "id": "drover-switch",
+                  "type": "block",
+                  "size": {
+                    "px": 34
+                  },
+                  "content": {
+                    "mod": "drover-switch"
+                  }
+                },
+                {
                   "id": "drover-room",
                   "type": "block",
                   "size": {
@@ -195,6 +205,18 @@
                   "min": 120,
                   "content": {
                     "mod": "drover-tasks"
+                  }
+                },
+                {
+                  "id": "drover-needs",
+                  "type": "block",
+                  "hidden": true,
+                  "size": {
+                    "weight": 1
+                  },
+                  "min": 120,
+                  "content": {
+                    "mod": "drover-needs"
                   }
                 }
               ]

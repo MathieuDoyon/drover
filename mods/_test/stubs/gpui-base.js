@@ -1,5 +1,5 @@
 import { el } from "./el.js";
-export const v_flex = el, h_flex = el, Input = { new: (state) => { globalThis.__rec?.inputs?.push(state); return el(); } }, Textarea = { new: (state) => { globalThis.__rec?.textareas?.push(state); return el(); } }, Select = { new: el }, Combobox = { new: el }, Popup = { new: el }, Popover = { new: (id) => el().id(id) }, Switch = { new: el }, ScrollHandle = { new: () => ({ scroll_to_item() {} }) };
+export const v_flex = el, h_flex = el, Input = { new: (state) => { globalThis.__rec?.inputs?.push(state); return el(); } }, Textarea = { new: (state) => { globalThis.__rec?.textareas?.push(state); return el(); } }, Select = { new: el }, Combobox = { new: el }, Popup = { new: el }, Popover = { new: (id) => el().id(id) }, Switch = { new: el }, Tabs = { new: (id) => el().id(id) }, Tab = { new: (id) => el().id(id) }, ScrollHandle = { new: () => ({ scroll_to_item() {} }) };
 class State {
   set_masked(m) { this.masked = m; }
   constructor(o) { this.o = o; this.v = o?.value ?? ""; this.handlers = {}; }

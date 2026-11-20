@@ -4,9 +4,9 @@ import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, Popover } from "gpui-base";
 import { agents, terminals, run, theme, shared, setShared } from "herdr";
 import { bind, isEnabled, whenLoaded, ready as cfgReady } from "./config.js";
-import { GROUPS, projectOf, add, update, matches, sorted, attention, menuChange, FILTER_FIELDS, toggleFilter, clearFilters, matchesFilter, filterValues, searchFilters, filterChips } from "./store.js";
-import { reviewLive, dotKind, liveStatuses, liveAgents } from "./runs.js";
-import { load, loadRuns, loadProjects, loadConfig, spaceProject, sidebarSpace, save, edit, pick, openBoard, watchInbox, watchWakes, modSettings, loadMerged, watchRemote, retryRemote, remoteSend, remoteWriteState, takeRemoteOutcomes } from "./io.js";
+import { GROUPS, projectOf, add, update, matches, menuChange, FILTER_FIELDS, toggleFilter, clearFilters, matchesFilter, filterValues, searchFilters, filterChips } from "./store.js";
+import { load, loadRuns, loadProjects, loadConfig, spaceProject, sidebarSpace, save, edit, pick, openBoard, watchInbox, watchWakes, modSettings, needsWorld, startNeeds, retryRemote, remoteSend, remoteWriteState, takeRemoteOutcomes } from "./io.js";
+import { cardKey } from "./needs.js";
 import { OFF_TIP, controlState, moveOp, outcomeText } from "./remote-write-ui.js";
 import { READONLY_TIP } from "./remote.js";
 
@@ -18,7 +18,7 @@ const I = (name) => `mods/drover-tasks/icons/${name}.svg`;
 const FIELD_ICON = { status: "circle-dot", agentStatus: "bot", priority: "signal", date: "calendar", assignee: "user", project: "folder", label: "tag", source: "arrow-up-right" };
 // Project first, as the sidebar is mostly used to follow one project; Agent status is the Board's and stays out of this compact menu.
 const FIELDS = ["project", "status", "priority", "label", "assignee", "date", "source"].map((id) => FILTER_FIELDS.find(([f]) => f === id));
-const DOT = (t) => ({ needs: t.blocked, review: t.done, working: t.working, todo: t.idle });
+const DOT = (t) => ({ needs: t.blocked, review: t.done, working: t.working, todo: t.idle, blocked: t.dim });
 
 export default class Tasks extends View {
   init(_props, cx) {
@@ -28,6 +28,9 @@ export default class Tasks extends View {
     // The CLI consumers (inbox and wakeup delivery) keep running while the screen is off (decision G2: off is screen only).
     watchInbox(cx);
     watchWakes(cx);
+    // Grouping, dots, counts and the remote write controls are derived HERE (init + a 1 s timer), never in render: render reads cache.get() only.
+    // Live agent status and terminal liveness have no event, so the timer is the defined refresh; a repaint only when the result changed.
+    this.cache = startNeeds(cx, { read: () => this.world(), gate: () => isEnabled("drover-tasks"), remote: true }); // remote: reads each remote-bound project every 15 s while the panel is on
     this.pop = null; // "filter" while the filter popover is open
     this.filterView = null; // the field whose values the popover shows (null: the field list)
     this.fsearch = InputState.new({ placeholder: "Filter by field or value…" });
@@ -36,9 +39,22 @@ export default class Tasks extends View {
     this.input.on("change", (_e, cx) => { this.query = this.input.value(); cx.notify(); });
     this.input.on("submit", (_e, cx) => {
       if (save(add(load(), { title: this.query, column: "todo" }))) { this.input.set_value(""); this.query = ""; }
+      this.cache.refresh();
       cx.notify();
     });
   }
+
+  // One read of every input of the cache. Called by the cache refresh only (init, timer, after an own save), never by render.
+  world() {
+    const w = needsWorld();
+    const controls = {};
+    if (isEnabled("drover-tasks")) { // a remote card in Review: the ✓ control state (this may start the write probe, so it stays out of render)
+      for (const t of w.tasks) if (t.remote && t.column === "review" && !(t.project in controls)) controls[t.project] = controlState(remoteWriteState(t.project));
+    }
+    return { ...w, controls };
+  }
+  // After this panel's own save: refresh now instead of waiting for the next second.
+  refreshNow(cx) { if (this.cache.refresh()) cx?.notify?.(); }
 
   filters() { const f = shared(filtersKey()); return f && typeof f === "object" && !Array.isArray(f) ? f : {}; }
   setFilters(next) { setShared(filtersKey(), next); }
@@ -56,16 +72,16 @@ export default class Tasks extends View {
   }
 
   filterCtx() {
-    return { now: Date.now(), projects: loadProjects(), runs: loadRuns(), config: loadConfig(), tasks: load(), agentsByAddress: liveAgents(agents(), terminals()) };
+    return { now: Date.now(), projects: loadProjects(), runs: loadRuns(), config: loadConfig(), tasks: load(), agentsByAddress: this.cache.get().live };
   }
 
   // A live agent takes the click (focus it); such a row also gets a pencil that opens the editor.
-  hasLiveAgent(task) { return Boolean(task.agent) && agents().some((a) => a.address === task.agent); }
+  hasLiveAgent(task) { return Boolean(task.agent) && this.cache.get().agentAddrs.has(task.agent); }
   // ✓ on a card of another machine: moves it to Done through omarchy's inbox when writes are on, else off with the reason.
   remoteDone(task, off, icon) {
-    const w = controlState(remoteWriteState(task.project));
-    if (!w.on) return off(`ro-done-${task.id}`, "✓", w.tip);
-    return icon(`done-${task.id}`, "✓", "Done", (cx) => { const op = moveOp(task, "done"); if (op) cx.spawn(async (acx) => { const o = await remoteSend(task.project, op, acx); this.remoteMsg = outcomeText(o); acx.notify(); }); });
+    const w = this.cache.get().controls[task.project] ?? { on: false, tip: "Checking, try again in a moment" };
+    if (!w.on) return off(`ro-done-${cardKey(task)}`, "✓", w.tip);
+    return icon(`done-${cardKey(task)}`, "✓", "Done", (cx) => { const op = moveOp(task, "done"); if (op) cx.spawn(async (acx) => { const o = await remoteSend(task.project, op, acx); this.remoteMsg = outcomeText(o); acx.notify(); }); });
   }
   open(task) {
     if (task.remote) return edit(task.id, undefined, undefined, undefined, undefined, task); // another machine's card: the read-only view, never an agent focus
@@ -77,40 +93,34 @@ export default class Tasks extends View {
   render(cx) {
     const t = theme();
     if (!isEnabled("drover-tasks")) return div(); // off, or still loading its settings: // off draws nothing (the column stays: cmd-alt-b is bound in keys.json, see drover-tabs)
-    if (!this.remoteOn) { this.remoteOn = true; watchRemote(cx, () => isEnabled("drover-tasks")); } // reads each remote-bound project every 15 s while the panel is on
-    const merged = loadMerged();
-    const live = liveAgents(agents(), terminals());
+    const v = this.cache.get(); // memory only: no exec, read, write, timer or spawn below this line
     const fold = shared(FOLD) ?? {};
-    const statuses = liveStatuses(agents(), terminals());
-    const alive = new Set(terminals().map((x) => x.address));
-    const runs = loadRuns();
     const filters = this.filters();
     const fctx = this.filterCtx();
     const filterCount = Object.values(filters).reduce((n, v) => n + v.length, 0);
-    const rows = sorted(merged.tasks.filter((x) => matchesFilter(x, filters, fctx) && matches(x, this.query)))
-      .map((task) => ({ task, at: attention(task, live) }))
-      .filter((r) => r.at);
+    const rows = Object.values(v.byGroup).flat().map((id) => ({ task: v.byId.get(id), at: v.rows.get(id) }))
+      .filter((r) => matchesFilter(r.task, filters, fctx) && matches(r.task, this.query));
     const icon = (id, text, tip, action) => div().id(id).w(22).h(22).flex_none().flex().items_center().justify_center()
       .rounded(5).text_size(12).text_color(t.muted).cursor_pointer().hover((s) => s.bg(t.raised).text_color(t.foreground))
       .on_click((_e, cx) => { cx.stop_propagation(); action(cx); }).child(text);
 
     // Review + an agent still working/running: blue fill with a yellow ring. Other dots unchanged.
-    const dot = (task, at) => dotKind(at.group, reviewLive(task, runs, statuses, alive)) === "review-live"
+    const dot = (task, at) => at.dot === "review-live"
       ? div().w(9).h(9).flex_none().rounded(5).bg(t.working).border_2().border_color(t.done)
       : div().w(7).h(7).flex_none().rounded(4).bg(DOT(t)[at.group]);
     const projects = loadProjects();
     const off = (id, text, tip = READONLY_TIP) => div().id(id).w(22).h(22).flex_none().flex().items_center().justify_center().rounded(5).text_size(12).text_color(t.dim).opacity(0.5).tooltip(tip).child(text);
-    const stale = (task) => Boolean(task.remote) && merged.remotes.some((r) => r.localId === task.project && r.state !== "fresh");
-    const row = ({ task, at }) => h_flex().id(`task-${task.id}`).min_h(40).px(8).py(4).gap(8).items_center().rounded(7).when(stale(task), (el) => el.opacity(0.55))
+    const stale = (task) => Boolean(task.remote) && v.remotes.some((r) => r.localId === task.project && r.state !== "fresh");
+    const row = ({ task, at }) => h_flex().id(`task-${cardKey(task)}`).min_h(40).px(8).py(4).gap(8).items_center().rounded(7).when(stale(task), (el) => el.opacity(0.55))
       .cursor_pointer().hover((s) => s.bg(t.hover)).on_click(() => this.open(task))
       .child(dot(task, at))
       .child(v_flex().flex_1().min_w(0)
         .child(div().truncate().text_size(12.5).child(task.title))
         .child(div().truncate().text_size(10.5).text_color(t.dim)
           .child([task.id, task.priority, projectOf(task, projects)?.name, task.remote?.machine, at.reason, ...task.tags.map((g) => `#${g}`)].filter(Boolean).join(" · "))))
-      .when(this.hasLiveAgent(task), (el) => el.child(icon(`edit-${task.id}`, "✎", "Edit task", () => this.editTask(task.id))))
-      .when(at.group === "todo", (el) => el.child(task.remote ? off(`ro-start-${task.id}`, "▶", OFF_TIP) : icon(`start-${task.id}`, "▶", "Start", () => pick(task.id))))
-      .when(at.group === "review", (el) => el.child(task.remote ? this.remoteDone(task, off, icon) : icon(`done-${task.id}`, "✓", "Done", () => save(update(load(), task.id, { column: "done" })))));
+      .when(this.hasLiveAgent(task), (el) => el.child(icon(`edit-${cardKey(task)}`, "✎", "Edit task", () => this.editTask(task.id))))
+      .when(at.group === "todo", (el) => el.child(task.remote ? off(`ro-start-${cardKey(task)}`, "▶", OFF_TIP) : icon(`start-${cardKey(task)}`, "▶", "Start", () => pick(task.id))))
+      .when(at.group === "review", (el) => el.child(task.remote ? this.remoteDone(task, off, icon) : icon(`done-${cardKey(task)}`, "✓", "Done", (cx) => { save(update(load(), task.id, { column: "done" })); this.refreshNow(cx); })));
 
     const group = ([id, name]) => {
       const items = rows.filter((r) => r.at.group === id);
@@ -177,12 +187,12 @@ export default class Tasks extends View {
       .content(open ? filterMenu() : div());
 
     for (const o of takeRemoteOutcomes()) this.remoteMsg = outcomeText(o); // a result that arrived after the wait
-    const banners = merged.remotes.filter((r) => r.banner).map((r) => h_flex().id(`banner-${r.localId}`).mx(8).mb(6).px(8).min_h(28).gap(6).items_center().rounded(7).bg(t.hover).text_size(11.5)
+    const banners = v.remotes.filter((r) => r.banner).map((r) => h_flex().id(`banner-${r.localId}`).mx(8).mb(6).px(8).min_h(28).gap(6).items_center().rounded(7).bg(t.hover).text_size(11.5)
       .text_color(r.state === "never" ? t.muted : t.blocked)
       .child(div().flex_1().min_w(0).child(`${r.name}: ${r.banner}`))
       .child(div().id(`retry-${r.localId}`).h(22).px(8).flex().items_center().flex_none().rounded(6).bg(t.solid).text_color(t.solid_foreground).cursor_pointer()
         .on_click((_e, cx) => { cx.stop_propagation(); retryRemote(r.machine, r.projectId, cx); }).child("Retry")));
-    const empty = merged.tasks.length === 0 ? "No tasks. Type a title and press Enter." : rows.length === 0 ? (filterCount > 0 ? "Nothing matches this filter." : "Nothing to show.") : null;
+    const empty = v.tasks.length === 0 ? "No tasks. Type a title and press Enter." : rows.length === 0 ? (filterCount > 0 ? "Nothing matches this filter." : "Nothing to show.") : null;
     return v_flex().id("root").size_full().bg(t.chrome).text_color(t.foreground)
       .child(h_flex().h(34).px(10).items_center().gap(6)
         .child(div().flex_1().text_size(12.5).font_semibold().child("Tasks"))

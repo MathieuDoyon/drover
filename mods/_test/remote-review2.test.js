@@ -38,14 +38,15 @@ test("F1 the actual Tasks sidebar: never-loaded banner, then remote rows with th
   assert.ok(timers.length >= 1, "the sidebar polls");
   for (const t of timers) t();
   await until(() => host.state[cacheKey], "the first read landed");
-  await until(() => !render(v, cx).ids.includes("banner-P-ONREM"), "fresh: no banner");
+  await until(() => { for (const t of timers) t(); return !render(v, cx).ids.includes("banner-P-ONREM"); }, "fresh: no banner"); // the panel repaints from the cache, which the 1 s timer refreshes
   r = render(v, cx);
-  assert.ok(r.ids.includes("task-T-REMOTE"), "the remote Ready card is a row");
-  assert.ok(r.ids.includes("ro-start-T-REMOTE") && !r.ids.includes("start-T-REMOTE"), "start is a disabled control");
+  assert.ok(r.ids.includes("task-omarchy/P-REMOTE1/T-REMOTE"), "the remote Ready card is a row");
+  assert.ok(r.ids.includes("ro-start-omarchy/P-REMOTE1/T-REMOTE") && !r.ids.includes("start-omarchy/P-REMOTE1/T-REMOTE"), "start is a disabled control");
   host.hc = async () => ({ code: 1, stdout: "", stderr: "" });
   await IO.remote.retry("omarchy", RID);
+  for (const t of timers) t(); // the next 1 s refresh of the cache
   r = render(v, cx);
-  assert.ok(r.ids.includes("banner-P-ONREM") && r.ids.includes("task-T-REMOTE"), "stale: banner and the saved rows");
+  assert.ok(r.ids.includes("banner-P-ONREM") && r.ids.includes("task-omarchy/P-REMOTE1/T-REMOTE"), "stale: banner and the saved rows");
   assert.ok(r.texts.some((x) => /omarchy unreachable · last update \d\d:\d\d · showing a saved copy/.test(x)));
   v.open({ ...R.normalizeRemoteCard(card("T-REMOTE", RID, { agent: "t7" }), "P-ONREM", "omarchy") });
   assert.equal(host.runs.length, 0, "no agent focus for a remote card");

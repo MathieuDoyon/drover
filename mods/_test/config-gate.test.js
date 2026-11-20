@@ -64,9 +64,9 @@ const folders = () => readdirSync(new URL("../", import.meta.url), { withFileTyp
 beforeEach(() => host());
 
 // ---- the gate itself and the inventory ----
-const EXEMPT = ["drover-config", "drover-tabs", "drover-newtask"];
+const EXEMPT = ["drover-config", "drover-tabs", "drover-newtask", "drover-needs", "drover-switch"]; // needs and switch are pages of the drover column: the layout shows or hides them
 
-test("every mods/drover-* folder has an enabled switch, or is on the exemption list (config, tabs, newtask)", () => {
+test("every mods/drover-* folder has an enabled switch, or is on the exemption list (config, tabs, newtask, needs, switch)", () => {
   const all = folders();
   assert.ok(all.length >= 14, `found ${all.join(", ")}`);
   for (const mod of all) {
@@ -389,7 +389,7 @@ test("tasks off: draws nothing (an empty div, no stub text, no rows); keeps the 
   const { rec } = withRec(() => view.render(cx));
   assert.deepEqual(rec.ids, [], "no elements with ids");
   await idle();
-  quiet([30000, 15000]);
+  quiet([30000, 15000, 1000, 1000]); // the two 1 s timers (needs cache refresh, remote watch) are idle while off;
 });
 
 test("tasks off -> on -> off -> on", async () => {
@@ -625,7 +625,7 @@ test("jira: a JQL typed while the first-enable settings load is pending is kept"
 
 // Inherited enabled (mod.json settings) with no shared override: every gate loads its own settings first.
 const SCREENS_CFG = [
-  ["drover-github", [], {}], ["drover-jira", [], {}], ["drover-room", [15000], roomHost], ["drover-board", [30000], {}], ["drover-todos", [], {}], ["drover-tasks", [30000, 15000], {}],
+  ["drover-github", [], {}], ["drover-jira", [], {}], ["drover-room", [15000], roomHost], ["drover-board", [30000], {}], ["drover-todos", [], {}], ["drover-tasks", [30000, 15000, 1000, 1000], {}],
   ["drover-agents", [], {}], ["drover-runs", [], {}], ["drover-wakeups", [30000, 15000], {}], ["drover-projects", [], {}], ["drover-reader", [], readerHost],
 ];
 const inheritedHost = (mod, settings) => ({ readTextFile: async (p) => { log.read.push(p); return new RegExp(`mods/${mod}/mod\\.json$`).test(p) ? JSON.stringify({ settings }) : null; } });

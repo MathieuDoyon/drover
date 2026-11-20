@@ -228,3 +228,19 @@ test("with only cksum on PATH (no sha256sum, no shasum) a tracked update (canoni
   assert.match(r.stdout, NOTE);
   assert.doesNotMatch(runIn(repo, home, path, skip).stdout, NOTE);
 });
+
+// T-MWO2HFFHWRB Rev 3: the existing drover-*/ loop links the Needs-you mods, and the layout link points at the checkout it ran from (disposable home).
+test("install links drover-needs and drover-switch like every mod, and the layout that holds them", () => {
+  const { repo, home } = fixture();
+  const r = install(repo, home);
+  assert.equal(r.status, 0, r.stderr + r.stdout);
+  for (const m of ["drover-needs", "drover-switch"]) {
+    assert.equal(readlinkSync(join(home, "mods", m)), join(repo, "mods", m), m);
+    assert.match(r.stdout, new RegExp(`ok   ${m}\\n`));
+    assert.ok(existsSync(join(home, "mods", m, "main.js")) && existsSync(join(home, "mods", m, "needsnav.js")) && existsSync(join(home, "mods", m, "needs.js")), `${m} carries its shared copies`);
+  }
+  assert.equal(readlinkSync(join(home, "layouts", "drover.json")), join(repo, "mods", "_layouts", "drover.json"));
+  const layout = JSON.parse(readFileSync(join(home, "layouts", "drover.json"), "utf8"));
+  assert.match(JSON.stringify(layout), /"mod":"drover-needs"/);
+  assert.match(JSON.stringify(layout), /"mod":"drover-switch"/);
+});

@@ -6,6 +6,7 @@ import { KEY, SEEN_KEY, PROJECTS_KEY, firstSight, list, add, update, bySource, a
 import { base64, httpProblem, jiraIssue, jiraKey, githubIssue, prItems } from "./sources.js";
 import { ownerError, createRemote, bindings as remoteBindings, mergeRemote, cacheKey } from "./remote.js";
 import { createWriter } from "./remote-write.js";
+import { createNeedsCache } from "./needs.js";
 import { WAKE_KEY, reschedule, addWake, decide, setStatus, wakeOp } from "./wake.js";
 import { apply as applyKey } from "./keys.js";
 import * as HE from "./herd-export.js";
@@ -152,6 +153,20 @@ export function watchRemote(cx, enabled = () => true) {
   };
   cx.timer?.every?.(1000, tick);
   tick(cx);
+}
+// What the Needs-you cache reads, once: every card (local and remote), runs, and the live agents and terminals. Called by a cache refresh only, never by render.
+export function needsWorld() {
+  const m = loadMerged();
+  return { tasks: m.tasks, remotes: m.remotes, runs: loadRuns(), agents: agents(), terminals: terminals(), wakes: loadWakes() };
+}
+// A screen's Needs-you cache: refreshed once now and every second by its own timer (live agent status has no event), repainting only when the result changed.
+// gate(): the screen's switch (false: no refresh, no remote read). remote: this screen also keeps the remote boards fresh (a mod copy may be the only one open).
+export function startNeeds(cx, { read = needsWorld, gate = () => true, remote = false } = {}) {
+  const cache = createNeedsCache({ read });
+  cx.timer.every(1000, (cx) => { if (gate() && cache.refresh()) cx.notify(); });
+  cache.refresh();
+  if (remote) watchRemote(cx, gate);
+  return cache;
 }
 // ---- Remote project, step 2: writes to the machine's inbox (T-MWHVWR8TIJB). remote-write.js is pure; this is its host side. ----
 // Each mod copy that polls (Board, Tasks) owns one writer; the pending list is a shared key. Origin: this laptop's stable tag in every nonce.

@@ -1,6 +1,6 @@
 # Tasks
 
-`drover-tasks`. The right-hand attention panel: one row per task grouped as Needs you, Ready for review, Working and Ready, with a filter box (Enter adds a task). It also holds the `drover` command-line tool agents use.
+`drover-tasks`. The right-hand attention panel: one row per task grouped as Needs you, Ready for review, Working, Ready and Blocked, with a filter box (Enter adds a task). It also holds the `drover` command-line tool agents use.
 
 ![Tasks](../../mods/drover-tasks/preview.png)
 
@@ -30,7 +30,7 @@ Works alone: Lists and filters tasks alone. Without an open Tasks, Board or Wake
 
 ## Limits
 
-A 300px right panel (`place: right`). The ✓ on a review row moves the card to Done. The filter menu never defaults to hiding anything. In a narrow pane the rows truncate.
+One card is in one group, by this order (first match wins): archived or Done: none; an agent that is starting: Working; an agent whose terminal asks (blocked), in any open column: Needs you; Blocked column: Blocked (parked, last group, not counted); Review column: Ready for review; In progress with an agent whose terminal is gone: Needs you; an agent working: Working; an agent on a live terminal that stopped, went idle or reports no status: Working; In progress with no agent: Working; else Ready (a gone agent on a Ready card is still Ready). So `Needs you` holds only what waits on you now: an agent that asks beats the Blocked column and Review, and neither the Blocked column nor Review is counted there. Reasons are at most 40 characters. The groups, dots and remote ✓ state are derived outside render (when the panel starts and every second) and render only reads them. The `Needs you` number (cards plus failed wakeups, see [Needs you](needs.md)) is shown in the switch tab on top of the `drover` column and in the tab-bar chip (the count ignores your filters; the group header in the panel shows the filtered count). Herdr has no tab or sidebar badge API (only the Dock icon text), so there is no badge. A 300px right panel (`place: right`). The ✓ on a review row moves the card to Done. The filter menu never defaults to hiding anything. In a narrow pane the rows truncate.
 
 ## Rebuild it
 

@@ -300,20 +300,30 @@ export function reorder(tasks, id, column, beforeId, now = Date.now()) {
   return { tasks: next, task: next.find((t) => t.id === id) };
 }
 
-// Where a task sits in the Tasks panel. An agent that stops is not proof of a result:
-// only the Review column means "ready for review"; a stopped or lost agent needs you.
-export function attention(task, agentsByAddress) {
+// Where a task sits in the Tasks panel (T-MWO2HFFHWRB, Revision 4: "Needs you" is only what waits on the owner NOW). One card, one group; first match wins:
+//  0 archived or done: none | 1 agent claiming: working | 2 agent set, its live terminal reports blocked (any open column): needs
+//  3 blocked column: blocked (parked, not counted) | 4 review column: review (own count) | 5 doing + agent whose terminal is gone: needs
+//  6 agent working: working | 7 agent on a live terminal, not working/blocked (stopped, idle, no status): working
+//  8 doing, no agent: working | 9 else: todo (a gone agent on a todo/backlog card is todo).
+// `alive`: Set of terminal addresses that still exist. Without it, the addresses in `agentsByAddress` count as alive (one-card callers).
+export const REASON_MAX = 40;
+export const capReason = (s) => {
+  if (s.length <= REASON_MAX) return s;
+  const cut = s.slice(0, REASON_MAX - 1);
+  const at = cut.lastIndexOf(" ");
+  return `${(at > 0 ? cut.slice(0, at) : cut).trimEnd()}…`;
+};
+export function attention(task, agentsByAddress, alive = new Set(agentsByAddress.keys())) {
   if (task.archived || task.column === "done") return null;
-  if (task.column === "blocked") return { group: "needs", reason: "Blocked" };
-  if (task.column === "review") return { group: "review", reason: "Ready for review" };
   if (task.agent === CLAIMING) return { group: "working", reason: "Agent is starting" };
-  if (task.agent) {
-    const a = agentsByAddress.get(task.agent);
-    if (!a) return { group: "needs", reason: `Agent ${task.agent} is gone` };
-    if (a.status === "blocked") return { group: "needs", reason: "Agent is blocked" };
-    if (a.status === "working") return { group: "working", reason: "Agent is working" };
-    return { group: "needs", reason: "Agent stopped: check the result" };
-  }
+  const isAlive = Boolean(task.agent) && alive.has(task.agent);
+  const a = isAlive ? agentsByAddress.get(task.agent) : null;
+  if (a?.status === "blocked") return { group: "needs", reason: "Agent asks: open its terminal" };
+  if (task.column === "blocked") return { group: "blocked", reason: "Blocked" };
+  if (task.column === "review") return { group: "review", reason: "Ready for review" };
+  if (task.agent && task.column === "doing" && !isAlive) return { group: "needs", reason: capReason(`Agent ${task.agent} is gone`) };
+  if (a?.status === "working") return { group: "working", reason: "Agent is working" };
+  if (isAlive) return { group: "working", reason: "Agent stopped or idle" };
   if (task.column === "doing") return { group: "working", reason: "In progress" };
   return { group: "todo", reason: null };
 }
@@ -323,6 +333,7 @@ export const GROUPS = [
   ["review", "Ready for review"],
   ["working", "Working"],
   ["todo", "Ready"],
+  ["blocked", "Blocked"],
 ];
 
 // A request from outside (the `drover` script an agent runs). Only known ops and fields.

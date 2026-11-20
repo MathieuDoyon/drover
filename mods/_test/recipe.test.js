@@ -14,7 +14,7 @@ const nameOf = (dir) => (dir === "_layouts" ? "Drover layout" : JSON.parse(fs.re
 test("companions.md names every drover-* mod", () => {
   for (const d of dirs) assert.ok(block().includes(`\`${d}\``), `companions.md does not name ${d}`);
 
-  assert.equal(dirs.length, 14, "the block says 14: update companions.md when a mod is added");
+  assert.equal(dirs.length, 16, "the block says 16: update companions.md when a mod is added");
 });
 
 for (const dir of [...dirs, "_layouts"]) {

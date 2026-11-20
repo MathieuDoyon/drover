@@ -1,6 +1,6 @@
 # Drover Tabs
 
-`drover-tabs`. The tab bar of the `drover` layout: capsule tabs with agent status, the `Agents N` selector, the `Drover ▾` menu (open a screen, split, or open a two-screen preset) and the Tasks toggle.
+`drover-tabs`. The tab bar of the `drover` layout: capsule tabs with agent status, the `Agents N` selector, the `Drover ▾` menu (open a screen, split, or open a two-screen preset) the Tasks toggle and the Needs you chip.
 
 ![Drover Tabs](../../mods/drover-tabs/preview.png)
 
@@ -28,7 +28,7 @@ Works alone: Only useful inside the `drover` layout.
 
 ## Limits
 
-A screen is listed only when its `enabled` is on. A missing mod's entry opens an empty tab.
+A screen is listed only when its `enabled` is on. A missing mod's entry opens an empty tab. A chip with the number of cards that need you shows beside `Tasks` (hidden at 0); a click shows the `Needs you` page of the `drover` column (the column too, if hidden). Herdr has no tab or sidebar badge API, so the number lives in this chip and in the `drover-switch` tab.
 
 ## Rebuild it
 

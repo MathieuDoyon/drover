@@ -30,6 +30,8 @@ Each mod has a page: what it does, how to open it, its settings, the data it tou
 | [`drover-github`](mods/github.md) | Sources | Read-only list of open issues and PRs in the orgs you add (`gh`) |
 | [`drover-jira`](mods/jira.md) | Sources | Read-only list of Jira work from a saved JQL |
 | [`drover-tabs`](mods/tabs.md) | Shell | Tab bar of the `drover` layout: capsule tabs, agent status, the Drover menu |
+| [`drover-needs`](mods/needs.md) | Shell | The Needs you page of the `drover` column: every card that waits for you, oldest first |
+| [`drover-switch`](mods/switch.md) | Shell | The Room + Tasks / Needs you page tabs on top of the `drover` column, with the count |
 | [`drover-config`](mods/config.md) | Shell | Drover Config: settings, Work folder and shortcuts in one dialog |
 
 ## Guides
@@ -38,6 +40,7 @@ Each mod has a page: what it does, how to open it, its settings, the data it tou
 - [Agent identity](guides/agent-identity.md): let an agent act as its own GitHub account.
 - [Share a herd](guides/share-a-herd.md): export agents and squads, import them on another machine.
 - [Lessons and the retro](guides/lessons.md): what lessons are, where they live, and how the retro proposes them (advisory, you approve each).
+- [Machines](guides/machines.md): install the Drover CLI on a linked machine with `drover machines`, and the sync hold.
 - [Permanent Drover on a Linux box](guides/omarchy-permanent.md): run Drover as a service (the scripts are in `deploy/omarchy/`).
 
 ## Recipes

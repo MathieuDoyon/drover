@@ -5,7 +5,8 @@ import { h_flex, v_flex, ScrollHandle } from "gpui-base";
 import { spaces, panes, agents, run, openOverlay, closeOverlay, props, theme, window, layout, settings, shared } from "herdr";
 import { RUNS_KEY, openCommand } from "./runs.js";
 import { bind, isEnabled, load as loadCfg } from "./config.js";
-import { modSettings } from "./io.js";
+import { modSettings, startNeeds } from "./io.js";
+import { runPage } from "./needsnav.js";
 
 function find(node, id) {
   if (node?.id === id) return node;
@@ -86,6 +87,7 @@ export default class DroverTabs extends View {
     // Each screen's own mod.json `enabled` is the layer under that override: load them all, then repaint. Until then (or if a screen is still loading) its entry is not offered; a shared override decides at once.
     // Concurrently, each in its own task, with a repaint as each settles: one stuck read hides only its own screen.
     for (const [, mod] of [...SCREENS, ["Tasks", "drover-tasks"]]) cx.spawn(async (cx) => { await loadCfg(mod); cx.notify(); });
+    this.needs = startNeeds(cx); // the chip count: own cache and 1 s timer, read-only in render
     this.pressed = null; // index of the tab pressed; release on another tab moves it there
     this.scroll = ScrollHandle.new();
   }
@@ -141,6 +143,7 @@ export default class DroverTabs extends View {
       : 10;
     // Tasks off: this capsule does nothing and the column stays as it is (empty). The owner's cmd-alt-b is bound in keys.json
     // straight to layout.toggle, which a mod cannot gate: it still toggles the empty column. Do not edit keys.json from here.
+    const needsN = this.needs.get().counts.needs; // memory only: the cache is refreshed by its timer
     const tasksOn = column && !column.hidden && isEnabled("drover-tasks");
 
     return h_flex().size_full().min_w(0).px(10).pl(lightsPadding).gap(6).items_center().bg(t.canvas ?? t.chrome)
@@ -151,6 +154,7 @@ export default class DroverTabs extends View {
         .child(capsule("tab-new", false).px(10).on_click(() => openOverlay({ mod: "new-menu", kind: "popup", width: 250, height: 512 })).child("+")))
       .child(capsule("drover", false).on_click((_e, cx) => { cx.stop_propagation(); openOverlay({ mod: "drover-tabs", kind: "popup", width: 280, height: 530, props: { menu: "drover" } }); }).child("Drover ▾"))
       .child(selector)
+      .when(needsN > 0, (el) => el.child(capsule("needs-chip", false).px(9).text_color(t.blocked).on_click((_e, cx) => { cx.stop_propagation(); runPage(run, "needs"); }).child(String(needsN))))
       .when(Boolean(column), (el) => el.child(capsule("tasks", tasksOn).on_click(() => { if (isEnabled("drover-tasks")) run("layout.toggle", { id: "drover" }); }).child("Tasks")))
       .when(w?.buttons, (el) => el.child(capsule("close-window", false).px(10).on_click(() => run("window.close")).child(svg("mods/pane/close.svg").size(12))));
   }

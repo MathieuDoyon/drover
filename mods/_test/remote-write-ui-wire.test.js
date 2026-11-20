@@ -252,15 +252,16 @@ test("Tasks: the ✓ on a remote Review card is off with the reason until writes
   om.board["drover.tasks"].push(card("T-R3", RID, { column: "review", rev: 2 }));
   let cx = cxOf();
   const v = new Tasks(); v.init({}, { ...cx, spawn() {} }); // init starts the inbox and wakeup loops: not under test
-  const first = view(v, cx, "ro-done-T-R3");
+  const first = view(v, cx, "ro-done-omarchy/P-REMOTE1/T-R3");
   await until(() => { fire(); return host.state[CKEY]; }, "board read");
-  const off = view(v, cx, "ro-done-T-R3").node;
+  const off = view(v, cx, "ro-done-omarchy/P-REMOTE1/T-R3").node;
   assert.ok(off && !clickable(off) && toolTip(off), "off with the reason before the probe answers");
-  assert.ok(!view(v, cx, "done-T-R3").node, "no live control yet");
+  assert.ok(!view(v, cx, "done-omarchy/P-REMOTE1/T-R3").node, "no live control yet");
   cx = await ready();
-  const on = view(v, cx, "done-T-R3").node;
+  fire(); // the 1 s refresh of the needs cache picks up the new write state (render only reads the cache)
+  const on = view(v, cx, "done-omarchy/P-REMOTE1/T-R3").node;
   assert.ok(clickable(on), "live once writes are on");
-  assert.ok(!view(v, cx, "ro-done-T-R3").node);
+  assert.ok(!view(v, cx, "ro-done-omarchy/P-REMOTE1/T-R3").node);
   const n0 = om.step1.length;
   on.args.on_click[0](null, cx);
   await until(() => om.step1.length === n0 + 1, "move staged");
@@ -275,7 +276,7 @@ test("re-review 2.2 Tasks shows what happened to the ✓: stale, expired, error,
   const v = new Tasks(); v.init({}, { ...cx, spawn() {} });
   const press = async (reply) => {
     const n = om.step1.length;
-    view(v, cx, "done-T-R3").node.args.on_click[0](null, cx);
+    view(v, cx, "done-omarchy/P-REMOTE1/T-R3").node.args.on_click[0](null, cx);
     await until(() => om.step1.length === n + 1 && IO.remoteWriter().inflight(M) === 0, "staged");
     om.consume(() => reply);
     await until(async () => { fire(); await drain(2); return view(v, cx, "remote-msg").texts.join(" "); }, "a message is shown");
@@ -1480,4 +1481,31 @@ test("F6 an old attempt does not suppress a NEW identical draft: saved A, remote
   om.consume(() => "ok: noted");
   await until(async () => { fire(); await drain(2); for (const f of later.splice(0)) f(cx); return sends().length === 3 && IO.remoteWriter().inflight(M) === 0; }, "a fresh flush of the new A");
   assert.deepEqual([sends()[2].op, sends()[2].title, sends()[2].ifRev], ["edit", "A", 7]);
+});
+
+// T-MWO2HFFHWRB: a probe that WAS answered but is now older than PROBE_FRESH_MS (60 s). canWrite() re-asks (stages a probe) on expiry:
+// that used to run inside render; now only the 1 s refresh of the needs cache does it, and render only reads the cached control.
+test("Tasks: an expired probe is re-asked by the timer refresh only, never by render", async () => {
+  om.board["drover.tasks"].push(card("T-R3", RID, { column: "review", rev: 2 }));
+  await ready();
+  const cx = cxOf();
+  const v = new Tasks(); v.init({}, { ...cx, spawn() {} });
+  fire();
+  assert.ok(clickable(view(v, cx, "done-omarchy/P-REMOTE1/T-R3").node), "writes on while the probe is fresh");
+  const real = Date.now;
+  Date.now = () => real() + 61000; // the last `ok: protocol` answer is now 61 s old
+  try {
+    const sent = () => om.step1.length + om.remote.length;
+    const n0 = sent();
+    for (let i = 0; i < 3; i++) view(v, cx, "done-omarchy/P-REMOTE1/T-R3");
+    await drain(3);
+    assert.equal(sent(), n0, "render started no probe");
+    assert.ok(clickable(view(v, cx, "done-omarchy/P-REMOTE1/T-R3").node), "render shows the cached control");
+    fire();
+    await until(() => sent() > n0, "the timer refresh re-asked the probe");
+    const n1 = sent();
+    for (let i = 0; i < 3; i++) view(v, cx, "done-omarchy/P-REMOTE1/T-R3");
+    await drain(3);
+    assert.equal(sent(), n1, "render after the refresh started nothing either");
+  } finally { Date.now = real; }
 });

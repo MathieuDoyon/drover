@@ -2,6 +2,14 @@
 # Drover CLI for agents. Writes go through an open Drover mod (file inbox); reads come from shared.json.
 set -euo pipefail
 home="${HERDR_APP_HOME:-$HOME/.config/herdr-app}"
+# This script's physical folder, resolved ONCE before anything else: every helper is found next to the real file, so one run uses one generation end to end.
+# Follows the symlink chain (readlink without -f: it is not portable to macOS).
+src="${BASH_SOURCE[0]}"
+while [ -L "$src" ]; do
+  ldir="$(cd -P "$(dirname "$src")" && pwd)"; src="$(readlink "$src")"
+  case "$src" in /*) ;; *) src="$ldir/$src" ;; esac
+done
+here="$(cd -P "$(dirname "$src")" && pwd)"
 usage() {
   cat >&2 <<'EOF'
 usage: drover tasks [tag|column] [--project <id|name>]   list tasks (id, column, priority, tags, title)
@@ -211,14 +219,7 @@ agents() {
       if [ -n "$out" ] && [ -e "$out" ]; then echo "error: $out exists; remove it or pick another name" >&2; exit 1; fi
       # Headless first: when node is installed, the read-only export script runs the same JS core on shared.json (no mod needed, no env file opened).
       # Otherwise the export goes through an open Drover mod (the inbox op). Either way the shell validates nothing.
-      # Follow the symlink chain of this script (an installed ~/.local/bin/drover is a link) so the helper and the core are found next to the real file.
-      # readlink without -f: it is not portable to macOS.
-      src="${BASH_SOURCE[0]}"
-      while [ -L "$src" ]; do
-        ldir="$(cd -P "$(dirname "$src")" && pwd)"; src="$(readlink "$src")"
-        case "$src" in /*) ;; *) src="$ldir/$src" ;; esac
-      done
-      here="$(cd -P "$(dirname "$src")" && pwd)"; node_bin="${DROVER_NODE:-node}"
+      node_bin="${DROVER_NODE:-node}" # `here` (this script's physical folder, helpers and core next to it) is resolved once, at the top
       res=""; nrc=9   # 9: node not used; 3: this node cannot load the core (use the inbox); else the script's own exit code
       if command -v "$node_bin" >/dev/null 2>&1 && [ -f "$here/drover-export.mjs" ] && [ -f "$here/../herd-export.js" ]; then
         nargs=(--home "$home")
@@ -351,6 +352,7 @@ case "${1:-}" in
   agents) agents "${@:2}" ;;
   config) config "${@:2}" ;;
   doctor) doctor "${@:2}" ;;
+  machines) exec "${DROVER_NODE:-node}" "$here/drover-machines.mjs" "${@:2}" ;;
   tasks) read_shared tasks "${@:2}" ;;
   task) [ $# -eq 2 ] || usage; read_shared task "$2" ;;
   squads) read_shared squads ;;

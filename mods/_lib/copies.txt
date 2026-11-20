@@ -21,3 +21,8 @@ filterui.js
 herd-export.js
 herd-share.js
 lessons.js
+machines.js
+hold.js
+publish.js
+needs.js
+needsnav.js
