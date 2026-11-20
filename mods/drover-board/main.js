@@ -46,12 +46,19 @@ export default class Board extends View {
     this.filterView = null; // the field whose values the filter popover shows (null: the field list)
     this.fsearch = InputState.new({ placeholder: "Filter by field or value…" });
     this.fsearch.on("change", (_e, cx) => { this.filterView = null; cx.notify(); });
+    // Key events from a text field bubble to the root: while a filter field has focus the single-key shortcuts must only type.
+    this.typing = new Set();
+    this.trackTyping(this.fsearch);
     this.confirmIds = []; // the Done cards the open "Archive N cards?" row counted
     this.view = "board"; // "board" | "list"
     this.handle = cx.focus_handle();
     this.input = InputState.new({ placeholder: "Filter: words, #tag, p1" });
     this.input.on("change", (_e, cx) => { this.query = this.input.value(); cx.notify(); });
+    this.trackTyping(this.input);
   }
+
+  // Focus adds the field, blur removes it; the board ignores its keys while any field is focused.
+  trackTyping(f) { f.on("focus", () => this.typing.add(f)); f.on("blur", () => this.typing.delete(f)); }
 
   // Every column with the cards that pass the scope, filter and search.
   // `rs` is the render's snapshot (render() builds it once); event handlers pass none and read fresh.
@@ -94,11 +101,12 @@ export default class Board extends View {
       this.pop = next; this.confirm = false; this.confirmIds = [];
       this.filterView = null;
       if (this.fsearch.value()) this.fsearch.set_value("");
+      if (next !== "filter") this.typing.delete(this.fsearch); // the popover unmounted its field: no blur may come
     }
     cx.notify();
   }
 
-  dismissPops() { this.pop = null; this.confirm = false; this.confirmIds = []; this.filterView = null; }
+  dismissPops() { this.pop = null; this.confirm = false; this.confirmIds = []; this.filterView = null; this.typing.delete(this.fsearch); }
 
   // Collapsed columns hide their cards, so a selection inside one would act on invisible cards.
   collapse(id, cx) {
@@ -144,6 +152,7 @@ export default class Board extends View {
   remoteScope(merged = loadMerged()) { return this.scope.startsWith("project:") && merged.remotes.some((r) => `project:${r.localId}` === this.scope); }
 
   key(e, cx) {
+    if (this.typing.size) return; // typing in a filter field: no stop_propagation, the key must reach the field
     const cols = this.columns().filter((col) => !this.collapsed.has(col.id));
     let c = cols.findIndex((col) => col.cards.some((x) => x.id === this.selected));
     let r = c < 0 ? -1 : cols[c].cards.findIndex((x) => x.id === this.selected);
