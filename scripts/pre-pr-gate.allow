@@ -1,0 +1,34 @@
+# Exact-line exceptions for scripts/pre-pr-gate.sh: path<TAB>rule<TAB>sha256 of the trimmed added line. One line under one rule; never a path.
+# Add a row only after reporting the hit; every row has a reason comment above it. To make a row: printf %s "<trimmed line>" | shasum -a 256
+# The machine-name hits in the tree are NOT listed here: they wait for the card that makes those lines generic (see docs/development.md).
+
+# the owner's public identity (copyright, repo slug, public noreply author), published on purpose
+LICENSE	name-split	a171fee6153c378edfb05328f65c559b04d9cf1b2fc6ee39af8ebad386f9dde4
+# the owner's public identity (copyright, repo slug, public noreply author), published on purpose
+README.md	name	c46989c45d512f18ce23a061a864079c0b75729d48bcde14aef9fee43ff822e8
+# fake secret used as a test fixture (a redactor or sentinel test), not a credential
+mods/_test/lessons-helper.test.js	secret-fixture	0cbd7d0bca5cc55f06bf38920767c3c9849242f1f7a9133e15e89a6973ab3c75
+# fake secret used as a test fixture (a redactor or sentinel test), not a credential
+mods/_test/lessons-helper.test.js	secret-fixture	280702e6b7363714a83ebdbdf42176d2a9df54823e85cbbeeb942d397f256278
+# fake secret used as a test fixture (a redactor or sentinel test), not a credential
+mods/_test/lessons-helper.test.js	secret-fixture	3f5dcfa7005d3fd4d29d83e8fdec1291eddcdfca795f15c2add87df3e7848b5a
+# fake secret used as a test fixture (a redactor or sentinel test), not a credential
+mods/_test/lessons-helper.test.js	secret-fixture	799ae392f7f8ab14e75efa81e2a30cfbd5676cb993a773d5348bec4d852e063a
+# fake secret used as a test fixture (a redactor or sentinel test), not a credential
+mods/_test/lessons-helper.test.js	secret-fixture	d4e8045e0ab4935af1e7a4907121b9f9aef1620e40f53f86c95c0ae7120a253a
+# fake secret used as a test fixture (a redactor or sentinel test), not a credential
+mods/_test/remote-write-io.test.js	secret-fixture	f537a8839483a46629a6bfa59b05584027c24d13ca43a8253cffb339aef2f941
+# fake secret used as a test fixture (a redactor or sentinel test), not a credential
+mods/_test/remote-write-ui-wire.test.js	secret-fixture	f537a8839483a46629a6bfa59b05584027c24d13ca43a8253cffb339aef2f941
+# fake secret used as a test fixture (a redactor or sentinel test), not a credential
+mods/_test/remote-write.test.js	secret-fixture	f537a8839483a46629a6bfa59b05584027c24d13ca43a8253cffb339aef2f941
+# fake secret used as a test fixture (a redactor or sentinel test), not a credential
+mods/_test/remote.test.js	secret-fixture	f537a8839483a46629a6bfa59b05584027c24d13ca43a8253cffb339aef2f941
+# the owner's public identity (copyright, repo slug, public noreply author), published on purpose
+scripts/public-sync.sh	name	3ddad2cd245cef134eb41232214049c487cfa62cef8d2560216c89033422ecd1
+# the owner's public identity (copyright, repo slug, public noreply author), published on purpose
+scripts/public-sync.sh	name	4d0e06e2aec6cd7c7e8fe3afcf4d1372b7b2d3dc61432f73db512ca17f65417e
+# the owner's public identity (copyright, repo slug, public noreply author), published on purpose
+scripts/public-sync.sh	name-split	7d8a02e2c2eeaf99375a3e9c03530ba8f104822e06b09a8d3a42c0a9973fe440
+# the owner's public identity (copyright, repo slug, public noreply author), published on purpose
+scripts/public-sync.test.sh	name	540df4d45992ede8e8d9f2f7b120127384a275bc17fd59a164624c6569673df6

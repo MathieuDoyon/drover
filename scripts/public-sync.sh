@@ -63,18 +63,8 @@ tree="$(ex rev-parse 'FETCH_HEAD^{tree}')"
 
 # 5. leak check on the added lines only; output is file:line, never the text
 # --text scans binary additions too; NULs become spaces so awk sees the whole line
-leaks="$(ex diff -U0 --text --no-color --no-renames "$parent" "$tree" | tr '\000' ' ' | LC_ALL=C awk '
-  # File headers are read only OUTSIDE a hunk: inside one, every "+" line is content, even one shaped like a header.
-  inh > 0 { if ($0 ~ /^\+/) { scan(substr($0, 2)); n++; inh-- } else if ($0 ~ /^-/) { inh-- } ; next }
-  /^\+\+\+ / { f = ($0 ~ /^\+\+\+ b\//) ? substr($0, 7) : f; next }
-  /^@@/ { split($0, p, " "); o = p[2]; w = p[3]; sub(/^-/, "", o); sub(/^\+/, "", w)
-          oc = (index(o, ",") ? substr(o, index(o, ",") + 1) : 1) + 0
-          wc = (index(w, ",") ? substr(w, index(w, ",") + 1) : 1) + 0
-          n = (w + 0); inh = oc + wc; wleft = wc; next }
-  function scan(line) {
-    if (line ~ ("/Us" "ers/[^/[:space:]<{$]") || line ~ ("nest" "oca") || line ~ ("(^|[^0-9])100\\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\\.[0-9]+\\.[0-9]+") || line ~ ("gh" "p_") || line ~ ("github" "_pat_") || line ~ ("sk-" "ant-") || line ~ ("PRIVATE" " KEY") || line ~ ("[A-Z0-9_]*(_API" "_KEY|_TOKEN|_SECRET) *= *[^ ]"))
-      print f ":" n
-  }')"
+here="$(cd "$(dirname "$0")" && pwd)"   # the leak rules are scripts/leak-rules.awk, shared with scripts/pre-pr-gate.sh
+leaks="$(ex diff -U0 --text --no-color --no-renames "$parent" "$tree" | tr '\000' ' ' | LC_ALL=C awk -f "$here/leak-rules.awk")"
 
 echo "public sync plan"
 echo "  parent:  $parent"

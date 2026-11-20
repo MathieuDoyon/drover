@@ -22,3 +22,5 @@ jobs:
         run: node --test mods/_lib/*.test.js mods/_test/*.test.js
       - name: Public sync script
         run: scripts/public-sync.test.sh
+      - name: Pre-PR gate script
+        run: scripts/pre-pr-gate.test.sh
