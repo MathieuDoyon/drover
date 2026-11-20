@@ -4,7 +4,7 @@
 //
 // Contract these tests fix (the names the implementation must have):
 //   mods/_lib/machines.js (pure; copied to mods/drover-tasks/machines.js through _lib/copies.txt) exports
-//     SHIPPED            the 15 relative paths (the plan's 13, plus hold.js and publish.js that machines.js imports) under mods/drover-tasks that are copied
+//     SHIPPED            the 19 relative paths (the plan's 13, plus hold.js and publish.js that machines.js imports, plus the 3 headless writer files and remote.js (its ownership check)) under mods/drover-tasks that are copied
 //     buildManifest(srcRoot) -> { id, files: [{ path, sha256, mode: "755"|"644", sourceTime: <mtime ms>, test: [argv with {gen} {node} {python3}] }] }
 //     generationId(files) -> hash of the sorted "path sha mode" lines (what buildManifest().id is)
 //     expandTest(argv, { gen, node, python3 })
@@ -29,6 +29,7 @@ import { tmpdir, userInfo, hostname } from "node:os";
 
 const { until } = await import(new URL("./stubs/until.js", import.meta.url).href);
 const RT = await import(new URL("./stubs/machine-rt.js", import.meta.url).href);
+const { GENERIC_LEAKS, privateWords, wholeWord, runtimePrivateWords } = await import(new URL("./private-words.js", import.meta.url).href); // shared with shipped-generic.test.js
 const { SHARE, GEN, CURRENT, ENTRY } = RT;
 const REPO = join(dirname(fileURLToPath(import.meta.url)), "../..");
 const TASKS = join(REPO, "mods/drover-tasks");
@@ -36,7 +37,7 @@ const FINDER = join(TASKS, "bin/find-runtime.sh");
 const CLI = join(TASKS, "bin/drover");
 const M = () => import("../_lib/machines.js"); // loaded inside each test, so a missing module fails that test, not the whole file
 
-const SHIPPED = ["bin/drover", "bin/drover-export.mjs", "bin/drover-machines.mjs", "bin/find-runtime.sh", "machines.js", "herd-export.js", "runs.js", "store.js", "config.js", "config-schema.js", "lessons.js", "workfolder.js", "sources.js", "hold.js", "publish.js"];
+const SHIPPED = ["bin/drover", "bin/drover-export.mjs", "bin/drover-machines.mjs", "bin/find-runtime.sh", "bin/drover-headless", "bin/drover-headless.mjs", "headless-board.js", "remote.js", "machines.js", "herd-export.js", "runs.js", "store.js", "config.js", "config-schema.js", "lessons.js", "workfolder.js", "sources.js", "hold.js", "publish.js"];
 const T_OLD = Date.UTC(2026, 0, 1), T_NEW = Date.UTC(2026, 0, 2), T_LATER = Date.UTC(2026, 0, 3);
 
 const cleanup = [];
@@ -146,7 +147,7 @@ test("finder: home with spaces and an apostrophe is printed whole", () => {
 });
 
 // ---------------------------------------------------------------------------------------------------------- 3. the manifest
-test("manifest: the shipped list is the 13 files of the plan plus hold.js and publish.js (machines.js imports them, so the closure ships them)", async () => {
+test("manifest: the shipped list is the 13 files of the plan plus hold.js and publish.js (machines.js imports them) and the headless writer (bin/drover-headless, its .mjs and headless-board.js)", async () => {
   const mod = await M();
   assert.deepEqual([...mod.SHIPPED].sort(), [...SHIPPED].sort());
   assert.deepEqual(mod.buildManifest(TASKS).files.map((f) => f.path).sort(), [...SHIPPED].sort());
@@ -211,31 +212,6 @@ test("manifest: test argvs are argv (no shell), end on the file's own {gen} path
   assert.match([...scripts][0], /pathToFileURL\(process\.argv\[1\]\)/);
   assert.deepEqual(mod.expandTest(["{node}", "--check", "{gen}/x"], { gen: "/g/1", node: "/n/node", python3: "/p" }), ["/n/node", "--check", "/g/1/x"]);
 });
-
-// Private words are read at run time, so this public file never spells a person or a machine: this user and host, the linked machines
-// (`hc machine ls --json`, skipped without hc) and an optional DROVER_PRIVATE_WORDS (comma-separated). Generic account and host names (a CI
-// runner's) are skipped: they are not private and ordinary code uses such words. Words under 4 characters are ignored; matches are whole words.
-const GENERIC_LEAKS = /sddm|gdm\b|lightdm|autologin|greeter|hyprland|\/(Users|home)\/[A-Za-z]/i;
-const GENERIC_NAMES = new Set(["runner", "root", "admin", "user", "ubuntu", "ec2-user", "localhost", "github", "docker", "vagrant"]);
-const clean = (w) => String(w || "").trim().toLowerCase();
-const privateWords = ({ username, host, extra = "", machines = [], ci = false } = {}) => {
-  const w = new Set();
-  if (!ci) for (const x of [username, host]) if (!GENERIC_NAMES.has(clean(x))) w.add(x);
-  for (const x of extra.split(",")) w.add(x);
-  for (const m of machines) { w.add(m.name); w.add(m.host); w.add(m.logout_linger_user); }
-  return [...w].map(clean).filter((x) => x.length >= 4);
-};
-const wholeWord = (text, word) => new RegExp(`(^|[^a-z0-9])${word.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}($|[^a-z0-9])`, "i").test(text);
-const runtimePrivateWords = () => {
-  let username, host, machines = [];
-  try { username = userInfo().username; } catch {}
-  try { host = hostname().split(".")[0]; } catch {}
-  try {
-    const r = spawnSync("hc", ["machine", "ls", "--json"], { encoding: "utf8", timeout: 10000 });
-    if (r.status === 0) machines = JSON.parse(r.stdout).machines || [];
-  } catch {}
-  return privateWords({ username, host, extra: process.env.DROVER_PRIVATE_WORDS || "", machines, ci: !!process.env.CI });
-};
 
 test("private words: a generic account or host name (a CI runner's) is not private; real names, machines and the env list are", () => {
   assert.deepEqual(privateWords({ username: "runner", host: "runner", extra: "", machines: [] }), []);

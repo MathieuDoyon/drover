@@ -41,6 +41,7 @@ Each mod has a page: what it does, how to open it, its settings, the data it tou
 - [Share a herd](guides/share-a-herd.md): export agents and squads, import them on another machine.
 - [Lessons and the retro](guides/lessons.md): what lessons are, where they live, and how the retro proposes them (advisory, you approve each).
 - [Machines](guides/machines.md): install the Drover CLI on a linked machine with `drover machines`, and the sync hold.
+- [Headless board writer](guides/headless-board.md): the board of a machine without a window: files, verbs, retry and error codes.
 - [Permanent Drover on a Linux box](guides/omarchy-permanent.md): run Drover as a service (the scripts are in `deploy/omarchy/`).
 
 ## Recipes

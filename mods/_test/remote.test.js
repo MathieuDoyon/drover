@@ -270,7 +270,7 @@ test("remoteCardRows: a read-only view model of a remote card, text only", () =>
   assert.deepEqual([v.id, v.machine, v.column, v.priority, v.tags, v.agentText], ["T-9", "omarchy", "doing", "P1", ["a"], "omarchy/t3"]);
   assert.equal(v.desc, c.desc, "shown as plain text, never rendered");
   assert.deepEqual(v.notes.map((n) => [n.by, n.text, n.kind]), [["bob", "n1", "log"], ["you", "7", null]]);
-  assert.equal(R.READONLY_TIP, "This project lives on omarchy (read-only for now)");
+  assert.equal(R.READONLY_TIP, "This project lives on another machine (read-only for now)");
 });
 
 test("review H1: the size check needs no global Buffer and counts UTF-8 bytes", () => {

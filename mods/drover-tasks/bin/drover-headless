@@ -1,0 +1,21 @@
+#!/bin/sh
+# drover-headless launcher: finds node (the same tiers as find-runtime.sh: PATH, a configured dir, common places, version managers) and runs
+# drover-headless.mjs next to this file with the same arguments and stdin. No node found: E_NODE_NOT_FOUND on stderr, exit 69.
+# The configured dir is $DROVER_NODE_DIR, else the dir of the node that `drover machines install` stamped in ../MANIFEST.json.
+src="$0"
+while [ -L "$src" ]; do
+  ldir="$(cd -P "$(dirname "$src")" && pwd)"; src="$(readlink "$src")"
+  case "$src" in /*) ;; *) src="$ldir/$src" ;; esac
+done
+here="$(cd -P "$(dirname "$src")" && pwd)"
+cfg="${DROVER_NODE_DIR:-}"
+if [ -z "$cfg" ] && [ -f "$here/../MANIFEST.json" ]; then
+  stamped="$(sed -n 's/.*"node": *"\([^"]*\)".*/\1/p' "$here/../MANIFEST.json" 2>/dev/null | head -n 1)"
+  case "$stamped" in /*) cfg="$(dirname "$stamped")" ;; esac
+fi
+node="$(sh "$here/find-runtime.sh" --node-only "$cfg" 2>/dev/null)" || node=""
+if [ -z "$node" ]; then
+  echo "E_NODE_NOT_FOUND: drover-headless needs node on this machine (PATH, DROVER_NODE_DIR, a common install dir or a version manager)" >&2
+  exit 69
+fi
+exec "$node" "$here/drover-headless.mjs" "$@"

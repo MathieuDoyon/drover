@@ -8,6 +8,9 @@
 # E_TEMP_FAILED (no safe temp file) alone means nothing was probed.
 # The exit status is ALWAYS 0: a caller reads the outcome from the lines above, never from the status.
 # DROVER_FIND_SYSTEM_DIRS (a colon list) replaces the built-in common install locations.
+# `--node-only [<configured node dir>]` (the drover-headless launcher): same tiers for node alone; prints just the absolute path and exits 0, or prints nothing and exits 69.
+node_only=0
+if [ "${1:-}" = "--node-only" ]; then node_only=1; shift; fi
 cfg="${1:-}"
 home="$(pwd -P)"
 sys_dirs="${DROVER_FIND_SYSTEM_DIRS-$HOME/.local/bin:$HOME/bin:/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin}"
@@ -100,20 +103,29 @@ runtime() {
 }
 
 fixed=""
+node_runtime() {
+  runtime node node \
+    "$HOME/.nvm/versions/node" bin/node \
+    "$HOME/.local/share/fnm/node-versions" installation/bin/node \
+    "$HOME/Library/Application Support/fnm/node-versions" installation/bin/node \
+    "$HOME/.fnm/node-versions" installation/bin/node \
+    "$HOME/.asdf/installs/nodejs" bin/node \
+    "$HOME/.volta/tools/image/node" bin/node \
+    "$HOME/.local/share/mise/installs/node" bin/node
+}
 # Secure temp files are needed to bound a candidate. Without them nothing is probed (never a guessable path): the fixed code, exit 0.
-if t="$(mktemp 2>/dev/null)"; then rm -f "$t"; else echo "E_TEMP_FAILED"; exit 0; fi
+if t="$(mktemp 2>/dev/null)"; then rm -f "$t"; else [ "$node_only" = 1 ] && exit 69; echo "E_TEMP_FAILED"; exit 0; fi
+if [ "$node_only" = 1 ]; then
+  fixed="$HOME/.volta/bin/node"
+  node_runtime >/dev/null || exit 69
+  printf '%s\n' "$fp"
+  exit 0
+fi
 echo "home=$home"
 echo "os=$(uname -s 2>/dev/null) arch=$(uname -m 2>/dev/null)"
 echo "path=$PATH"
 fixed="$HOME/.volta/bin/node"
-runtime node node \
-  "$HOME/.nvm/versions/node" bin/node \
-  "$HOME/.local/share/fnm/node-versions" installation/bin/node \
-  "$HOME/Library/Application Support/fnm/node-versions" installation/bin/node \
-  "$HOME/.fnm/node-versions" installation/bin/node \
-  "$HOME/.asdf/installs/nodejs" bin/node \
-  "$HOME/.volta/tools/image/node" bin/node \
-  "$HOME/.local/share/mise/installs/node" bin/node || echo "E_NODE_NOT_FOUND"
+node_runtime || echo "E_NODE_NOT_FOUND"
 fixed=""
 runtime python3 python3 \
   "$HOME/.pyenv/versions" bin/python3 \

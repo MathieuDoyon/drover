@@ -221,7 +221,7 @@ test("g. the drover CLI usage and `drover projects` mention `project add`; it se
 
 test("g. the op is not in any laptop remote whitelist (nothing sends it remotely)", () => {
   const out = spawnSync("grep", ["-rln", "project-add", new URL("..", import.meta.url).pathname, "--include=*.js", "--exclude=*.test.js"], { encoding: "utf8" }).stdout.split("\n").filter(Boolean);
-  assert.deepEqual(out.map((f) => f.split("/mods/")[1]).filter((f) => !/^(_lib\/(io|store)\.js|drover-[a-z]+\/(io|store)\.js)$/.test(f)), []);
+  assert.deepEqual(out.map((f) => f.split("/mods/")[1]).filter((f) => !/^(_lib\/(io|store|headless-board)\.js|drover-[a-z]+\/(io|store|headless-board)\.js)$/.test(f)), []);
 });
 
 test("h. org on the inbox is refused (never silently dropped); nothing is written; an org-bound project's org-less replay stays idempotent", async () => {

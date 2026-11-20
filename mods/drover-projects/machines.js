@@ -13,7 +13,7 @@ import { createHold, pushGuard } from "./hold.js";
 export { createHold, pushGuard };
 
 // Everything the CLI needs: the import chain of bin/drover and its helpers (the closure is checked before any transfer).
-export const SHIPPED = ["bin/drover", "bin/drover-export.mjs", "bin/drover-machines.mjs", "bin/find-runtime.sh", "machines.js", "hold.js", "publish.js", "herd-export.js", "runs.js", "store.js", "config.js", "config-schema.js", "lessons.js", "workfolder.js", "sources.js"];
+export const SHIPPED = ["bin/drover", "bin/drover-export.mjs", "bin/drover-machines.mjs", "bin/find-runtime.sh", "bin/drover-headless", "bin/drover-headless.mjs", "headless-board.js", "remote.js", "machines.js", "hold.js", "publish.js", "herd-export.js", "runs.js", "store.js", "config.js", "config-schema.js", "lessons.js", "workfolder.js", "sources.js"];
 
 const SHARE = ".local/share/drover-herdr";
 const GEN = `${SHARE}/gen`;

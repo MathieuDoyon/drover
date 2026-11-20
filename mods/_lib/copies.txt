@@ -26,3 +26,4 @@ hold.js
 publish.js
 needs.js
 needsnav.js
+headless-board.js

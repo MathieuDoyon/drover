@@ -1,5 +1,5 @@
 // Canonical copy lives in mods/_lib; mods/install.sh copies it into each drover-* mod.
-// A project bound to another machine (omarchy): the laptop reads that machine's board, read-only (T-MWHVWQNL2HA).
+// A project bound to another machine: the laptop reads that machine's board, read-only (T-MWHVWQNL2HA).
 // Pure logic: the hc runner and the shared-state accessors are injected. Nothing here writes to the remote machine.
 // The remote shared.json is untrusted and holds secrets-adjacent keys (layout, runs, wakeups): only drover.tasks and
 // drover.projects and (ids and display names only) drover.agents are read; the cache is { at, tasks, picks } and nothing else is stored or logged.
@@ -14,7 +14,7 @@ export const SLOW_AFTER = 5; // failures before the cap
 export const TIMEOUT_MS = 10000; // one read
 export const TICK_MS = 1000; // how often the owner of the timer calls tick()
 export const CACHE_PREFIX = "drover.remote.";
-export const READONLY_TIP = "This project lives on omarchy (read-only for now)";
+export const READONLY_TIP = "This project lives on another machine (read-only for now)";
 
 // The mod runtime has no Buffer or TextEncoder: count UTF-8 bytes by hand (a lone surrogate counts 3), as runs.js does.
 function utf8Bytes(str) {
@@ -36,7 +36,7 @@ export const readDelay = (failures) => (failures >= SLOW_AFTER ? SLOW_MS : POLL_
 
 const PICK_ID = /^[A-Za-z0-9_-]{1,64}$/;
 const pickName = (v, id) => (typeof v === "string" && v.trim() ? v.trim().slice(0, 80) : id);
-// The picker data from omarchy's shared.json: who a card can be assigned to ({kind,id,name}: no command, soul, env or member list) and the
+// The picker data from the remote machine's shared.json: who a card can be assigned to ({kind,id,name}: no command, soul, env or member list) and the
 // projects a card can move to ({id,name}: not one owned by another machine, no repos or folders). An unset drover.agents is the consumer's
 // own default herd, as config() reads it there.
 function picksOf(doc) {

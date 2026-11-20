@@ -651,7 +651,7 @@ export function unpackDraft(d) {
     assignee: d.assignee && typeof d.assignee.kind === "string" && typeof d.assignee.id === "string" ? { kind: d.assignee.kind, id: d.assignee.id } : null,
   };
   for (const k of ["column", "priority", "runner", "project"]) if (typeof d[k] === "string") out[k] = d[k];
-  if (typeof d.parent === "string" && d.parent) out.parent = d.parent; // only an omarchy card's draft uses it (a local create takes its parent from the props)
+  if (typeof d.parent === "string" && d.parent) out.parent = d.parent; // only a remote card's draft uses it (a local create takes its parent from the props)
   return out;
 }
 
