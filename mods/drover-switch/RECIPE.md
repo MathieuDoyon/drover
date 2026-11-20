@@ -4,7 +4,7 @@ Build `drover-switch`: the page tabs on top of the `drover` column (Room + Tasks
 
 ## What you see
 
-A 34px bar with segmented tabs: one rounded track (4px padding, radius 8, hover background) holding two rounded segments (height 28, radius 6): `Room + Tasks` and `Needs you`. The selected segment has the canvas background and full text; the other is muted with a hover background. The count is a small rounded badge after `Needs you` in the blocked colour with white text, hidden at 0. The selected tab follows the layout.
+A 34px bar with segmented tabs: one rounded track (an h_flex row, 3px padding, radius 8, hover background) with two plain h_flex segments as its direct children (height 24, radius 6; no Tabs/Tab wrapper, the base ones are unstyled and stack): `Room + Tasks` and `Needs you`. The selected segment has the canvas background and full text; the other is muted with a hover background. The count is a small rounded badge after `Needs you` in the blocked colour with white text, hidden at 0. The selected tab follows the layout.
 
 ## How it behaves
 

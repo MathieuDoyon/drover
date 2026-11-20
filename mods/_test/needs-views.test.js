@@ -143,20 +143,20 @@ test("drover-needs: a live-only change (agent blocked -> working) with tasks and
 
 // ---- drover-switch ----
 test("drover-switch: the selected tab follows layout() (room by default, needs when Needs you shows and Room is hidden)", () => {
-  for (const [needsPage, want] of [[false, "tab-room"], [true, "tab-needs"]]) {
+  for (const [needsPage, want] of [[false, "seg-room"], [true, "seg-needs"]]) {
     const s = setup(Switch, cards(3), { layout: LAYOUT(needsPage) });
     const r = rec(s.v, s.cx);
-    for (const id of ["tab-room", "tab-needs"]) assert.equal(find(r.root, id).args.selected[0], id === want, `${id} (needs page: ${needsPage})`);
+    for (const id of ["seg-room", "seg-needs"]) assert.equal(find(r.root, id).calls.includes("bg"), id === want, `${id} (needs page: ${needsPage})`);
   }
 });
 
 test("drover-switch: a tab click runs showPage for its page", () => {
   const s = setup(Switch, cards(3));
   const r = rec(s.v, s.cx);
-  find(r.root, "tab-needs").args.on_click[0]();
+  find(r.root, "seg-needs").args.on_click[0]();
   assert.deepEqual(s.runs, NAV.showPage("needs"));
   s.runs.length = 0;
-  find(r.root, "tab-room").args.on_click[0]();
+  find(r.root, "seg-room").args.on_click[0]();
   assert.deepEqual(s.runs, NAV.showPage("room"));
 });
 
@@ -279,4 +279,34 @@ test("Rev 4 review 3: a Needs-only host delivers wakeups: an already-expired sch
   const r = rec(s.v, s.cx);
   assert.ok(r.ids.includes("need-wake/W-OLD"), "shows in the combined list");
   assert.ok(r.texts.includes("1"), "and in the count");
+});
+
+test("Job 6: the two segments are DIRECT children of the pill (a flex row); no Tabs/Tab element; the pill fits the 34px block", () => {
+  const s = setup(Switch, cards(3));
+  const r = rec(s.v, s.cx);
+  const pill = find(r.root, "switch-pill");
+  assert.deepEqual(pill.kids.map((k) => k.id), ["seg-room", "seg-needs"], "both segments sit directly in the pill");
+  assert.ok(!r.ids.some((i) => i === "switch-tabs" || i.startsWith("tab-")), "no Tabs/Tab wrapper in the tree");
+  const src = readFileSync(new URL("../drover-switch/main.js", import.meta.url), "utf8");
+  assert.ok(!/\bTabs?\b/.test(src.replace(/\/\/.*$/gm, "")), "the source does not use Tabs/Tab");
+  for (const id of ["seg-room", "seg-needs"]) assert.equal(find(r.root, id).args.h[0], 24, `${id} height`);
+  assert.ok(pill.calls.includes("p"), "the pill sets its padding");
+  assert.ok(24 + 2 * pill.args.p[0] <= 34, `24 + 2*${pill.args.p[0]} fits in 34`);
+  find(r.root, "seg-needs").args.on_click[0]();
+  assert.deepEqual(s.runs, NAV.showPage("needs"));
+  s.runs.length = 0;
+  find(r.root, "seg-room").args.on_click[0]();
+  assert.deepEqual(s.runs, NAV.showPage("room"));
+  for (const id of ["seg-room", "seg-needs"]) assert.ok(find(r.root, id).calls.includes("cursor_pointer"), `${id} is clickable`);
+});
+
+test("Round 5: the pill is a tab_list; each segment is a tab with aria_selected true only on the selected one", () => {
+  for (const [needsPage, sel, other] of [[false, "seg-room", "seg-needs"], [true, "seg-needs", "seg-room"]]) {
+    const s = setup(Switch, cards(3), { layout: LAYOUT(needsPage) });
+    const r = rec(s.v, s.cx);
+    assert.deepEqual(find(r.root, "switch-pill").args.role, ["tab_list"]);
+    for (const id of [sel, other]) assert.deepEqual(find(r.root, id).args.role, ["tab"], `${id} role`);
+    assert.deepEqual(find(r.root, sel).args.aria_selected, [true]);
+    assert.deepEqual(find(r.root, other).args.aria_selected, [false]);
+  }
 });
