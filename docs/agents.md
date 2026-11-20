@@ -83,6 +83,11 @@ Where agents write plans, scouts, reviews and lane logs. Drover Config → Gener
 
 It never overwrites and lists the names that already exist.
 
+## Lane log
+
+Each card has `<work folder>/lane-<T-id>.md`. `drover-agents/bin/drover-lane log <lane file> <EVENT> --who <role> [text]` appends one timed line (the helper takes the time, under `flock`, append only); the Trail Boss, Wrangler and Inspector log through it, and Drover logs the owner and chain events.
+`drover-lane report <lane file> [--json]` gives the per-phase minutes of each PR cycle (build, owner wait, PR to merge, merge to done, start to done) and the busy time per member. Events and format: `souls/_herd.md`, "Lane log timing".
+
 ## Lessons writer
 
 `drover-agents/bin/drover-lessons <verb> <scope>` is the only writer of the lessons files (format: `mods/_lib/lessons.js`). Scope is exactly one of `--org <slug> [--kind lessons|workflows|squads]` (`orgs/<slug>/<kind>.md`), `--project <id>` (`projects/<id>/lessons.md`) or `--agent <id>` (`agents/<id>.lessons.md`) under `~/.config/drover-herdr` (`--config <abs dir>` overrides it). It opens no other file.

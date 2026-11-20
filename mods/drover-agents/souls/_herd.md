@@ -96,3 +96,13 @@ Whoever moves the card (`drover move`, or `drover start`) syncs the linked issue
 ## 8. Work folder
 
 Your launch prompt gives one absolute **work folder** ("Work folder (plans, scouts, reviews, lane logs): …"). Write every plan, scout file, review report and lane log there, and send absolute paths into it. It is `<repo>/.drover/` (or `<worktree>/.drover/`) in repo mode, or a folder under `~/.config/drover-herdr/work/` (`work/<project id>/`, `work/_free/` without a project) by default. Never guess the path and never hard-code `.drover/`. No line in the prompt: use `.drover/` in your worktree and keep it out of git.
+
+## 9. Lane log timing
+
+One lane file per card: `<work folder>/lane-<T-id>.md`. Every timed line goes through the helper, never typed by hand (it takes the time): `~/.config/herdr-app/mods/drover-agents/bin/drover-lane log <lane file> <EVENT> --who <role> [text]`. `drover-lane report <lane file>` prints the per-phase minutes of each PR cycle and the busy time per member. A line is `@ <local time> | <who> | <EVENT> | <text>`; any other line in the file is free text and is ignored by the report. No `|` or newline in the text.
+
+- Roles (`--who`): `trail-boss`, `wrangler`, `inspector`, `drover`, `owner`, `ci`.
+- The Trail Boss logs `START`, `PLAN_READY`, `PLAN_GO`, `BUILD_START` (a later build round after a PR cycle), `REVIEW_START`, `REVIEW_END` (text starts with the verdict: `clean` or `findings: 1 High`), `SEND_BACK`, `READY_FOR_PR`.
+- The Drover logs the owner and chain events when a coordinator exists: `OWNER_WORD`, `PR_OPEN`, `PR_CLOSED` (closed without a merge), `CI_START`, `CI_END` (text starts with `green` or `red`, after the optional `run=<id>` token), `MERGE`, `INSTALLED`, `PUBLIC_GREEN`, `DONE`. When the person started the Trail Boss (no coordinator), the Trail Boss logs them: `OWNER_WORD` with `--who owner` (from the person's GO or yes), the rest with `--who trail-boss`. A step that is held or does not apply is still logged, with the text `n/a`. `DONE` means the card's whole chain is complete.
+- CI runs: put `run=<id>` as the first word of the text of a `CI_START` and its `CI_END` when runs can overlap; the report pairs by it. Without it, starts and ends pair strictly in order, and an overlap or a lone `CI_END` shows as ambiguous (no minutes, no result).
+- `BUSY` and `IDLE` mark a member's span: `BUSY` when it starts a job, `IDLE` right before it sends its report or waits on a person or a wakeup. The leader's job message carries the lane path. A `BUSY` with no `IDLE` is reported as open and is not summed.

@@ -186,7 +186,7 @@ test("souls: every .drover/ mention is tied to the work folder given at launch",
 
 test("souls: paths that agents write point at <work folder>, not <repo>/.drover or <worktree>/.drover", () => {
   for (const n of ["scout", "pm", "writer", "trail-boss", "wrangler"]) assert.doesNotMatch(soul(n), /`<(?:repo|worktree|folder)>\/\.drover\/(?!`)/, n);
-  assert.match(soul("trail-boss"), /<work folder>\/lane\.md/);
+  assert.match(soul("trail-boss"), /<work folder>\/lane-<T-id>\.md/);
   assert.match(soul("trail-boss"), /<work folder>\/review-1\.md/);
   assert.match(soul("wrangler"), /<work folder>\/review\.md/);
   assert.match(soul("scout"), /<work folder>\/scout\/<task>\.md/);
@@ -317,4 +317,13 @@ test("drover soul: READY_FOR_PR row, step 3 and queue item 6 point to the whole 
   const conv = readFileSync(new URL("../../conv/02-agents.md", import.meta.url), "utf8");
   assert.ok(conv.includes("- Chain grant:") && conv.includes("(../mods/drover-agents/souls/drover.md)"));
   assert.ok(s.split("\n").length <= 115, "soul <= 115 lines");
+});
+
+test("drover soul: the Drover logs the owner and chain events in the card's lane file through drover-lane", () => {
+  const d = soul("drover");
+  assert.match(d, /drover-lane log/);
+  assert.match(d, /--who owner/);
+  for (const e of ["OWNER_WORD", "PR_OPEN", "PR_CLOSED", "CI_START", "CI_END", "MERGE", "INSTALLED", "PUBLIC_GREEN", "DONE"]) assert.ok(d.includes(e), e);
+  assert.match(d, /Lane log timing/);
+  assert.match(d, /lane-<T-id>\.md/);
 });

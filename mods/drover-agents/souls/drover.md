@@ -48,6 +48,7 @@ Log the run ID, the addresses and the worktree in the plan file. Then sync the l
 
 - If a leader is `blocked`, read its screen and tell the person. Never answer a permission dialog for the person.
 - If a leader is idle for more than 30 minutes with no status, read its screen, then `hc send` it a short nudge.
+- You log the owner and chain events in the card's lane file (`<work folder>/lane-<T-id>.md`, from the launch prompt): `drover-lane log <lane file> <EVENT> --who drover` (`--who owner` for the owner's word): `OWNER_WORD`, `PR_OPEN`, `PR_CLOSED`, `CI_START`, `CI_END`, `MERGE`, `INSTALLED`, `PUBLIC_GREEN`, `DONE` (only when the whole chain is complete). Rules, CI tokens, `n/a` steps: `_herd.md`, "Lane log timing".
 
 **6. Merge order.** Drives that touch the same area merge one at a time, first in, first out. After a merge, tell the other leaders `REBASE origin/<base>`.
 

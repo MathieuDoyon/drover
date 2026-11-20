@@ -1,0 +1,383 @@
+#!/usr/bin/env -S python3 -I
+# drover-lane log <lane file> <EVENT> --who <role> [text...]     append ONE timed line to a lane log
+# drover-lane report <lane file> [--json]                        table 1 (phase minutes per PR cycle) and per-member busy time
+# Line: "@ 2026-11-20T12:21:40-05:00 | <who> | <EVENT> | <text>". The helper takes the time (local, seconds, numeric offset): agents never type one.
+# Roles (--who): trail-boss wrangler inspector drover owner ci
+# Events: START PLAN_READY PLAN_GO BUILD_START REVIEW_START REVIEW_END SEND_BACK READY_FOR_PR OWNER_WORD PR_OPEN PR_CLOSED
+#         CI_START CI_END MERGE INSTALLED PUBLIC_GREEN DONE BUSY IDLE
+# The lane file path is absolute; its directory must exist (never created). `log` opens it O_APPEND (a symlink is refused, a new file is
+# 0600), holds flock, and writes one line; earlier bytes are never rewritten. Text: one line, no "|", no control characters, <= 500 bytes.
+# `report` reads only. Lines that do not parse (free text, a bad time, role or event) are skipped and counted. Exit: 0 ok, 1 refused or error.
+# CI spans (CI_START..CI_END) pair by a run token, "run=<id>" as the first word of the text, when both ends carry it; tokenless ones pair
+# strictly serially. Overlap, an END with no START, or a token END without a partner is "ambiguous": no minutes, no result, every event listed.
+# A lone tokened CI_START is not ambiguous: it is a run still in progress (open, no minutes).
+# Format, events and who logs what: souls/_herd.md, "Lane log timing".
+import datetime
+import fcntl
+import json
+import os
+import re
+import stat
+import sys
+
+ROLES = ("trail-boss", "wrangler", "inspector", "drover", "owner", "ci")
+EVENTS = ("START", "PLAN_READY", "PLAN_GO", "BUILD_START", "REVIEW_START", "REVIEW_END", "SEND_BACK", "READY_FOR_PR", "OWNER_WORD",
+          "PR_OPEN", "PR_CLOSED", "CI_START", "CI_END", "MERGE", "INSTALLED", "PUBLIC_GREEN", "DONE", "BUSY", "IDLE")
+TEXT_MAX = 500
+READ_MAX = 8 * 1024 * 1024
+LINE = re.compile(r"@ (\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d[+-]\d\d:?\d\d) \| ([a-z-]+) \| ([A-Z_]+)(?: \|(?: (.*))?)?\Z")
+BAD_TEXT = re.compile(r"[|\x00-\x1f\x7f-\x9f\u2028\u2029]")
+
+
+class Fail(Exception):
+    pass
+
+
+def usage(why):
+    raise Fail("usage: " + why + " (see the header of drover-lane)")
+
+
+def need_abs(path):
+    if not path or not os.path.isabs(path) or "\x00" in path:
+        raise Fail("refused: the lane file path must be absolute")
+
+
+def now_iso():
+    return datetime.datetime.now().astimezone().replace(microsecond=0).isoformat()
+
+
+# ---- log ----
+
+def cmd_log(args):
+    pos, text, who = [], [], None
+    i, raw = 0, False
+    while i < len(args):
+        a = args[i]
+        if raw or len(pos) >= 2 and not a.startswith("--"):
+            (text if len(pos) >= 2 else pos).append(a)
+        elif a == "--":
+            raw = True
+        elif a == "--who":
+            i += 1
+            if i >= len(args):
+                usage("--who needs a role")
+            who = args[i]
+        elif a.startswith("--"):
+            usage("unknown flag " + a)
+        else:
+            (text if len(pos) >= 2 else pos).append(a)
+        i += 1
+    if len(pos) != 2:
+        usage("log <lane file> <EVENT> --who <role> [text...]")
+    path, event = pos
+    need_abs(path)
+    if event not in EVENTS:
+        raise Fail("refused: unknown event (one of: " + " ".join(EVENTS) + ")")
+    if who not in ROLES:
+        raise Fail("refused: --who must be one of: " + " ".join(ROLES))
+    body = " ".join(text)
+    if BAD_TEXT.search(body):
+        raise Fail("refused: the text must be one line with no '|' and no control characters")
+    if len(body.encode("utf-8")) > TEXT_MAX:
+        raise Fail("refused: the text is longer than %d bytes" % TEXT_MAX)
+    line = "@ %s | %s | %s | %s\n" % (now_iso(), who, event, body)
+    try:
+        fd = os.open(path, os.O_RDWR | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+    except OSError as e:
+        raise Fail("refused: cannot open the lane file (%s)" % (e.strerror or "error"))
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise Fail("refused: the lane file is not a regular file")
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        size = os.fstat(fd).st_size
+        lead = b""
+        if size > 0 and os.pread(fd, 1, size - 1) != b"\n":
+            lead = b"\n"  # a hand-written last line without a newline: start ours on a fresh line
+        os.write(fd, lead + line.encode("utf-8"))
+    finally:
+        os.close(fd)  # closing releases the lock
+    return 0
+
+
+# ---- report ----
+
+def parse_time(s):
+    try:
+        t = datetime.datetime.strptime(s, "%Y-%m-%dT%H:%M:%S%z")
+    except ValueError:
+        return None
+    return t
+
+
+def read_events(path):
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except OSError as e:
+        raise Fail("cannot read the lane file (%s)" % (e.strerror or "error"))
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise Fail("the lane file is not a regular file")
+        data = b""
+        while len(data) <= READ_MAX:
+            chunk = os.read(fd, 65536)
+            if not chunk:
+                break
+            data += chunk
+    finally:
+        os.close(fd)
+    if len(data) > READ_MAX:
+        raise Fail("the lane file is too large")
+    events, skipped = [], 0
+    for raw in data.decode("utf-8", "replace").split("\n"):
+        raw = raw.rstrip("\r")
+        if not raw.strip():
+            continue
+        m = LINE.match(raw)
+        t = parse_time(m.group(1)) if m else None
+        if not m or t is None or m.group(2) not in ROLES or m.group(3) not in EVENTS:
+            skipped += 1
+            continue
+        events.append({"t": t, "ts": m.group(1), "who": m.group(2), "ev": m.group(3), "text": m.group(4) or ""})
+    return events, skipped
+
+
+def minutes(a, b):
+    if a is None or b is None:
+        return None
+    s = (b["t"] - a["t"]).total_seconds()
+    if s < 0:
+        return None
+    return round(s / 60.0, 1)
+
+
+def first(events, name, lo=-1, hi=None):
+    for i in range(lo + 1, len(events) if hi is None else hi + 1):
+        if events[i]["ev"] == name:
+            return i
+    return None
+
+
+RUN = re.compile(r"run=[A-Za-z0-9_.:-]{1,40}\Z")
+
+
+def ci_event(e):
+    words = e["text"].split(" ", 1)
+    if RUN.match(words[0]):
+        return words[0], (words[1] if len(words) > 1 else "").strip()
+    return None, e["text"].strip()
+
+
+def ci_entry(start, end, ambiguous, run=None, result=None):
+    ok = start is not None and end is not None and not ambiguous
+    word = (result or "").split(" ")[0]
+    return {"start": start["ts"] if start else None, "end": end["ts"] if end else None,
+            "minutes": minutes(start, end) if ok else None, "result": (word or None) if ok else None,
+            "run": run, "ambiguous": ambiguous}
+
+
+def pair_ci(ev, lo, hi):
+    """CI spans of one cycle. A run token ("run=<id>" as the first word of the text) pairs a CI_START with its CI_END when both
+    carry it; tokenless events pair strictly serially. Anything unclear (overlap, an END with no START, a token without a partner,
+    a repeated token) is ambiguous: no minutes, no result, every event listed. A lone START is just a run still in progress."""
+    out, by_token, depth, group = [], {}, 0, []
+
+    def close_group():
+        starts = [g for g in group if g[1]["ev"] == "CI_START"]
+        ends = [g for g in group if g[1]["ev"] == "CI_END"]
+        if len(starts) == 1 and len(ends) == 1:
+            out.append((starts[0][0], ci_entry(starts[0][1], ends[0][1], False, None, ci_event(ends[0][1])[1])))
+        else:
+            for i, e in group:
+                out.append((i, ci_entry(e if e["ev"] == "CI_START" else None, e if e["ev"] == "CI_END" else None, True)))
+        del group[:]
+
+    for i in range(lo, hi + 1):
+        e = ev[i]
+        if e["ev"] not in ("CI_START", "CI_END"):
+            continue
+        token, _ = ci_event(e)
+        if token is not None:
+            by_token.setdefault(token, []).append((i, e))
+            continue
+        if e["ev"] == "CI_START":
+            depth += 1
+            group.append((i, e))
+        elif depth == 0:
+            out.append((i, ci_entry(None, e, True)))
+        else:
+            depth -= 1
+            group.append((i, e))
+            if depth == 0:
+                close_group()
+    if group:
+        if len(group) == 1:
+            out.append((group[0][0], ci_entry(group[0][1], None, False)))
+        else:
+            close_group()
+    for token, items in by_token.items():
+        starts = [g for g in items if g[1]["ev"] == "CI_START"]
+        ends = [g for g in items if g[1]["ev"] == "CI_END"]
+        if len(starts) == 1 and len(ends) == 1 and starts[0][0] < ends[0][0]:
+            out.append((starts[0][0], ci_entry(starts[0][1], ends[0][1], False, token, ci_event(ends[0][1])[1])))
+        elif len(starts) == 1 and not ends:
+            out.append((starts[0][0], ci_entry(starts[0][1], None, False, token)))
+        else:
+            for j, e in items:
+                out.append((j, ci_entry(e if e["ev"] == "CI_START" else None, e if e["ev"] == "CI_END" else None, True, token)))
+    return [x for _, x in sorted(out, key=lambda t: t[0])]
+
+
+def build_cycles(ev):
+    cycles = []
+    plan_go = first(ev, "PLAN_GO")
+    prev_end = plan_go if plan_go is not None else -1
+    while True:
+        op = first(ev, "READY_FOR_PR", prev_end)
+        if op is None:
+            break
+        end = None
+        for i in range(op + 1, len(ev)):
+            if ev[i]["ev"] in ("MERGE", "PR_CLOSED"):
+                end = i
+                break
+        hi = end if end is not None else len(ev) - 1
+        owner_i = first(ev, "OWNER_WORD", op - 1, hi)
+        pr_i = first(ev, "PR_OPEN", op, hi)
+        stop = owner_i if owner_i is not None else pr_i if pr_i is not None else hi + 1
+        build_end = None
+        for i in range(op, min(stop, hi + 1)):
+            if ev[i]["ev"] == "READY_FOR_PR":
+                build_end = i
+        if build_end is None:
+            build_end = op
+        if not cycles:
+            build_start = plan_go
+        else:
+            build_start = first(ev, "BUILD_START", prev_end, build_end)
+        pr_end = first(ev, "MERGE", pr_i, hi) if pr_i is not None else None
+        ci = pair_ci(ev, op, hi)
+        kind = "open" if end is None else ("merge" if ev[end]["ev"] == "MERGE" else "closed")
+        cycles.append({
+            "cycle": len(cycles) + 1,
+            "build": minutes(ev[build_start], ev[build_end]) if build_start is not None else None,
+            "owner": minutes(ev[build_end], ev[owner_i]) if owner_i is not None else None,
+            "pr": minutes(ev[pr_i], ev[pr_end]) if pr_i is not None and pr_end is not None else None,
+            "end": kind,
+            "ci": ci,
+            "ci_ambiguous": sum(1 for k in ci if k["ambiguous"]),
+        })
+        if end is None:
+            break
+        prev_end = end
+    return cycles
+
+
+def build_members(ev):
+    members, open_at = {}, {}
+    for e in ev:
+        if e["ev"] not in ("BUSY", "IDLE"):
+            continue
+        m = members.setdefault(e["who"], {"minutes": 0.0, "spans": 0, "dup": 0, "orphan": 0, "open": None})
+        if e["ev"] == "BUSY":
+            if e["who"] in open_at:
+                m["dup"] += 1
+            else:
+                open_at[e["who"]] = e
+        elif e["who"] not in open_at:
+            m["orphan"] += 1
+        else:
+            start = open_at.pop(e["who"])
+            m["minutes"] += max(0.0, (e["t"] - start["t"]).total_seconds() / 60.0)
+            m["spans"] += 1
+    for who, start in open_at.items():
+        members[who]["open"] = start["ts"]
+    for m in members.values():
+        m["minutes"] = round(m["minutes"], 1)
+    return members
+
+
+def build_report(path):
+    ev, skipped = read_events(path)
+    s = first(ev, "START")
+    g = first(ev, "PLAN_GO")
+    last_merge = max((i for i, e in enumerate(ev) if e["ev"] == "MERGE"), default=None)
+    done = max((i for i, e in enumerate(ev) if e["ev"] == "DONE"), default=None)
+    at = lambda i: ev[i] if i is not None else None
+    return {
+        "events": len(ev),
+        "skipped": skipped,
+        "card": {
+            "start_to_plan_go": minutes(at(s), at(g)),
+            "merge_to_done": minutes(at(last_merge), at(done)) if last_merge is not None and done is not None and done > last_merge else None,
+            "start_to_done": minutes(at(s), at(done)),
+        },
+        "cycles": build_cycles(ev),
+        "members": build_members(ev),
+    }
+
+
+def cell(v):
+    if v is None:
+        return "n/a"
+    return str(int(v)) if v == int(v) else str(v)
+
+
+def render(r):
+    out = []
+    c = r["card"]
+    out.append("card (minutes): start→go %s · merge→done %s · start→done %s" % (cell(c["start_to_plan_go"]), cell(c["merge_to_done"]), cell(c["start_to_done"])))
+    if r["cycles"]:
+        out.append("")
+        out.append("%-5s %-8s %-8s %-8s %s" % ("cycle", "build", "owner", "PR", "end"))
+        for y in r["cycles"]:
+            out.append("%-5d %-8s %-8s %-8s %s" % (y["cycle"], cell(y["build"]), cell(y["owner"]), cell(y["pr"]), y["end"]))
+            for k in y["ci"]:
+                out.append("      CI %s → %s  %s min  %s%s" % (k["start"] or "n/a", k["end"] or "n/a", cell(k["minutes"]), k["result"] or "n/a", "  ambiguous (not paired)" if k["ambiguous"] else ""))
+    else:
+        out.append("no PR cycle in the log (no READY_FOR_PR)")
+    out.append("")
+    out.append("%-12s %-8s %s" % ("member", "minutes", "notes"))
+    for who in sorted(r["members"]):
+        m = r["members"][who]
+        notes = ["%d span%s" % (m["spans"], "" if m["spans"] == 1 else "s")]
+        if m["dup"]:
+            notes.append("%d dup BUSY" % m["dup"])
+        if m["orphan"]:
+            notes.append("%d orphan IDLE" % m["orphan"])
+        if m["open"]:
+            notes.append("open since %s (not summed)" % m["open"])
+        out.append("%-12s %-8s %s" % (who, cell(m["minutes"]), ", ".join(notes)))
+    if r["skipped"]:
+        out.append("")
+        out.append("%d line%s skipped (free text or malformed)" % (r["skipped"], "" if r["skipped"] == 1 else "s"))
+    return "\n".join(out) + "\n"
+
+
+def cmd_report(args):
+    as_json = "--json" in args
+    rest = [a for a in args if a != "--json"]
+    if len(rest) != 1 or rest[0].startswith("--"):
+        usage("report <lane file> [--json]")
+    need_abs(rest[0])
+    r = build_report(rest[0])
+    sys.stdout.write(json.dumps(r, indent=2) + "\n" if as_json else render(r))
+    return 0
+
+
+def main(argv):
+    if not argv:
+        usage("drover-lane log|report ...")
+    verb, rest = argv[0], argv[1:]
+    if verb == "log":
+        return cmd_log(rest)
+    if verb == "report":
+        return cmd_report(rest)
+    usage("unknown verb " + verb)
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main(sys.argv[1:]))
+    except Fail as e:
+        sys.stderr.write(str(e) + "\n")
+        sys.exit(1)

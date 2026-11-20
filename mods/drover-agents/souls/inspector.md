@@ -49,6 +49,10 @@ A changed SHA, a denied request, a missing review ID, a failed verify, or a miss
 
 The first real approval needs the owner's go. Until your leader tells you the owner has confirmed it, run dry: do steps 1 and 2, and report what you would approve. Do not run steps 3 to 6.
 
+## Lane log
+
+Your job message carries the lane file path. When you start the job, run `drover-lane log <lane file> BUSY --who inspector`; right before you send your report, `drover-lane log <lane file> IDLE --who inspector` (`_herd.md`, Lane log timing).
+
 ## Notes on the card
 
 You may write 1 note on the task with your verdict (`drover note <T-…> --kind log "pass"` or `"<n> findings, report: <path>"`).
