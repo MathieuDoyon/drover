@@ -21,6 +21,7 @@
 //     or E_NODE_NOT_FOUND / E_PYTHON_NOT_FOUND. Exit status is always 0. DROVER_FIND_SYSTEM_DIRS (colon list) replaces the built-in common install locations.
 import { test, afterEach } from "node:test";
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { readFileSync, writeFileSync, appendFileSync, utimesSync, existsSync, readdirSync, rmSync, chmodSync, mkdirSync, symlinkSync, statSync, realpathSync, mkdtempSync, readlinkSync } from "node:fs";
 import { spawnSync, spawn } from "node:child_process";
 import { join, dirname, posix } from "node:path";
@@ -59,6 +60,7 @@ const noTilde = (rt) => { for (const c of rt.calls) for (const a of c.kind === "
 const manifestOf = (m, rel = CURRENT) => JSON.parse(readFileSync(join(m.home, rel, "MANIFEST.json"), "utf8"));
 const curId = (m) => RT.currentOf(m.home)?.split("/").pop() ?? null;
 const sha = (text) => spawnSync("shasum", ["-a", "256"], { input: text, encoding: "utf8" }).stdout.split(" ")[0];
+const sha256 = (bytes) => createHash("sha256").update(bytes).digest("hex"); // in process: assertSane runs per kill point, 15 shasum spawns each were most of its cost
 
 async function fresh(extra = {}, mo = {}) {
   const m = machine(mo), s = source();
@@ -319,6 +321,68 @@ test("install: the activation is two calls (temp link, then replace); a kill bet
 // A SAMPLE of the kill points (the first calls, around the hold and the switch, the last calls, and every 4th call in between): each call costs a process
 // on this computer, and the full sweep made the suite minutes long. The sample does not prove that every window is safe. The windows that matter are named in
 // the phase-boundary test below (a kill at the edge of each step of an install), and the publisher's own inside-the-call window has its own test.
+// Runs fn(point) for every point with at most `limit` in flight (each point owns its own clone, so they cannot touch one another). After the first failure nothing
+// new is started; every started worker is awaited (a point still running must not outlive the test and write into a cleaned-up clone); then the failure of the
+// lowest point in `points` order is thrown. Every point still gets every assertion: this changes when points run, never which.
+async function forEachPoint(points, fn, limit = 4) {
+  const failures = new Map();
+  let next = 0, failed = false;
+  const worker = async () => {
+    while (!failed && next < points.length) {
+      const i = next++;
+      try { await fn(points[i]); } catch (e) { failed = true; failures.set(i, e); }
+    }
+  };
+  await Promise.allSettled(Array.from({ length: Math.min(limit, points.length) }, worker));
+  if (failures.size) throw failures.get(Math.min(...failures.keys()));
+}
+const deferred = () => { let resolve; const promise = new Promise((a) => { resolve = a; }); return { promise, resolve }; };
+const drainTicks = async (ticks = 20) => { for (let i = 0; i < ticks; i++) await new Promise((r) => setImmediate(r)); };
+test("forEachPoint: runs every point, with exactly `limit` in flight at once (a serial helper fails this)", async () => {
+  const gates = new Map(), ran = [];
+  let inFlight = 0, peak = 0;
+  const points = [10, 20, 30, 40, 50, 60, 70, 80, 90];
+  const all = forEachPoint(points, async (n) => {
+    inFlight++; peak = Math.max(peak, inFlight);
+    gates.set(n, deferred());
+    await gates.get(n).promise;
+    ran.push(n); inFlight--;
+  }, 4);
+  await until(() => gates.size === 4, "4 workers started");
+  assert.equal(inFlight, 4, "the pool fills to the limit before any worker finishes");
+  for (const n of points) { await until(() => gates.has(n), `point ${n} started`); gates.get(n).resolve(); }
+  await all;
+  assert.equal(peak, 4);
+  assert.deepEqual([...ran].sort((a, b) => a - b), points, "every point ran once");
+});
+test("forEachPoint: a failure stops new work, waits for every started worker, then throws the failure of the lowest point", async () => {
+  const gates = new Map(), started = [];
+  let lateDone = false, settled = false;
+  const all = forEachPoint([1, 2, 3, 4, 5, 6], async (n) => {
+    started.push(n);
+    gates.set(n, deferred());
+    await gates.get(n).promise;
+    if (n === 3) throw new Error("point 3 failed");
+    if (n === 1) lateDone = true;
+  }, 3).catch((e) => e).finally(() => { settled = true; });
+  await until(() => gates.size === 3, "points 1-3 started");
+  gates.get(3).resolve(); // point 3 fails while 1 and 2 are still pending
+  await drainTicks();
+  assert.equal(settled, false, "the helper does not settle while a started worker is pending");
+  assert.deepEqual(started, [1, 2, 3], "no new point starts after the failure");
+  gates.get(2).resolve();
+  await drainTicks();
+  assert.equal(settled, false, "still waiting for point 1");
+  gates.get(1).resolve();
+  const err = await all;
+  assert.equal(lateDone, true, "the late worker finished before the helper settled");
+  assert.equal(err.message, "point 3 failed");
+  assert.deepEqual(started, [1, 2, 3]);
+});
+test("forEachPoint: with two failures the lowest point's failure is the one thrown", async () => {
+  const err = await forEachPoint([1, 2, 3], async (n) => { if (n > 1) throw new Error(`point ${n} failed`); await drainTicks(); throw new Error("point 1 failed"); }, 3).catch((e) => e);
+  assert.equal(err.message, "point 1 failed");
+});
 const killSet = (total, ...marks) => Array.from({ length: total }, (_, i) => i + 1).filter((n) => n <= 4 || n >= total - 3 || n % 4 === 0 || marks.some((k) => Math.abs(n - k) <= 1));
 // One scenario, every kill point.
 async function killPoints(prepared, srcRoot, install) {
@@ -335,7 +399,7 @@ function assertSane(m, label) {
   for (const d of RT.genDirs(m.home).filter((x) => !x.startsWith("."))) {
     assert.ok(existsSync(join(m.home, GEN, d, "MANIFEST.json")), `${label}: published gen ${d} has no MANIFEST.json`);
     const man = JSON.parse(readFileSync(join(m.home, GEN, d, "MANIFEST.json"), "utf8"));
-    for (const f of man.files) assert.equal(sha(readFileSync(join(m.home, GEN, d, f.path))), f.sha256, `${label}: ${d}/${f.path} is not what its manifest says`);
+    for (const f of man.files) assert.equal(sha256(readFileSync(join(m.home, GEN, d, f.path))), f.sha256, `${label}: ${d}/${f.path} is not what its manifest says`);
   }
 }
 
@@ -348,7 +412,7 @@ for (const scenario of ["fresh", "update"]) {
     const { doctor } = await M();
     const { total, K, before, target } = await killPoints(base, s, install);
     assert.ok(total > 5 && K > 1 && K <= total);
-    for (const n of killSet(total, K)) {
+    await forEachPoint(killSet(total, K), async (n) => {
       const c = clone(base);
       const rt = RT.makeRuntime(c, { kill: n });
       await assert.rejects(install(rt, o(c, s)), /killed/, `kill ${n}`);
@@ -361,7 +425,7 @@ for (const scenario of ["fresh", "update"]) {
       const res = await install(again, o(c, s, { holdEnv: DEAD })); // the killed installer's pid is this test process: pretend it is gone
       assert.equal(res.ok, true, `rerun after kill ${n}: ${JSON.stringify(res)}`);
       assert.equal(curId(c), (await M()).buildManifest(s).id, `rerun after kill ${n} ends on the target generation`);
-    }
+    });
   });
 }
 
@@ -689,7 +753,7 @@ test("hold: install killed at runner calls keeps the hold from the moment it was
   const firstHeld = trace.find((t) => t.hold === "held").n; // the hold was taken between call firstHeld-1 and call firstHeld
   assert.ok(firstHeld >= 2, "the read-only probe comes first");
   const target = buildManifest(s).id;
-  for (const n of killSet(clean.calls.length, firstHeld)) {
+  await forEachPoint(killSet(clean.calls.length, firstHeld), async (n) => {
     const c = clone(base);
     const before = holdFiles(c).length;
     await assert.rejects(install(RT.makeRuntime(c, { kill: n }), o(c, s)), /killed/, `kill ${n}`);
@@ -711,7 +775,7 @@ test("hold: install killed at runner calls keeps the hold from the moment it was
     assert.equal((await newest(c)).record.state, "cleared", `rerun after kill ${n} clears the hold`);
     assert.equal(curId(c), target);
     assert.equal((await doctor(RT.makeRuntime(c), o(c, s))).ok, true);
-  }
+  });
 });
 
 test("hold: while one installer holds, a second installer (live owner) stops with `held`, for the same machine and for another one", async () => {
@@ -981,7 +1045,7 @@ test("review 7: phase-boundary kills: a kill at the edge of every step of an upd
   const points = [...new Set([...edges, ...bounds])].filter((n) => n <= clean.calls.length).sort((a, b) => a - b);
   assert.ok(points.length >= 12, `phase-boundary kill points: ${points.join(",")}`);
   const before = RT.currentOf(base.home);
-  for (const n of points) {
+  await forEachPoint(points, async (n) => {
     const c = clone(base);
     await assert.rejects(install(RT.makeRuntime(c, { kill: n }), o(c, s)), /killed/, `kill ${n} (${phases[n - 1]})`);
     assert.equal(RT.currentOf(c.home), n <= K ? before : `gen/${target}`, `kill before call ${n} (${phases[n - 1]})`);
@@ -991,7 +1055,7 @@ test("review 7: phase-boundary kills: a kill at the edge of every step of an upd
     const res = await install(RT.makeRuntime(c), o(c, s, { holdEnv: DEAD }));
     assert.equal(res.ok, true, `rerun after kill ${n}: ${JSON.stringify(res)}`);
     assert.equal(curId(c), target);
-  }
+  });
 });
 
 // ====================================================================================================== review round 2

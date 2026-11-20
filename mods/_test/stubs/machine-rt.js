@@ -3,7 +3,7 @@
 // HOME = a temp dir, cwd = that dir, no shell, no `~` expansion, and a PATH made only of the tools the fixture allows.
 // Nothing waits on a clock: each call does its work at once (the methods are async only because the real runner is, and so an `after` hook may await another actor), and a kill is an error thrown at a chosen call.
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, lstatSync, readlinkSync, symlinkSync, chmodSync, realpathSync, existsSync, rmSync, cpSync, statSync } from "node:fs";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join, dirname, isAbsolute, resolve } from "node:path";
 
@@ -56,6 +56,22 @@ export function makeMachine({ mktemp = "ok", hasher = "both", timeout = false, p
   return { name, root, home, bin, env, managers, nodeWrapper, appHome: join(root, "app-home") };
 }
 
+// One argv on this computer, asynchronously (the event loop stays free, so several fake remotes can work at once): cwd = the fake home, env = the fake PATH, no shell.
+// stdin is written then closed; stdout and stderr are collected as utf8; the result arrives on 'close'. A spawn error is code 127 with its message in stderr.
+export function run(argv, machine, stdin = "") {
+  return new Promise((resolveRun) => {
+    let out = "", err = "", settled = false;
+    const finish = (r) => { if (!settled) { settled = true; resolveRun(r); } };
+    const child = spawn(argv[0], argv.slice(1), { cwd: machine.home, env: machine.env, stdio: ["pipe", "pipe", "pipe"] });
+    child.stdout.setEncoding("utf8").on("data", (d) => { out += d; });
+    child.stderr.setEncoding("utf8").on("data", (d) => { err += d; });
+    child.on("error", (e) => finish({ code: 127, stdout: "", stderr: String(e.message) }));
+    child.on("close", (code) => finish({ code: code ?? 1, stdout: out, stderr: err }));
+    child.stdin.on("error", () => {}); // a child that exits without reading its stdin (EPIPE, ECONNRESET) is not a failure: its own status is the result
+    child.stdin.end(stdin);
+  });
+}
+
 // The runtime: the object the installer is given. `kill` throws before call N (1-based); `partial` writes half of write-call N, then throws.
 // `after(call)` runs synchronously after each call (the CLI-keeps-working probe). `mangle(path, text)` rewrites what a write lands (a damaged transfer).
 export function makeRuntime(machine, { kill = 0, partial = 0, after = null, mangle = null, machineName = machine.name } = {}) {
@@ -68,11 +84,10 @@ export function makeRuntime(machine, { kill = 0, partial = 0, after = null, mang
       step();
       if (!Array.isArray(argv) || argv.some((a) => typeof a !== "string")) throw new Error("rt.exec: argv must be an array of strings");
       const c = record({ kind: "exec", machine: m, argv, stdin, timeout });
-      const r = spawnSync(argv[0], argv.slice(1), { cwd: machine.home, env: machine.env, input: stdin, encoding: "utf8" });
-      if (r.error) { c.code = 127; await done(c); return { code: 127, stdout: "", stderr: String(r.error.message) }; }
-      c.code = r.status ?? 1;
+      const r = await run(argv, machine, stdin);
+      c.code = r.code;
       await done(c);
-      return { code: c.code, stdout: r.stdout, stderr: r.stderr };
+      return r;
     },
     async write(m, path, text) {
       const c = record({ kind: "write", machine: m, path, text });

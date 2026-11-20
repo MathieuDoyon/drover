@@ -125,18 +125,35 @@ elif what == "squads":
     if not cfg: print("default squads: cattle-drive, stray, scouting, dev-review (open the Squads screen once to save them)")
 PY
 }
+# write_polls: poll count for `move` and `add` (one poll = 0.25 s; the default is 5 s = 20 polls). DROVER_WRITE_WAIT exists for tests: a whole number of
+# milliseconds in [0, 5000] (ceil(N/250) polls). Anything else (unset, empty, non-numeric, negative, decimal, above 5000, junk around the digits) keeps the default.
+send_polls=""  # set per call (send_polls=N send ...) so the environment never leaks in
+write_polls() {
+  local v="${DROVER_WRITE_WAIT:-}"
+  if [[ "$v" =~ ^[0-9]{1,4}$ ]] && [ $(( 10#$v )) -le 5000 ]; then echo $(( (10#$v + 249) / 250 )); else echo 20; fi
+}
 send() {  # body, seconds to wait for the answer, optional name suffix
   dir="$home/data/drover-inbox"; mkdir -p "$dir"
   name="$(date +%s)-$$${3:-}"
   printf '%s\n' "$1" > "$dir/.$name.tmp"
   mv "$dir/.$name.tmp" "$dir/$name.json"
-  for _ in $(seq $(( $2 * 4 ))); do
-    if [ -s "$dir/$name.result" ]; then  # non-empty: a consumer's writeFile creates the file empty first; an empty one is not an answer yet
-      result="$(cat "$dir/$name.result")"; rm -f "$dir/$name.result"; echo "$result"
-      [[ "$result" == ok:* ]]; exit
-    fi
-    sleep 0.25
-  done
+  if [ -n "$send_polls" ]; then  # move/add only (write_polls): an exact count, 0 allowed, so no seq (BSD seq 0 counts down and would poll twice)
+    for (( i = 0; i < send_polls; i++ )); do
+      if [ -s "$dir/$name.result" ]; then  # non-empty: a consumer's writeFile creates the file empty first; an empty one is not an answer yet
+        result="$(cat "$dir/$name.result")"; rm -f "$dir/$name.result"; echo "$result"
+        [[ "$result" == ok:* ]]; exit
+      fi
+      sleep 0.25
+    done
+  else  # every other caller: the legacy loop, unchanged
+    for _ in $(seq $(( $2 * 4 ))); do
+      if [ -s "$dir/$name.result" ]; then  # non-empty: a consumer's writeFile creates the file empty first; an empty one is not an answer yet
+        result="$(cat "$dir/$name.result")"; rm -f "$dir/$name.result"; echo "$result"
+        [[ "$result" == ok:* ]]; exit
+      fi
+      sleep 0.25
+    done
+  fi
   echo "queued: no Drover Tasks, Board or Wakeups mod is open; it applies when one opens"
 }
 # Agents export/import: this script only carries text. Validation, the secret scan and the merge rules live in the consuming mod (JS).
@@ -398,7 +415,7 @@ case "${1:-}" in
   move)
     [ $# -eq 3 ] && [[ "$2" =~ ^T-[A-Z0-9]+$ ]] || usage
     col="$(read_shared column "$3")" || exit 2  # a name or a stored id in, the stored id on the wire
-    send "{\"op\":\"move\",\"id\":\"$2\",\"column\":\"$col\",\"from\":$(json "${HC_TERMINAL_ID:-}")}" 5 ;;
+    send_polls="$(write_polls)" send "{\"op\":\"move\",\"id\":\"$2\",\"column\":\"$col\",\"from\":$(json "${HC_TERMINAL_ID:-}")}" 5 ;;
   next)
     [ $# -eq 1 ] || usage
     send "{\"op\":\"next\",\"from\":$(json "${HC_TERMINAL_ID:-}")}" 5 ;;
@@ -422,7 +439,7 @@ case "${1:-}" in
     if [ -n "$assignee" ]; then
       case "$assignee" in agent:?*|squad:?*) aj="{\"kind\":$(json "${assignee%%:*}"),\"id\":$(json "${assignee#*:}")}" ;; *) usage ;; esac
     fi
-    send "{\"op\":\"add\",\"title\":$(json "$title"),\"desc\":$(json "$desc"),\"tags\":$tj,\"column\":$(json "$column"),\"priority\":$(json "$priority"),\"project\":$(json "$project"),\"assignee\":$aj,\"parent\":$(json "$parent")}" 5 ;;
+    send_polls="$(write_polls)" send "{\"op\":\"add\",\"title\":$(json "$title"),\"desc\":$(json "$desc"),\"tags\":$tj,\"column\":$(json "$column"),\"priority\":$(json "$priority"),\"project\":$(json "$project"),\"assignee\":$aj,\"parent\":$(json "$parent")}" 5 ;;
   start)
     [ $# -ge 3 ] || usage
     task="$2"; [ "$task" = "-" ] && task=""
