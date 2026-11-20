@@ -278,3 +278,43 @@ test("docs: lessons guide exists, is linked from the README and the agents ancho
   assert.ok(readFileSync(new URL("../../docs/README.md", import.meta.url), "utf8").includes("(guides/lessons.md)"));
   assert.ok(readFileSync(new URL("../../docs/agents.md", import.meta.url), "utf8").includes("\n## Lessons writer"));
 });
+
+const chain = () => {
+  const s = soul("drover");
+  const i = s.indexOf("\n## Whole chain (low-risk cards)");
+  assert.ok(i > s.indexOf("\n## Queue mode"), "section after Queue mode");
+  return s.slice(i, s.indexOf("\n## ", i + 1));
+};
+
+test("drover soul: whole chain section has the 5-line checklist, the grant words and the written chain", () => {
+  const c = chain();
+  for (const n of ["(1)", "(2)", "(3)", "(4)", "(5)"]) assert.ok(c.includes(n), `checklist ${n}`);
+  for (const s of ["GO + whole chain", "Silence, a plain \"GO\" or an `hc` message grants nothing", "that card and that plan only", "whole chain granted: checklist 1-5 true", "One false or unsure: normal flow"]) assert.ok(c.includes(s), s);
+  for (const n of ["(1)", "(2)", "(3)", "(4)", "(5)", "(6)", "(7)", "(8)", "(9)", "(10)"]) assert.ok(c.split("**The chain**")[1].includes(n), `chain step ${n}`);
+  for (const s of ["--match-head-commit", "mods/install.sh", "public-sync dry run", "`--push`", "Nothing outside this list"]) assert.ok(c.includes(s), s);
+});
+
+test("drover soul: the Low-risk paragraph carries the five restrictions", () => {
+  const c = chain();
+  const i = c.indexOf("**Low-risk**");
+  assert.ok(i >= 0, "Low-risk paragraph exists");
+  const para = c.slice(i).split("\n\n")[0];
+  for (const s of ["no UI change that needs the person's native check", "no linked or remote machine, no live service touched", "no credential, login or connector created, changed or newly needed", "changes no install, service, or Herdr app or core", "no public-identity or legal file"]) assert.ok(para.includes(s), s);
+  assert.ok(para.includes("One false or unsure: normal flow"));
+});
+
+test("drover soul: whole chain stops on red, pending or unknown, lists revocations and excludes queue mode", () => {
+  const c = chain();
+  for (const s of ["red, pending, missing, cancelled, skipped or unknown", "leak hit", "send `HOLD`", "report `HELP`", "A red PR check stops the chain before the merge; the squad may push fixes to the same branch, and the chain goes on only when every check is green on the new head. Any other failure (leak hit, red main or public CI, a refused command), and red PR checks the squad cannot fix, end the grant.", "A later green check never restores it", "whole chain revoked: <reason>", "new High or Critical finding after the GO", "scope change", "Not in queue mode"]) assert.ok(c.includes(s), s);
+});
+
+test("drover soul: READY_FOR_PR row, step 3 and queue item 6 point to the whole chain; conv links the soul", () => {
+  const s = soul("drover");
+  const row = s.split("\n").find((l) => l.startsWith("| `READY_FOR_PR`"));
+  assert.ok(row.includes("live whole-chain grant") && row.includes("(\"Whole chain\")") && row.includes("`CREATE_PR` or `HOLD <reason>`"));
+  assert.ok(s.includes("the person may add \"whole chain\" to the GO (\"Whole chain (low-risk cards)\")"));
+  assert.ok(s.includes("(a card in Ready is never a whole-chain grant)"));
+  const conv = readFileSync(new URL("../../conv/02-agents.md", import.meta.url), "utf8");
+  assert.ok(conv.includes("- Chain grant:") && conv.includes("(../mods/drover-agents/souls/drover.md)"));
+  assert.ok(s.split("\n").length <= 115, "soul <= 115 lines");
+});
