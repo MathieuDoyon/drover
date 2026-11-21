@@ -1,6 +1,6 @@
 // Canonical copy lives in mods/_lib; mods/install.sh copies it into each drover-* mod.
 // The herdr side of the store: tasks persist in shared state (shared.json, written atomically).
-import { shared, setShared, openOverlay, exec, hc, readTextFile, writeTextFile, notify, focused, appHome, home, watchFolder, spaces, panes, agents, terminals } from "herdr";
+import { shared, setShared, openOverlay, exec, hc, readTextFile, writeTextFile, notify, focused, appHome, home, watchFolder, spaces, panes, agents, terminals, keys as hostKeys } from "herdr";
 import * as fs from "fs/promises";
 import { KEY, SEEN_KEY, PROJECTS_KEY, firstSight, list, add, update, bySource, addCommand, applyCommand, columnName, repoOf, projectOf, projectKey, projectAddRequest, projectDiff, PROTOCOL, inboxGate, arrivalOf, addProject, projectNamed, nextReport, claim, release, editSize, CLAIMING, clearClaimToken } from "./store.js";
 import { base64, httpProblem, jiraIssue, jiraKey, githubIssue, prItems } from "./sources.js";
@@ -204,6 +204,10 @@ export function needsWorld() {
 export function runsWorld({ resume = false } = {}) {
   return { runs: loadRuns(), tasks: load(), projects: loadProjects(), agents: agents(), terminals: terminals(),
     ...(resume ? { resumeOf: (id) => { const state = resumeState(id); return { state, can: state === "none" && canResume(id) }; } } : {}) };
+}
+// What the Jump palette reads, once per refresh (never in render): every card (local + the already loaded remote cache: no watch, no probe), projects, runs, agents AND terminals.
+export function jumpWorld() {
+  return { tasks: loadMerged().tasks, projects: loadProjects(), runs: loadRuns(), agents: agents(), terminals: terminals() };
 }
 // A screen's Needs-you cache: refreshed once now and every second by its own timer (live agent status has no event), repainting only when the result changed.
 // gate(): the screen's switch (false: no refresh, no remote read). remote: this screen also keeps the remote boards fresh (a mod copy may be the only one open).
@@ -1989,4 +1993,7 @@ export const keysIo = () => ({
   path: `${appHome()}/keys.json`,
   now: () => new Date().toISOString().replace(/[:.]/g, "-"),
 });
-export const setShortcut = (shortcut, on) => applyKey(keysIo(), shortcut, on);
+// Herdr's own effective bindings (defaults, keys.json, terminal section): the clash check must see what a keys.json text alone cannot. Called when the
+// Shortcuts list loads and again right before a flip, never in render. A failed lookup (a throw, or not a list) gives null: keys.js then refuses to enable, it never reads null as "no clash".
+export const builtinKeys = () => { try { const k = hostKeys(); return Array.isArray(k) ? k : null; } catch { return null; } };
+export const setShortcut = (shortcut, on, builtin) => applyKey(keysIo(), shortcut, on, builtin);

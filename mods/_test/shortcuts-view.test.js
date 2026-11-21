@@ -95,3 +95,77 @@ test("masked Drover binding: switch is ON with the warning; flipping removes onl
   assert.deepEqual(JSON.parse(files["/h/keys.json"]), { global: {}, terminal: { "cmd-shift-c": "terminal.copy" } });
   assert.equal(view.keyState.get("newtask").installed, false);
 });
+
+// ---- B7: Drover Config hands Herdr's own binding list (keys()) to the clash check, on load and again right before a flip ----
+test("a terminal cmd-k reported by keys() refuses the real Config flip: nothing written, no backup", async () => {
+  const text = canon({ global: { "cmd-b": "layout.toggle:sidebar" } });
+  const { view, files } = await open(text);
+  globalThis.__host.keys = [{ section: "terminal", keys: "cmd-k", action: "terminal.clear" }];
+  await view.loadKeys();
+  assert.equal(view.keyState.get("jump").state, "conflict");
+  const jump = SHORTCUT("jump");
+  await view.flip(jump);
+  assert.equal(files["/h/keys.json"], text);
+  assert.deepEqual(Object.keys(files).filter((k) => k.includes(".bak-")), []);
+  assert.match(view.keyErrors.get("jump"), /cmd-k/);
+  delete globalThis.__host.keys;
+});
+
+test("the binding list is read again right before a flip (a stale load does not let it through)", async () => {
+  const text = canon({ global: {} });
+  const { view, files } = await open(text);
+  assert.equal(view.keyState.get("jump").state, "off");
+  globalThis.__host.keys = [{ section: "terminal", keys: "cmd-k", action: "terminal.clear" }]; // appeared after the load
+  await view.flip(SHORTCUT("jump"));
+  assert.equal(files["/h/keys.json"], text);
+  delete globalThis.__host.keys;
+});
+
+test("without a built-in clash the jump switch writes cmd-k; the first load wrote nothing", async () => {
+  const text = canon({ global: {} });
+  const { view, files } = await open(text);
+  assert.equal(files["/h/keys.json"], text);
+  await view.flip(SHORTCUT("jump"));
+  assert.equal(JSON.parse(files["/h/keys.json"]).global["cmd-k"], "mod.open:drover-jump");
+});
+
+// ---- B7 review fixes through the real Config path ----
+const withKeys = (v) => Object.defineProperty(globalThis.__host, "keys", { configurable: true, ...(typeof v === "function" ? { get: v } : { value: v }) });
+const restoreKeys = () => { delete globalThis.__host.keys; };
+
+test("keys() throwing or malformed: the jump flip is refused, nothing written, a visible message", async () => {
+  for (const v of [() => { throw new Error("no keys"); }, "garbage", [null]]) {
+    const text = canon({ global: {} });
+    const { view, files } = await open(text);
+    withKeys(v);
+    await view.loadKeys();
+    assert.equal(view.keyState.get("jump").state, "unavailable");
+    assert.match(view.keyState.get("jump").message, /binding/i);
+    await view.flip(SHORTCUT("jump"));
+    assert.equal(files["/h/keys.json"], text);
+    assert.deepEqual(Object.keys(files).filter((k) => k.includes(".bak-")), []);
+    assert.match(view.keyErrors.get("jump"), /binding/i);
+    restoreKeys();
+  }
+});
+
+test("an installed jump shortcut can still be switched off while keys() is unavailable", async () => {
+  const text = canon({ global: { "cmd-k": "mod.open:drover-jump" } });
+  const { view, files } = await open(text);
+  withKeys(() => { throw new Error("no keys"); });
+  await view.flip(SHORTCUT("jump"));
+  assert.equal(JSON.parse(files["/h/keys.json"]).global["cmd-k"], undefined);
+  restoreKeys();
+});
+
+test("the sidebar shortcut: a native layout:drover cmd-alt-b bound to another action refuses the real flip", async () => {
+  const text = canon({ global: {} });
+  const { view, files } = await open(text);
+  withKeys([{ section: "layout:drover", keys: "cmd-alt-b", action: "app.quit" }]);
+  await view.loadKeys();
+  assert.equal(view.keyState.get("sidebar").state, "conflict");
+  await view.flip(SHORTCUT("sidebar"));
+  assert.equal(files["/h/keys.json"], text);
+  assert.match(view.keyErrors.get("sidebar"), /cmd-alt-b/);
+  restoreKeys();
+});

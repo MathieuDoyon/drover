@@ -31,7 +31,7 @@ Clone this repository (the command is in the [README](../README.md#install)) and
 cd mods && ./install.sh
 ```
 
-It runs the tests, copies the shared library into each mod, links the 16 `drover-*` mods and the `drover` layout into the Herdr home, and checks each mod with `herdr-app check`. Expected output: 16 lines `ok   drover-…`, then `ok   layout drover`. On `FAIL <mod>` it prints the `herdr-app check` errors and stops.
+It runs the tests, copies the shared library into each mod, links the 17 `drover-*` mods and the `drover` layout into the Herdr home, and checks each mod with `herdr-app check`. Expected output: 17 lines `ok   drover-…`, then `ok   layout drover`. On `FAIL <mod>` it prints the `herdr-app check` errors and stops.
 
 Variables:
 
@@ -42,7 +42,7 @@ Variables:
 ## 5. Check
 
 ```sh
-ls -l ~/.config/herdr-app/mods | grep -c 'drover-.* -> '   # 16
+ls -l ~/.config/herdr-app/mods | grep -c 'drover-.* -> '   # 17
 herdr-app status                                           # no errors
 herdr-app do layout.switch '{"name":"drover"}'             # back: '{"name":"main"}'
 ```
@@ -54,7 +54,7 @@ Each mod folder is import-self-contained (it carries its own copy of the shared 
 To check by hand:
 
 ```sh
-ls ~/.config/herdr-app/mods | grep '^drover-'   # you want 16 lines
+ls ~/.config/herdr-app/mods | grep '^drover-'   # you want 17 lines
 ls ~/.config/herdr-app/layouts/drover.json      # the layout
 ```
 

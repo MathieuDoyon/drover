@@ -32,3 +32,5 @@ scripts/public-sync.sh	name	4d0e06e2aec6cd7c7e8fe3afcf4d1372b7b2d3dc61432f73db51
 scripts/public-sync.sh	name-split	7d8a02e2c2eeaf99375a3e9c03530ba8f104822e06b09a8d3a42c0a9973fe440
 # the owner's public identity (copyright, repo slug, public noreply author), published on purpose
 scripts/public-sync.test.sh	name	540df4d45992ede8e8d9f2f7b120127384a275bc17fd59a164624c6569673df6
+# the owner's public repo slug in the shared companions block of the new mod's RECIPE.md, published on purpose (same line as every other RECIPE.md)
+mods/drover-jump/RECIPE.md	name	486a3112e340ce8a7efa178dd976f17f9ca514cb7a2246bc78553b054a369cd1

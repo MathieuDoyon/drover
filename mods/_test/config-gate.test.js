@@ -64,9 +64,9 @@ const folders = () => readdirSync(new URL("../", import.meta.url), { withFileTyp
 beforeEach(() => host());
 
 // ---- the gate itself and the inventory ----
-const EXEMPT = ["drover-config", "drover-tabs", "drover-newtask", "drover-needs", "drover-switch"]; // needs and switch are pages of the drover column: the layout shows or hides them
+const EXEMPT = ["drover-config", "drover-tabs", "drover-newtask", "drover-needs", "drover-switch", "drover-jump"]; // needs and switch are pages of the drover column: the layout shows or hides them
 
-test("every mods/drover-* folder has an enabled switch, or is on the exemption list (config, tabs, newtask, needs, switch)", () => {
+test("every mods/drover-* folder has an enabled switch, or is on the exemption list (config, tabs, newtask, needs, switch, jump)", () => {
   const all = folders();
   assert.ok(all.length >= 14, `found ${all.join(", ")}`);
   for (const mod of all) {

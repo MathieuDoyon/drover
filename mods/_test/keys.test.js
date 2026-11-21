@@ -261,3 +261,130 @@ test("sidebar: mod:* sections also mask it (other layout:* still ignored)", () =
   assert.match(s.warning, /mod:editor/);
   assert.equal(status(canon({ global: {}, "layout:main": { "cmd-alt-b": "tab.new" } }), SIDEBAR).state, "off");
 });
+
+// ---- B7: the jump shortcut (cmd-k, opt-in) and the built-in binding snapshot from Herdr's keys() ----
+const JUMP = SHORTCUTS.find((s) => s.id === "jump");
+const TERM_CMDK = [{ section: "terminal", keys: "cmd-k", action: "terminal.clear" }];
+
+test("jump shortcut: cmd-k in global, mod.open:drover-jump, never ctrl-k", () => {
+  assert.ok(JUMP, "the jump shortcut is defined");
+  assert.equal(JUMP.key, "cmd-k");
+  assert.equal(JUMP.section, "global");
+  assert.equal(JUMP.binding, "mod.open:drover-jump");
+  assert.ok(SHORTCUTS.every((s) => s.key !== "ctrl-k"));
+});
+
+test("jump shortcut is off by default: a fresh keys text does not carry it and status says off", () => {
+  const text = canon(base());
+  assert.ok(!text.includes("cmd-k"));
+  assert.equal(status(text, JUMP).state, "off");
+  assert.equal(status(text, JUMP).installed, false);
+});
+
+test("enable adds cmd-k under global and nothing else changes", () => {
+  const r = enable(canon(base()), JUMP);
+  assert.equal(r.ok, true);
+  assert.deepEqual(JSON.parse(r.text), { ...base(), global: { ...base().global, "cmd-k": "mod.open:drover-jump" } });
+});
+
+test("clash with the owner's text still refuses", () => {
+  const o = base();
+  o.global["cmd-k"] = "app.quit";
+  assert.equal(status(canon(o), JUMP).state, "conflict");
+  const r = enable(canon(o), JUMP);
+  assert.equal(r.ok, false);
+  assert.match(r.error, /cmd-k/);
+});
+
+test("status: a built-in binding (terminal section) of the same combo is a conflict", () => {
+  const s = status(canon(base()), JUMP, TERM_CMDK);
+  assert.equal(s.state, "conflict");
+  assert.match(s.message, /cmd-k/);
+  assert.match(s.message, /terminal\.clear/);
+});
+
+test("enable refuses a built-in clash in any section, and the same action there is no clash", () => {
+  for (const section of ["terminal", "global", "layout:other", "mod:picker"]) {
+    const r = enable(canon(base()), JUMP, [{ section, keys: "cmd-k", action: "something.else" }]);
+    assert.equal(r.ok, false, section);
+  }
+  assert.equal(enable(canon(base()), JUMP, [{ section: "global", keys: "cmd-k", action: "mod.open:drover-jump" }]).ok, true);
+  assert.equal(enable(canon(base()), JUMP, [{ section: "terminal", keys: "cmd-j", action: "x" }]).ok, true);
+});
+
+test("apply with a built-in clash refuses BEFORE the backup and the write", async () => {
+  const text = canon(base());
+  const { file, io } = await tmp(text);
+  const writes = [];
+  const spy = { ...io, write: async (...a) => { writes.push(a[0]); return io.write(...a); } };
+  const r = await apply(spy, JUMP, true, TERM_CMDK);
+  assert.equal(r.ok, false);
+  assert.deepEqual(writes, []);
+  assert.equal(await fs.readFile(file, "utf8"), text);
+  assert.deepEqual((await fs.readdir(path.dirname(file))).filter((f) => f.includes(".bak-")), []);
+});
+
+test("disabling an installed shortcut that a built-in binding masks still works", async () => {
+  const on = canon({ ...base(), global: { ...base().global, "cmd-k": "mod.open:drover-jump" } });
+  const s = status(on, JUMP, TERM_CMDK);
+  assert.equal(s.state, "on");
+  assert.match(s.warning, /terminal/);
+  const { file, io } = await tmp(on);
+  const r = await apply(io, JUMP, false, TERM_CMDK);
+  assert.equal(r.ok, true);
+  assert.equal(JSON.parse(await fs.readFile(file, "utf8")).global["cmd-k"], undefined);
+});
+
+test("the other shortcuts are unchanged: no builtin, an empty one, or an unrelated one", () => {
+  for (const b of [undefined, [], TERM_CMDK]) {
+    for (const sc of [SIDEBAR, NEWTASK]) {
+      assert.equal(status(canon(base()), sc, b).state, "off");
+      assert.equal(enable(canon(base()), sc, b).ok, true);
+    }
+  }
+  assert.equal(enable(canon(base()), NEWTASK, [{ section: "terminal", keys: "cmd-shift-c", action: "terminal.copy" }]).ok, false);
+});
+
+// ---- B7 review fixes: an unavailable binding list, and a same-section binding that is not Drover's ----
+const SIDEBAR_QUIT = [{ section: "layout:drover", keys: "cmd-alt-b", action: "app.quit" }];
+
+test("a failed or malformed keys() list is unavailable: enabling is refused before the backup and the write, with a message", async () => {
+  for (const bad of [null, "nope", {}, [null], [{ section: "x" }], [{ section: "terminal", keys: "cmd-k" }]]) {
+    const s = status(canon(base()), JUMP, bad);
+    assert.equal(s.state, "unavailable", JSON.stringify(bad));
+    assert.match(s.message, /binding/i);
+    const r = enable(canon(base()), JUMP, bad);
+    assert.equal(r.ok, false);
+    assert.match(r.error, /binding/i);
+    const { file, io } = await tmp(canon(base()));
+    const writes = [];
+    const res = await apply({ ...io, write: async (...a) => { writes.push(a[0]); } }, JUMP, true, bad);
+    assert.equal(res.ok, false);
+    assert.deepEqual(writes, []);
+    assert.equal(await fs.readFile(file, "utf8"), canon(base()));
+  }
+});
+
+test("removing an exact installed binding is still allowed when the list is unavailable", async () => {
+  const on = canon({ ...base(), global: { ...base().global, "cmd-k": "mod.open:drover-jump" } });
+  assert.equal(status(on, JUMP, null).state, "on");
+  const { file, io } = await tmp(on);
+  assert.equal((await apply(io, JUMP, false, null)).ok, true);
+  assert.equal(JSON.parse(await fs.readFile(file, "utf8")).global["cmd-k"], undefined);
+});
+
+test("a same-section native binding to ANOTHER action refuses an absent object binding (the sidebar); an equal action does not", () => {
+  assert.equal(enable(canon(base()), SIDEBAR, SIDEBAR_QUIT).ok, false);
+  assert.equal(status(canon(base()), SIDEBAR, SIDEBAR_QUIT).state, "conflict");
+  for (const action of ["layout.toggle:drover", JSON.stringify(SIDEBAR.binding)]) {
+    assert.equal(enable(canon(base()), SIDEBAR, [{ section: "layout:drover", keys: "cmd-alt-b", action }]).ok, true, action);
+  }
+});
+
+test("an installed sidebar binding is never flagged by its own section entry", () => {
+  const on = base();
+  on["layout:drover"]["cmd-alt-b"] = SIDEBAR.binding;
+  const s = status(canon(on), SIDEBAR, [{ section: "layout:drover", keys: "cmd-alt-b", action: "layout.toggle drover (any host spelling)" }]);
+  assert.equal(s.state, "on");
+  assert.equal(s.warning, "");
+});

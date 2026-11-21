@@ -8,6 +8,7 @@ import { GROUPS, projectOf, add, update, matches, menuChange, FILTER_FIELDS, tog
 import { load, loadRuns, loadProjects, loadConfig, spaceProject, sidebarSpace, save, edit, pick, openProof, openBoard, watchInbox, watchWakes, modSettings, needsWorld, startNeeds, retryRemote, remoteSend, remoteWriteState, takeRemoteOutcomes, watchMachines, machineView } from "./io.js";
 import { cardKey } from "./needs.js";
 import { lineLabel } from "./runline.js";
+import { queryResetKey } from "./jump.js";
 import { offTip, controlState, moveOp, outcomeText } from "./remote-write-ui.js";
 import { READONLY_TIP } from "./remote.js";
 import { rowLines } from "./health.js";
@@ -33,6 +34,10 @@ export default class Tasks extends View {
     watchWakes(cx);
     // Grouping, dots, counts and the remote write controls are derived HERE (init + a 1 s timer), never in render: render reads cache.get() only.
     // Live agent status and terminal liveness have no event, so the timer is the defined refresh; a repaint only when the result changed.
+    // A project jump (drover-jump) leaves a token in shared state, read by the cache refresh (its 1 s timer), never by render. Tokens are tracked per space key; a space first met adopts its token without applying it.
+    this.cx = cx;
+    this.lastReset = Date.now();
+    this.resetSeen = new Map(); // reset key -> the last token seen there (a space first met adopts its token without applying it)
     this.cache = startNeeds(cx, { read: () => this.world(), gate: () => isEnabled("drover-tasks"), remote: true }); // remote: reads each remote-bound project every 15 s while the panel is on
     // Machines: its own 1 s timer ticks the health poller (a list read, and a read per linked machine only when machine_polling is on); render reads machineView() only.
     watchMachines(cx, () => isEnabled("drover-tasks"));
@@ -51,12 +56,28 @@ export default class Tasks extends View {
 
   // One read of every input of the cache. Called by the cache refresh only (init, timer, after an own save), never by render.
   world() {
+    this.takeQueryReset();
     const w = needsWorld();
     const controls = {};
     if (isEnabled("drover-tasks")) { // a remote card in Review: the ✓ control state (this may start the write probe, so it stays out of render)
       for (const t of w.tasks) if (t.remote && t.column === "review" && !(t.project in controls)) controls[t.project] = controlState(remoteWriteState(t.project));
     }
     return { ...w, controls };
+  }
+  takeQueryReset() {
+    const key = queryResetKey(sidebarSpace()), token = shared(key);
+    const before = this.lastReset; // the previous look at the tokens
+    this.lastReset = Date.now();
+    if (!this.resetSeen.has(key)) {
+      // A space first met (the focus moved): its token is a baseline, unless a jump wrote it since the last look (the token starts with its ms clock).
+      this.resetSeen.set(key, token);
+      if (!(Number.parseInt(String(token), 10) >= before)) return;
+    } else if (token === this.resetSeen.get(key)) return;
+    this.resetSeen.set(key, token); // only an advance of THIS space's token resets
+    if (!this.query) return;
+    this.query = "";
+    this.input.set_value("");
+    this.cx?.notify?.();
   }
   // After this panel's own save: refresh now instead of waiting for the next second.
   refreshNow(cx) { if (this.cache.refresh()) cx?.notify?.(); }

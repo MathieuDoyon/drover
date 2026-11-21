@@ -12,7 +12,7 @@ Settings marked *reopen* apply the next time the screen opens; every other setti
 
 ## Per mod
 
-Each mod also has an `enabled` switch (default on; off hides the screen only). `drover-config`, `drover-tabs` and `drover-newtask` have none.
+Each mod also has an `enabled` switch (default on; off hides the screen only). `drover-config`, `drover-tabs` and `drover-newtask` have none (`drover-jump` has none either).
 
 | Mod | Setting | Default | Range | Meaning |
 | --- | --- | --- | --- | --- |
@@ -45,6 +45,6 @@ Each mod also has an `enabled` switch (default on; off hides the screen only). `
 
 ## Shortcuts
 
-Drover Config → Shortcuts writes your `keys.json` only when the file is valid JSON in the standard 2-space format, and never replaces a key. If the combo is already bound to something else in `keys.json` (any section that would mask it), the switch refuses and tells you to free that key first; edit `keys.json` yourself, then switch it on. Turning a shortcut off removes only Drover's own binding. Defaults: `cmd-alt-b` (toggle the right column, section `layout:drover`) and `cmd-shift-c` (create a task, section `global`, runs `mod.open:drover-newtask`).
+Drover Config → Shortcuts writes your `keys.json` only when the file is valid JSON in the standard 2-space format, and never replaces a key. If the combo is already bound to something else in `keys.json` (any section that would mask it), the switch refuses and tells you to free that key first; edit `keys.json` yourself, then switch it on. Turning a shortcut off removes only Drover's own binding. Defaults: `cmd-alt-b` (toggle the right column, section `layout:drover`) and `cmd-shift-c` (create a task, section `global`, runs `mod.open:drover-newtask`). A third shortcut, `cmd-k` (jump to a card, run or project, section `global`, runs `mod.open:drover-jump`), is off until you switch it on; Config also refuses it when Herdr itself binds `cmd-k` (for example in the terminal section).
 
 The authoritative list of settings is `mods/_lib/config-schema.js`.

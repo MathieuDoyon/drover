@@ -6,7 +6,7 @@ import { v_flex, h_flex, InputState, Input } from "gpui-base";
 import { shared, setShared, theme, props, closeOverlay } from "herdr";
 import { SCHEMA, validate } from "./config-schema.js";
 import { KEY, isOverride, setOverride, resetOverride, resolve } from "./config.js";
-import { modSettings, readKeys, setShortcut, workFolderOffers, moveWorkFolder } from "./io.js";
+import { modSettings, readKeys, setShortcut, builtinKeys, workFolderOffers, moveWorkFolder } from "./io.js";
 import { confirmText, moveSummary } from "./workfolder.js";
 import { SHORTCUTS, status as keyStatus } from "./keys.js";
 import { toggle } from "./ui.js";
@@ -103,13 +103,14 @@ export default class DroverConfig extends View {
   // keys.json is the truth: read on open, on selecting Shortcuts and after every write.
   async loadKeys() {
     const text = await readKeys().catch(() => null);
-    for (const sc of SHORTCUTS) this.keyState.set(sc.id, keyStatus(text, sc));
+    const builtin = builtinKeys();
+    for (const sc of SHORTCUTS) this.keyState.set(sc.id, keyStatus(text, sc, builtin));
     this.cx.notify();
   }
 
   async flip(sc) {
     const on = Boolean(this.keyState.get(sc.id)?.installed);
-    const r = await setShortcut(sc, !on).catch((e) => ({ ok: false, error: String(e?.message ?? e) }));
+    const r = await setShortcut(sc, !on, builtinKeys()).catch((e) => ({ ok: false, error: String(e?.message ?? e) }));
     if (r.ok) this.keyErrors.delete(sc.id); else this.keyErrors.set(sc.id, r.error);
     await this.loadKeys();
   }

@@ -47,7 +47,7 @@ The Board after the drive: the card moved to Review.
 
 ## The mods
 
-16 mods, installed together or one at a time. Each links to its page.
+17 mods, installed together or one at a time. Each links to its page.
 
 | Mod | Group | What it does |
 | --- | --- | --- |
@@ -55,6 +55,7 @@ The Board after the drive: the card moved to Review.
 | [`drover-board`](docs/mods/board.md) | Work | Backlog, Ready, In progress, Review, Blocked, Done: drag cards, start an agent with ▶ |
 | [`drover-tasks`](docs/mods/tasks.md) | Work | Right-hand attention panel (Needs you, Ready for review, Working, Ready) and the `drover` CLI |
 | [`drover-newtask`](docs/mods/newtask.md) | Work | A key that opens the Create task dialog from anywhere |
+| [`drover-jump`](docs/mods/jump.md) | Work | A key (off until you turn it on) that jumps to any card, run or project |
 | [`drover-projects`](docs/mods/projects.md) | Work | Projects: name, repos, folders and base branch that tasks and runs point at |
 | [`drover-agents`](docs/mods/agents.md) | Agents | Agents (command + soul), squads (leader + members), the default herd and the Start picker |
 | [`drover-runs`](docs/mods/runs.md) | Agents | Every run with its members' live status: Open room, Focus, Stop, Forget |
@@ -94,9 +95,9 @@ cd ~/Developer/drover/mods && ./install.sh
 herdr-app do layout.switch '{"name":"drover"}'
 ```
 
-`install.sh` runs the tests, links the 16 `drover-*` mods and the `drover` layout into `~/.config/herdr-app`, and never replaces a real folder. Expect 16 lines `ok   drover-…`. Full runbook: [docs/install.md](docs/install.md).
+`install.sh` runs the tests, links the 17 `drover-*` mods and the `drover` layout into `~/.config/herdr-app`, and never replaces a real folder. Expect 17 lines `ok   drover-…`. Full runbook: [docs/install.md](docs/install.md).
 
-**Installing a single mod from herdr.dev?** Each mod folder is import-self-contained, but some mods need a companion to be useful (for example New task needs Todos, and the Board needs Todos and Squads). Its recipe checks which other Drover mods you have and suggests installing all of them; what each needs is on its [mod page](docs/README.md#the-mods). Check yourself: `ls ~/.config/herdr-app/mods | grep '^drover-'` (you want 16, plus `layouts/drover.json`).
+**Installing a single mod from herdr.dev?** Each mod folder is import-self-contained, but some mods need a companion to be useful (for example New task needs Todos, and the Board needs Todos and Squads). Its recipe checks which other Drover mods you have and suggests installing all of them; what each needs is on its [mod page](docs/README.md#the-mods). Check yourself: `ls ~/.config/herdr-app/mods | grep '^drover-'` (you want 17, plus `layouts/drover.json`).
 
 ### First run
 

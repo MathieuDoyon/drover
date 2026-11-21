@@ -35,10 +35,10 @@ test("schema: mod+key unique, every default valid against its own field", () => 
   }
 });
 
-test("schema: every drover-* folder has an enabled entry, except config, tabs, newtask, needs and switch", () => {
+test("schema: every drover-* folder has an enabled entry, except config, tabs, newtask, needs, switch and jump", () => {
   const folders = readdirSync(MODS, { withFileTypes: true }).filter((d) => d.isDirectory() && d.name.startsWith("drover-")).map((d) => d.name);
   assert.ok(folders.length >= 10);
-  const exempt = new Set(["drover-config", "drover-tabs", "drover-newtask", "drover-needs", "drover-switch"]);
+  const exempt = new Set(["drover-config", "drover-tabs", "drover-newtask", "drover-needs", "drover-switch", "drover-jump"]);
   for (const m of folders) {
     const f = field(m, "enabled");
     if (exempt.has(m)) assert.equal(f, undefined, `${m} must not be disableable`);

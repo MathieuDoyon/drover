@@ -21,6 +21,7 @@ Each mod has a page: what it does, how to open it, its settings, the data it tou
 | [`drover-board`](mods/board.md) | Work | Backlog, Ready, In progress, Review, Blocked, Done: drag cards, start an agent with ▶ |
 | [`drover-tasks`](mods/tasks.md) | Work | Right-hand attention panel (Needs you, Ready for review, Working, Ready) and the `drover` CLI |
 | [`drover-newtask`](mods/newtask.md) | Work | A key that opens the Create task dialog from anywhere |
+| [`drover-jump`](mods/jump.md) | Work | A key (off until you turn it on) that opens a dialog to jump to any card, run or project |
 | [`drover-projects`](mods/projects.md) | Work | Projects: name, repos, folders and base branch that tasks and runs point at |
 | [`drover-agents`](mods/agents.md) | Agents | Agents (command + soul), squads (leader + members), the default herd and the Start picker |
 | [`drover-runs`](mods/runs.md) | Agents | Every run with its members' live status: Open room, Focus, Stop, Forget |

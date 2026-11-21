@@ -30,3 +30,5 @@ export const writeTextFile = (...a) => h().writeTextFile?.(...a);
 export const window = () => h().window;
 export const layout = () => h().layout;
 export const settings = () => h().settings ?? { zoom: 1 };
+// Herdr's own bindings: a test sets __host.keys ([{ section, keys, action }]); none = an empty list.
+export const keys = () => h().keys ?? [];
