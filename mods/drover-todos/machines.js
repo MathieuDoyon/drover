@@ -266,6 +266,8 @@ export async function doctor(rt, opts) {
   const started = hold?.read() ?? null;
   const checks = [];
   const add = (id, status, detail) => checks.push({ id, status, detail });
+  // T-MWO2HEU32E4: "local" is this computer's name in drover-runs.hold_machines; a linked machine of that name would share its limits.
+  if (machine === "local") add("name", "WARN", `a linked machine is named "local", which is also this computer's name in drover-runs.hold_machines: limits for "local" apply to this computer, not to this machine. Rename the machine in hc`);
   if (rt.link) { const l = await rt.link(machine); add("link", l.ok ? (l.warn ? "WARN" : "ok") : "FAIL", l.detail); } else add("link", "skip", "no link information from this runner");
   const info = await findRuntime(rt, machine, srcRoot ?? process.cwd(), nodeDir);
   const hasPython = !!(info.home && info.python3 && !info.noPython && !info.noTemp);

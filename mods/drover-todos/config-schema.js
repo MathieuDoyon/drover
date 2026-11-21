@@ -20,6 +20,7 @@
 // | drover-room.pr_cap / kept_contexts | io.js loadContext (10), room main.js (30) (card 5) | = 10 / 30, tunables.test.js              |
 // | drover-runs.max_parallel       | runs.js maxRuns() (card 5)               | = MAX_RUNS (runs.js)                            |
 // | drover-runs.kept               | io.js launch() via pruneRuns (card 5)    | = 200; only ended runs are dropped              |
+// | drover-runs.hold_load / hold_memory / hold_disk / hold_machines | io.js holdFor() in launch() and the resume paths (T-MWO2HEU32E4) | 1 / 80 / 90 / "" (_lib/loadhold.test.js, _test/load-hold.test.js); owner's limits: not agent-settable |
 // | drover-wakeups.min_repeat_minutes | wake.js build(): UI, Room, CLI inbox (card 5) | = MIN_EVERY (wake.js)                  |
 // | drover-wakeups.expiry_hours    | wake.js window() (card 5)                | = EXPIRES_AFTER (wake.js)                       |
 // | drover-wakeups.ui_tick_seconds | wakeups main.js timer (card 5, applies on reopen) | = 30                                   |
@@ -45,6 +46,18 @@
 // the credentials are sent to).
 
 import { COLUMNS, SORT_MODES } from "./store.js";
+
+const LOAD_V = String.raw`(?:0\.\d*[1-9]\d*|[1-9]\d*(?:\.\d+)?)`; // above 0
+const PCT_V = String.raw`(?:100|[1-9]\d?(?:\.\d+)?)`; // 1 to 100
+const PAIR = String.raw`(?:load\s+(?:off|${LOAD_V})|(?:memory|disk)\s+(?:off|${PCT_V}))`;
+const ENTRY = String.raw`[A-Za-z0-9][A-Za-z0-9._-]*\s*:\s*${PAIR}(?:\s*,\s*${PAIR})*`;
+// The schema patterns. A value that fails its pattern is refused as a whole (the schema's rule), never half-applied.
+// The load hold's value patterns (T-MWO2HEU32E4; loadhold.js re-exports them). A value that fails its pattern is refused as a whole, never half-applied.
+export const HOLD_PATTERNS = Object.freeze({
+  load: new RegExp(`^(?:off|${LOAD_V})$`),
+  percent: new RegExp(`^(?:off|${PCT_V})$`),
+  machines: new RegExp(`^${ENTRY}(?:\\s*;\\s*${ENTRY})*\\s*;?$`),
+});
 
 const MOD = (name) => `drover-${name}`;
 // Folders that can be switched off. drover-config and drover-tabs are never disableable (config hosts the dialog, tabs the menu entry).
@@ -98,6 +111,15 @@ export const SCHEMA = [
     description: "Squad runs active at once for each project. A run whose card is in Review or Blocked is waiting and takes no slot. An agent can change this on your request (drover config max-parallel)." },
   { mod: "drover-runs", key: "kept", title: "Kept runs", type: "int", default: 200, min: 10, max: 5000, live: true,
     description: "Ended runs remembered in the list. Older ended runs are dropped; a run that is still going is never dropped." },
+  { mod: "drover-runs", key: "hold_load", title: "Hold new starts: load", type: "text", default: "1", pattern: HOLD_PATTERNS.load, patternError: "A number above 0 (load per core, 1 = one running task for each core), or off", live: true,
+    description: "A new start is held while this computer's load per core is over this number. 1 means as many busy tasks as cores. off turns this limit off. Advisory: a raw hc run --on bypasses it. Runs already going are never held." },
+  { mod: "drover-runs", key: "hold_memory", title: "Hold new starts: memory %", type: "text", default: "80", pattern: HOLD_PATTERNS.percent, patternError: "A percent from 1 to 100, or off", live: true,
+    description: "A new start is held while this computer's memory is fuller than this percent. off turns this limit off." },
+  { mod: "drover-runs", key: "hold_disk", title: "Hold new starts: disk %", type: "text", default: "90", pattern: HOLD_PATTERNS.percent, patternError: "A percent from 1 to 100, or off", live: true,
+    description: "A new start is held while the home disk or /tmp is fuller than this percent. off turns this limit off." },
+  { mod: "drover-runs", key: "hold_machines", title: "Hold limits per machine", type: "text", default: "", empty: true, pattern: HOLD_PATTERNS.machines,
+    patternError: "name: limit value, limit value; name2: ... with the limits load, memory, disk and a number or off, for example local: memory 90, load off. local is this computer. One bad entry refuses the whole text", live: true,
+    description: "Limits for one machine that replace the three above. Format: name: memory 90, load off; other: disk 95. The name local is this computer (a linked machine cannot use it). Empty: every machine uses the limits above." },
   { mod: "drover-wakeups", key: "min_repeat_minutes", title: "Shortest repeat (minutes)", type: "int", default: 5, min: 1, max: 1440, live: true,
     description: "A repeating wakeup may not fire more often than this. The drover CLI uses the same value." },
   { mod: "drover-wakeups", key: "expiry_hours", title: "Expiry (hours)", type: "int", default: 2, min: 1, max: 168, live: true,

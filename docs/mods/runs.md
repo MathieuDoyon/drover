@@ -34,6 +34,25 @@ drover config max-parallel 4     # set (1-10)
 
 This is the only setting an agent can change, and the rule for agents is to do it only when you ask, in plain text in its own terminal, never to unblock itself. Each change shows a notice with the terminal that asked (the terminal is what the caller claims; it is not verified). `drover config` needs Drover mods at protocol 5: with older mods it says to update them, and with no Drover mod open it changes nothing. A change that gets no answer within 5 seconds is reported as not confirmed, and the request expires after 60 seconds.
 
+## Load hold
+
+Drover does not start new work on a computer that is already overloaded. A **new start** is held when this computer is over a limit, and the reason says so in plain words and names the setting to change, for example `held: memory is 92% full (limit 80%; change drover-runs.hold_memory or set it to off)`.
+
+| Setting | Default | Holds when |
+| --- | --- | --- |
+| `hold_load` | `1` | the load per core is over this number |
+| `hold_memory` | `80` | memory is fuller than this percent (81 holds, 80 and 79 do not) |
+| `hold_disk` | `90` | the home disk or `/tmp` is fuller than this percent |
+| `hold_machines` | empty | per-machine limits, for example `local: memory 90, load off; other: disk 95`. The name `local` is this computer. |
+
+- A limit set to `off` is off. A per-machine entry replaces only the limits it names for that machine. One bad entry refuses the whole text (the dialog says why), so a half-read value never applies.
+- Which starts: the start dialogs and pickers, `drover start`, the queue, and the resume of a gone squad (it opens new processes). The hold is checked before any card is claimed, any worktree made or any terminal opened, so a refused start leaves the card as it was and the next try is free.
+- **Never a run that is already going.** Live sends, Stop, moving a card, and runs in Review or Blocked are not touched, and the slot numbers do not change (a run in Review or Blocked still takes no slot).
+- **Unknown, failed or stale health allows the start** and shows a warning (`this computer health is unknown, start allowed`). A broken `python3` never blocks work.
+- **Advisory only.** This computer is read by one short local `python3` (about once a minute at most, never from a screen). A raw `hc run --on`, or a terminal you open by hand, bypasses the hold. Starting an agent on a remote machine is not available yet, so no remote start is held until it is.
+- `drover next` adds one `held: <reason>` line when a start would be held now, from the last read (it reads nothing new).
+- A linked machine must not be named `local`: `drover machines doctor local` warns, and limits for `local` apply to this computer.
+
 ## Live line
 
 A working run can say what it is doing. In a terminal of the run, `drover line <T-…> "reading the code" --progress 40` (the text is 40 characters at most, the progress a whole number from 0 to 100 and optional) stores a line on the run, and the run card shows one extra row under the id line: `reading the code · 40% · 3m` (the elapsed time is whole minutes, `<1m` under one). The same line shows on the card's row in the Working group of [Tasks](tasks.md). Leaders post one at each STATUS (the herd rules in [Agents and the herd](../agents.md)).

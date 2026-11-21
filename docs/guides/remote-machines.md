@@ -46,6 +46,7 @@ The installed CLI includes `drover-headless`, the board of that machine without 
 | Moving a herd to or from a remote with `hc file` and `drover agents import\|export` | legacy, local-app-only: it needs an existing Drover app or mod consumer on that machine, so it is not supported on a machine set up as above (no app, no mods); pending ([Share a herd](share-a-herd.md)) |
 | A per-project exec transport for the board's own writes, replacing the older inbox path | planned (card A3b); not live |
 | Starting an agent or a squad on the remote | planned; not available |
+| Holding new starts when a machine is overloaded | works for this computer only, advisory (a raw `hc run --on` bypasses it); see [Runs](../mods/runs.md#load-hold). A remote start would use the same check once it exists |
 
 Remote writes are advisory in the board today: a control that cannot act on a remote project stays off and says why. Drover never pushes anything to a machine by itself.
 

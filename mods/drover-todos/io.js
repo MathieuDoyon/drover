@@ -7,7 +7,8 @@ import { base64, httpProblem, jiraIssue, jiraKey, githubIssue, prItems } from ".
 import { ownerError, createRemote, bindings as remoteBindings, mergeRemote, cacheKey } from "./remote.js";
 import { createWriter } from "./remote-write.js";
 import { createNeedsCache } from "./needs.js";
-import { createHealth } from "./health.js";
+import { createHealth, HEALTH_PY, readResult } from "./health.js";
+import { LOCAL, createLocalRead, judge, limitsFor, sampleOfRow, reservedWarning } from "./loadhold.js";
 import { validate as validateLine, activeFor } from "./runline.js";
 import { WAKE_KEY, reschedule, addWake, decide, setStatus, wakeOp } from "./wake.js";
 import { apply as applyKey } from "./keys.js";
@@ -196,6 +197,37 @@ export function watchMachines(cx, enabled = () => true) {
   };
   cx.timer?.every?.(1000, tick);
   tick(cx);
+}
+// ---- The load hold (T-MWO2HEU32E4, Remote v2 A5): a NEW start waits while the machine is over its limits (loadhold.js judges; this is the host side). ----
+// Advisory: a raw `hc run --on` or a hand-opened terminal bypasses it. Only an action asks (launch, the resume paths): no render path reads anything here.
+// The laptop is read by one bounded local python3 (never hc, never --on), cached 60 s with one read in flight. A remote machine would use the A4 cache only
+// (holdFor(name) with no row = unknown = allowed with a warning), so the future remote entry point calls the same function.
+const newLocalHealth = () => createLocalRead({ exec: (cmd, args, o) => exec(cmd, args, o), now: () => Date.now(), script: HEALTH_PY, parse: readResult });
+let localHealth = newLocalHealth();
+export const resetLocalHealth = () => { localHealth = newLocalHealth(); };
+const holdSettings = () => ({ load: cfg("drover-runs", "hold_load"), memory: cfg("drover-runs", "hold_memory"), disk: cfg("drover-runs", "hold_disk"), machines: cfg("drover-runs", "hold_machines") });
+// -> { hold: string|null, warn: string|null }. Awaits the drover-runs mod.json layer first: a Picker or Todos launch never loaded another mod's policy.
+export async function holdFor(machine = LOCAL, { row } = {}) {
+  await loadPolicy("drover-runs").catch(() => {});
+  const settings = holdSettings(), limits = limitsFor(settings, machine);
+  if (machine !== LOCAL) return judge({ ...sampleOfRow(row ?? machineView().machines.find((m) => m.name === machine)), limits, label: machine });
+  const x = await localHealth();
+  const h = judge({ sample: x.sample, ageMs: x.sample ? x.ageMs : null, limits, label: "this computer" });
+  const clash = /(^|;)\s*local\s*:/.test(settings.machines) ? reservedWarning(machineView().machines.map((m) => m.name)) : null;
+  return clash ? { ...h, warn: [h.warn, clash].filter(Boolean).join(" · ") } : h;
+}
+// What `drover next` says, from the cache only (no read, no await): the reason a start would be held now, or null.
+export function heldNote() {
+  const x = localHealth.peek();
+  if (!x) return null;
+  const h = judge({ sample: x.sample, ageMs: x.sample ? x.ageMs : null, limits: limitsFor(holdSettings(), LOCAL), label: "this computer" });
+  return h.hold ? `held: ${h.hold}` : null;
+}
+// A new process-opening start asks here first, before any claim, worktree, work folder or terminal. { error } = held; { warning } = allowed, health unknown.
+async function startGate() {
+  const h = await holdFor(LOCAL);
+  if (h.hold) return { error: `held: ${h.hold}. Advisory: it only holds new starts made here; runs already going are not touched` };
+  return h.warn ? { warning: h.warn } : {};
 }
 // What the Needs-you cache reads, once: every card (local and remote), runs, and the live agents and terminals. Called by a cache refresh only, never by render.
 export function needsWorld() {
@@ -476,7 +508,8 @@ async function loadLessons(runProj, agentIds) {
   } catch (e) { lessonsFailed(e); return null; }
 }
 
-export async function launch(task, runner, { worktree, reportTo, project, create, folder: chosen, note } = {}) {
+// gate: a start that already asked startGate() (drover start does, before its claim) passes the answer, so it is neither asked nor noticed twice.
+export async function launch(task, runner, { worktree, reportTo, project, create, folder: chosen, note, gate: asked } = {}) {
   const label = task?.id ?? "Run";
   try {
     const owned = ownerError(loadProjects(), task?.project ?? project);
@@ -486,6 +519,9 @@ export async function launch(task, runner, { worktree, reportTo, project, create
     if (worktree && !task) throw new Error("A worktree needs a task.");
     const boss = reportTo ? panes().find((x) => x.terminal === reportTo) : null;
     if (reportTo && !boss) throw new Error(`Coordinator ${reportTo} is not on screen.`);
+    const gate = asked ?? await startGate(); // T-MWO2HEU32E4: before the work folder, the worktree and any terminal
+    if (gate.error) throw new Error(gate.error);
+    if (gate.warning && !asked) notify({ title: `${label}: started`, body: gate.warning, level: "info" }); // also with Report to Drover on: the Picker only reads r.error
     // A project's default repo wins over the coordinator's folder.
     // Its base branch is the start point; a task without a project keeps the repo's current HEAD.
     const proj = projectOf(task, loadProjects()), projRepo = repoOf(task, loadProjects());
@@ -544,7 +580,7 @@ export async function launch(task, runner, { worktree, reportTo, project, create
       save(update(load(), task.id, { agent: leader, run: run.id, column: "doing", claimedAt: null, ...(current && !current.assignee && runner ? { assignee: { kind: runner.kind, id: runner.id } } : {}) }));
     }
     if (pending.length && home()) void discoverSessions(run.id, pending); // after the run is saved; launch does not wait for it
-    return run;
+    return gate.warning ? { ...run, warning: gate.warning } : run;
   } catch (e) {
     const error = String(e?.message ?? e);
     if (!reportTo) notify({ title: `${label} not started`, body: error, level: "error" });
@@ -746,6 +782,7 @@ async function killConfirmed(address) {
 // A failed attempt is killed and confirmed gone before the next one; an unconfirmed kill stops everything (failClosed): never 2 sessions of one id.
 // Returns { address, space, source, model, argv } or { error, killed, cancelled?, failClosed? }.
 export async function resumeTerminal(run, terminal, o) {
+  if (!o.gated) { const g = await startGate(); if (g.error) return { error: g.error, killed: [] }; } // a squad resume checks once for all its terminals
   const c = resumeCandidates(loadConfig(), run, terminal);
   if (c.error) return { error: c.error, killed: [] };
   const killed = [], errors = [], who = `${terminal.name ?? terminal.agent}`;
@@ -815,10 +852,13 @@ const short = (role) => String(role ?? "").split(/[.:(]/)[0].trim();
 // ref: a run id (R-…) or a card id (T-…, its newest run). Returns { run } or { error }.
 export async function resumeSquad(ref, { quiet = false } = {}) {
   ref = String(ref ?? "");
+  const gate = await startGate(); // reopening a gone squad starts new processes: held like any start, before the claim (T-MWO2HEU32E4)
   const all = loadRuns();
   const run = /^T-/.test(ref) ? all.filter((r) => r.task === ref).sort((a, b) => (b.started ?? 0) - (a.started ?? 0))[0] : all.find((r) => r.id === ref);
   const refuse = (error) => { if (!quiet) notify({ title: `${run?.task ?? ref} not resumed`, body: error, level: "error" }); return { error }; }; // a refused click must say why (the CLI prints it itself)
   if (!run) return refuse(`no run for ${ref}`);
+  if (gate.error) return refuse(gate.error);
+  if (gate.warning && !quiet) notify({ title: `${run.task ?? ref} resumed`, body: gate.warning, level: "info" });
   // ---- no await from here to the claim: a second click, the CLI and another mod all see the claim and the attempt record
   if (!liveSnapshot().known) return refuse("Herdr's terminal list is not ready: try again in a moment");
   const g = resumeGuard({ tasks: load(), runs: all, alive: liveState().alive, resuming: inFlight() }, run.id);
@@ -911,7 +951,7 @@ export async function resumeSquad(ref, { quiet = false } = {}) {
       let marker = null;
       if (t.kind === "codex") { marker = newUuid().replace(/-/g, ""); prompt = `${prompt}\n\n${sessionMarker(marker)}`; } // lets discovery find a new rollout
       const name = `${task.id} ${t.role === "leader" ? t.name : short(t.role)}`.slice(0, 40);
-      const r = use(await resumeTerminal(run, t, { cwd: folderOf(t), prompt, token: a.token, name, ...(space ? { space } : { spaceName: `${task.id} ${task.title}`.slice(0, 40) }), check: stop, onOpen, intent, beat }));
+      const r = use(await resumeTerminal(run, t, { cwd: folderOf(t), prompt, token: a.token, name, ...(space ? { space } : { spaceName: `${task.id} ${task.title}`.slice(0, 40) }), check: stop, onOpen, intent, beat, gated: true }));
       if (r.space) space = r.space;
       if (t.kind === "claude" && t.session) await labelSession(r.address, t.session); // Reader reads this label; Codex is labeled by discovery below
       if (marker) pending.push({ address: r.address, token: marker, source: t.session });
@@ -948,7 +988,7 @@ export async function resumeSquad(ref, { quiet = false } = {}) {
     endAttempt(run.id, a.id);
     resuming.delete(run.id);
     if (pending.length && home()) void discoverSessions(nrun.id, pending);
-    return { run: nrun };
+    return { run: nrun, ...(gate.warning ? { warning: gate.warning } : {}) };
   } catch (e) {
     const error = await rollback(String(e?.message ?? e));
     if (!quiet || /blocked/i.test(error)) notify({ title: `${task.id} not resumed`, body: error, level: "error" });
@@ -971,7 +1011,7 @@ async function resumeOp(cmd) {
   const r = await resumeSquad(ref, { quiet: true });
   if (r.error) return `error: ${r.error}`;
   const lead = r.run.terminals[r.run.terminals.length - 1];
-  return `ok: ${r.run.id} leader ${lead.address} (${lead.name})` + r.run.terminals.slice(0, -1).map((m) => ` · ${short(m.role)} ${m.address}`).join("") + (r.run.worktree ? ` · worktree ${r.run.worktree.path} on ${r.run.worktree.branch}` : "");
+  return `ok: ${r.run.id} leader ${lead.address} (${lead.name})` + r.run.terminals.slice(0, -1).map((m) => ` · ${short(m.role)} ${m.address}`).join("") + (r.run.worktree ? ` · worktree ${r.run.worktree.path} on ${r.run.worktree.branch}` : "") + (r.warning ? ` · warning: ${r.warning}` : "");
 }
 
 // Who started this terminal? "owned" = its argv carries the attempt's token, "foreign" = it does not, "unknown" = the read failed or is malformed.
@@ -1642,14 +1682,18 @@ function nextFor(from) {
   if (rec.lines.length) setShared(KEY, rec.tasks);
   const tasks = rec.tasks;
   const snap = slotsOf(slotSnapshot(runs, tasks, live, alive), project);
-  return [nextReport(tasks, loadProjects(), project, snap.free, snap.waiting), ...rec.lines].join("\n");
+  return [nextReport(tasks, loadProjects(), project, snap.free, snap.waiting), ...(heldNote() ? [heldNote()] : []), ...rec.lines].join("\n");
 }
 
 // `drover start <T-…|-> <squad|agent> [--worktree]` from a coordinator agent.
-async function startFromAgent(cmd) {
+export async function startFromAgent(cmd) {
   const cfg = loadConfig();
   const kind = cfg.squads.some((q) => q.id === cmd.runner) ? "squad" : cfg.agents.some((a) => a.id === cmd.runner) ? "agent" : null;
   if (!kind) return `error: no squad or agent ${cmd.runner} (see: drover squads)`;
+  // The load check comes first (T-MWO2HEU32E4): nothing below is read or claimed until it answers, so a held refusal writes nothing.
+  // Everything after this await is synchronous up to the claim, so the guard still sees the state it claims on.
+  const gate = await startGate();
+  if (gate.error) return `error: ${gate.error}`;
   const task = cmd.task ? load().find((t) => t.id === cmd.task) : null;
   if (cmd.task && !task) return `error: no task ${cmd.task}`;
   const pk = projectKey(loadProjects(), cmd.project);
@@ -1668,7 +1712,7 @@ async function startFromAgent(cmd) {
   const reserved = cmd.runner === "drover" ? (task ? task.project : bind.project) : null;
   const setBinding = (v) => setShared(BIND_KEY, { ...(shared(BIND_KEY) ?? {}), [reserved]: v });
   if (reserved) setBinding(Date.now());
-  const r = await launch(c?.task ?? task, { kind, id: cmd.runner }, { worktree: Boolean(cmd.worktree), reportTo: cmd.from || null, project: bind.project });
+  const r = await launch(c?.task ?? task, { kind, id: cmd.runner }, { worktree: Boolean(cmd.worktree), reportTo: cmd.from || null, project: bind.project, gate });
   if (reserved) setBinding(undefined);
   if (r.error) {
     if (c) setShared(KEY, release(load(), task.id, c.prev).tasks);
@@ -1677,7 +1721,8 @@ async function startFromAgent(cmd) {
   const lead = r.terminals[r.terminals.length - 1];
   return `ok: ${r.id} leader ${lead.address} (${lead.name})` +
     r.terminals.slice(0, -1).map((m) => ` · ${m.role.split(/[.:(]/)[0].trim()} ${m.address}`).join("") +
-    (r.worktree ? ` · worktree ${r.worktree.path} on ${r.worktree.branch}` : "");
+    (r.worktree ? ` · worktree ${r.worktree.path} on ${r.worktree.branch}` : "") +
+    (r.warning ? ` · warning: ${r.warning}` : "");
 }
 
 export function watchInbox(cx) {

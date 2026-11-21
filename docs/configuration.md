@@ -33,6 +33,10 @@ Each mod also has an `enabled` switch (default on; off hides the screen only). `
 | Room | `kept_contexts` | 30 | 1-1000 | Runs remembered |
 | Tasks | `machine_polling` | off | | Show a load meter for each linked machine in the Tasks sidebar. On, one short read per machine every 5 minutes through `hc exec --on` (10 minutes after a failed read). Off: the machine list shows with no numbers and no read. See [Tasks](mods/tasks.md#machines) |
 | Runs | `max_parallel` | 2 | 1-10 | Active squad runs per project. Runs on cards in Review or Blocked are waiting and do not count. An agent can set it on your request with `drover config max-parallel <n>` (the only setting it can change); see [Runs](mods/runs.md#parallel-runs) |
+| Runs | `hold_load` | `1` | number or `off` | Hold a new start while this computer's load per core is over this (1 = one busy task per core). See [Runs](mods/runs.md#load-hold) |
+| Runs | `hold_memory` | `80` | 1-100 or `off` | Hold a new start while memory is fuller than this percent |
+| Runs | `hold_disk` | `90` | 1-100 or `off` | Hold a new start while the home disk or `/tmp` is fuller than this percent |
+| Runs | `hold_machines` | empty | `name: memory 90, load off; other: disk 95` | Limits for one machine that replace the three above. `local` is this computer. One bad entry refuses the whole text. Not settable by an agent |
 | Runs | `kept` | 200 | 10-5000 | Ended runs remembered |
 | Wakeups | `min_repeat_minutes` | 5 | 1-1440 | Shortest repeat (the CLI uses it too) |
 | Wakeups | `expiry_hours` | 2 | 1-168 | A wakeup not delivered by then expires |

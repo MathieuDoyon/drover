@@ -66,6 +66,8 @@ A field it cannot read is `null`, never a guess. Linux reads `/proc/loadavg` and
 
 The Tasks sidebar (setting `machine_polling`, off by default, see [Tasks](../mods/tasks.md#machines)) runs the same text from the laptop with no install needed: `hc exec --on <machine> --timeout 20 -- python3 -c <script text>`. **Deviation from the "payload never in argv" rule:** the script is passed as one argv item because the mod host has no stdin. That rule is about card data; this text is fixed, about 5 KB and carries nothing from the machine or the card. `_lib/health.js` embeds the file's exact text and a test keeps them byte-equal.
 
+The same numbers feed the [load hold](../mods/runs.md#load-hold): a new start on this computer is held when it is over a limit. A machine's health that is unknown or older than 15 minutes never holds a start; it allows it with a warning. A linked machine named `local` is warned about by `doctor`, because `local` is this computer's name in `drover-runs.hold_machines`.
+
 ## doctor
 
 ```
@@ -73,7 +75,7 @@ The Tasks sidebar (setting `machine_polling`, off by default, see [Tasks](../mod
 doctor: N ok, N warn, N fail
 ```
 
-Checks: `link` (the machine is connected; WARN when it may stop while nobody is logged in), `node`, `python3`, `current` (the link resolves to a generation with a `MANIFEST.json`), `files` (every sha256 and mode matches the stamp; an edit kept on purpose is checked against what was recorded), `tests` (each file's test argv, run on the machine), `entry` (the launcher), `hold`. Exit status 1 only on FAIL. `--json` prints `{ok, machine, checks[], summary}`. Doctor writes nothing on the machine.
+Checks: `name` (WARN only, when the machine is named `local`), `link` (the machine is connected; WARN when it may stop while nobody is logged in), `node`, `python3`, `current` (the link resolves to a generation with a `MANIFEST.json`), `files` (every sha256 and mode matches the stamp; an edit kept on purpose is checked against what was recorded), `tests` (each file's test argv, run on the machine), `entry` (the launcher), `hold`. Exit status 1 only on FAIL. `--json` prints `{ok, machine, checks[], summary}`. Doctor writes nothing on the machine.
 
 ## Live check (owner present)
 

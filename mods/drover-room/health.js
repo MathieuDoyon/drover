@@ -228,7 +228,7 @@ export function parseSample(text) {
 const copySample = (s) => JSON.parse(JSON.stringify(s));
 
 // Fixed code for an exec result. Neither stdout nor stderr is ever kept; stderr is only matched for "python3 not found".
-function readResult(res) {
+export function readResult(res) {
   if (!isObj(res)) return { ok: false, code: "exit" };
   if (res.code !== 0) return { ok: false, code: res.code === 127 || /python3?[^\n]*(not found|no such file)/i.test(String(res.stderr ?? "")) ? "no-python" : "exit" };
   return parseSample(res.stdout);

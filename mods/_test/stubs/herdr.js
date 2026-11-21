@@ -5,7 +5,9 @@ export const appHome = () => h().appHome;
 import { execFile } from "node:child_process";
 // `mv` runs for real (the inbox writer moves each reply into place with it) unless a test sets host.ownMv to model a failing one.
 const realMv = (args) => new Promise((resolve) => execFile("mv", args, { encoding: "utf8" }, (e, stdout, stderr) => resolve({ code: e ? (typeof e.code === "number" ? e.code : 1) : 0, stdout, stderr })));
-export const exec = (cmd, args, ...rest) => (cmd === "mv" && !h().ownMv ? realMv(args) : h().exec(cmd, args, ...rest));
+// The load hold's local health read (T-MWO2HEU32E4) is a python3 call: unless a test sets host.pyExec (it then answers through host.exec), it gets a healthy machine, so every other test is unaffected.
+const HEALTHY = JSON.stringify({ v: 1, os: "linux", cores: 4, load: { one: 0.1, five: 0.1, fifteen: 0.1 }, loadPerCore: 0.03, mem: { totalMb: 100, usedMb: 10, pct: 10 }, disks: { home: { totalMb: 1, freeMb: 1, pct: 5 }, tmp: { totalMb: 1, freeMb: 1, pct: 5 } } });
+export const exec = (cmd, args, ...rest) => (cmd === "mv" && !h().ownMv ? realMv(args) : cmd === "python3" && !h().pyExec ? Promise.resolve({ code: 0, stdout: HEALTHY, stderr: "" }) : h().exec(cmd, args, ...rest));
 export const shared = (k) => h().state[k];
 export const setShared = (k, v) => { h().state[k] = v; };
 export const closeOverlay = (...a) => h().closeOverlay(...a);
