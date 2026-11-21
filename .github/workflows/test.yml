@@ -5,6 +5,11 @@ on:
   push:
     branches: [main]
 
+# A newer push to the same ref cancels the superseded run; the chain waits only on the exact commit it merged.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   node:
     runs-on: ubuntu-latest

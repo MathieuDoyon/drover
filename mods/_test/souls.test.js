@@ -308,6 +308,53 @@ test("drover soul: whole chain stops on red, pending or unknown, lists revocatio
   for (const s of ["red, pending, missing, cancelled, skipped or unknown", "leak hit", "send `HOLD`", "report `HELP`", "A red PR check stops the chain before the merge; the squad may push fixes to the same branch, and the chain goes on only when every check is green on the new head. Any other failure (leak hit, red main or public CI, a refused command), and red PR checks the squad cannot fix, end the grant.", "A later green check never restores it", "whole chain revoked: <reason>", "new High or Critical finding after the GO", "scope change", "Not in queue mode"]) assert.ok(c.includes(s), s);
 });
 
+test("drover soul: the chain proves the tree and runs install, main CI and public sync once per run (T-MWQM5QQGMOJ)", () => {
+  const c = chain().split("**The chain**")[1].split("**Stops and revocation.**")[0];
+  const at = (s) => { const i = c.indexOf(s); assert.ok(i >= 0, s); return i; };
+  // each card merges on its own; the tail comes after the last merge
+  assert.ok(at("(3) merge only when every check is green") < at("once per run"), "merge before tail");
+  assert.ok(at("once per run") < at("(4)"), "tail announced before step 4");
+  // fresh fetch, proof against the FETCHED tip of the last card's head
+  for (const s of ["`git fetch origin main`", "fast-forward local `main`", "`git diff --quiet <last card's PR head SHA> origin/main`", "FETCHED", "never local `main`"]) assert.ok(c.includes(s), s);
+  // exit 0 + one card = tree equal: skip tests; exit 1 or several cards = plain install; anything else = HOLD and HELP
+  for (const s of ["exit 0", "one-card run", "`DROVER_SKIP_TESTS=1 mods/install.sh`", "exit 1", "plain `mods/install.sh`", "any other exit (diff error, unknown SHA) = HOLD and HELP", "fetch failure, invalid ref or failed fast-forward = refused command: HOLD and HELP, no install"]) assert.ok(c.includes(s), s);
+  // equal tree: no main CI wait, logged n/a; otherwise wait on the exact tip
+  for (const s of ["skip the `main` CI wait", "`n/a tree-proof <sha>`", "green on the exact tip commit"]) assert.ok(c.includes(s), s);
+  // one public sync and one public CI wait on the final tip
+  for (const s of ["`--push`, once per run, on the final tip", "public CI to be green on the pushed commit, once"]) assert.ok(c.includes(s), s);
+  // install and sync are not in the per-card steps: exactly one install clause group in the tail, after (3)
+  assert.ok(at("(4)") > at("(3)"));
+  assert.equal(c.split("`DROVER_SKIP_TESTS=1 mods/install.sh`").length - 1, 1, "one skip-tests install");
+  // neither install form (plain or skip-tests) before the tail step (4); both only inside step (4), before (5)
+  assert.ok(!/install/.test(c.slice(0, at("(4)"))), "no install before the tail step (4)");
+  const installs = [...c.matchAll(/mods\/install\.sh/g)].map((m) => m.index);
+  assert.equal(installs.length, 2, "exactly two install forms: skip-tests and plain");
+  for (const i of installs) assert.ok(i > at("(4)") && i < at("(5)"), "install only inside step (4)");
+  assert.equal(c.split("plain `mods/install.sh`").length - 1, 1, "one plain install");
+  // the error case is stated before the multi-card alternative
+  assert.ok(at("any other exit (diff error, unknown SHA) = HOLD and HELP") < at("a several-card run"), "HOLD and HELP before the several-card alternative");
+  // completion waits for the tail
+  for (const s of ["only after (7) is green, for every card of the run", "A red tail CI holds every card of the run (none moves to done)"]) assert.ok(c.includes(s), s);
+  assert.ok(at("(7)") < at("only after (7) is green"));
+  assert.ok(at("(8)") > at("(7)") && at("(9)") > at("(8)") && at("(10)") > at("(9)"));
+});
+
+test("drover soul: stops stay and a superseded cancel is told from an awaited one (T-MWQM5QQGMOJ)", () => {
+  const s = chain().split("**Stops and revocation.**")[1];
+  for (const x of ["a refused command", "red, pending, missing, cancelled, skipped or unknown", "A later green check never restores it", "whole chain revoked: <reason>", "cancel-in-progress", "superseded", "a cancelled or missing check on the exact commit awaited is still a stop"]) assert.ok(s.includes(x), x);
+});
+
+test("drover soul: merge order line carries the one-tail rule (T-MWQM5QQGMOJ)", () => {
+  const l = soul("drover").split("\n").find((x) => x.startsWith("**6. Merge order.**"));
+  assert.ok(l.includes("merge one at a time") && l.includes("tail"), l);
+});
+
+test("test.yml cancels superseded runs of the same workflow and ref (T-MWQM5QQGMOJ)", () => {
+  const y = readFileSync(new URL("../../.github/workflows/test.yml", import.meta.url), "utf8");
+  const top = y.split(/^jobs:/m)[0];
+  assert.match(top, /^concurrency:\s*\n\s+group: \$\{\{ github\.workflow \}\}-\$\{\{ github\.ref \}\}\s*\n\s+cancel-in-progress: true\s*$/m);
+});
+
 test("drover soul: READY_FOR_PR row, step 3 and queue item 6 point to the whole chain; conv links the soul", () => {
   const s = soul("drover");
   const row = s.split("\n").find((l) => l.startsWith("| `READY_FOR_PR`"));
