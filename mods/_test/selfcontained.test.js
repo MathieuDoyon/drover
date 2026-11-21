@@ -24,6 +24,13 @@ test("install.sh refreshes the copies before the test gate", () => {
   assert.ok(sh.indexOf("query.js drover-config/query.js") < sh.indexOf("node --test"), "the query.js copy is made before node --test runs");
 });
 
+test("install.sh never overwrites a managed copy in place: it publishes through a captured link and a rename, and keeps a lock", () => {
+  const sh = fs.readFileSync(path.join(mods, "install.sh"), "utf8");
+  assert.doesNotMatch(sh, /sync_file\(\)/, "the old overwrite-in-place helper is back");
+  assert.doesNotMatch(sh, /install -m 644 drover-github/, "query.js is copied outside the safe rule");
+  for (const needle of ['ln "$key" "$aside"', 'mv -f "$st/snap" "$key"', "mkdir \"$lock\"", "sync_managed drover-github/query.js drover-config/query.js"]) assert.ok(sh.includes(needle), `install.sh lost: ${needle}`);
+});
+
 for (const dir of dirs) {
   const files = dir === "drover-config" ? [...copies.map((f) => [f, path.join(mods, "_lib", f)]), ["query.js", path.join(mods, "drover-github/query.js")]] : copies.map((f) => [f, path.join(mods, "_lib", f)]);
   test(`${dir}: shared files are present and byte-equal`, () => {

@@ -24,7 +24,7 @@ const SK = "sk" + "-live-0123456789";
 const GH = (tag) => "gh" + "p_" + tag + "X".repeat(36); // a 36+ char token after the prefix, like a real one
 const FAKE_SEC = "FAKE_SEC" + "RET";
 const DOCTOR_TOOLS = ["bash", "sh", "env", "cat", "cmp", "readlink", "dirname", "basename", "wc", "tr", "sed", "head", "tail", "grep", "ls", "cut", "expr", "test", "[", "date"];
-const INSTALL_TOOLS = [...DOCTOR_TOOLS, "git", "cp", "mv", "rm", "ln", "install", "mkdir", "awk", "sort", "touch", "chmod", "uname"];
+const INSTALL_TOOLS = [...DOCTOR_TOOLS, "git", "cp", "mv", "rm", "ln", "install", "mkdir", "awk", "sort", "touch", "chmod", "uname", "rmdir"];
 const HASHERS = ["sha256sum", "shasum", "cksum"].filter(which);
 // A private bin dir with symlinks to only the named tools (hashers listed on purpose), plus optional extra entries { name: target }.
 function binDir(tools, hashers, extra = {}) {
@@ -37,12 +37,14 @@ function binDir(tools, hashers, extra = {}) {
 }
 const fakeHerdr = () => { const d = tmp("doctor-fake-"); writeFileSync(join(d, "herdr-app"), "#!/bin/sh\nexit 0\n", { mode: 0o755 }); return d; };
 
+// A real install runs this suite while holding mods/.install.lock (and may leave .install-backups): never copy them, or the fixture's own installer is refused.
+const copyFilter = (p) => !p.includes("node_modules") && !/\/\.install(\.lock|-backups)$/.test(p);
 // a repo whose mods/ is a copy of this one, a Herdr home, and the real installer run once (links + stamp)
-function fixture({ install = true, hashers = HASHERS } = {}) {
+function fixture({ install = true, hashers = HASHERS, src = SRC } = {}) {
   const root = tmp("doctor-test-");
   const repo = join(root, "repo");
   mkdirSync(repo);
-  cpSync(SRC, join(repo, "mods"), { recursive: true, filter: (p) => !p.includes("node_modules") });
+  cpSync(src, join(repo, "mods"), { recursive: true, filter: copyFilter });
   const g = (...a) => { const r = sh(repo, which("git"), ["-c", "user.email=t@t", "-c", "user.name=t", ...a], process.env); assert.equal(r.status, 0, r.stderr); };
   g("init", "-q", "-b", "main"); g("add", "-A"); g("commit", "-q", "-m", "x");
   const home = join(root, "home");
@@ -64,6 +66,14 @@ const lines = (r) => r.stdout.trimEnd().split("\n");
 const line = (r, check) => lines(r).find((l) => new RegExp(`^(ok|FAIL|WARN|skip)  ${check}  `).test(l)) ?? `(no ${check} line)\n${r.stdout}${r.stderr}`;
 const status = (r, check) => line(r, check).split("  ")[0];
 const LINE = /^(ok|FAIL|WARN|skip)  [a-z-]+  .{0,100}$/;
+
+test("a source mods/ holding .install.lock and .install-backups does not break the fixture's installer", () => {
+  const src = tmp("doctor-src-");
+  cpSync(SRC, src, { recursive: true, filter: copyFilter }); // seed without a real outer install's own lock
+  mkdirSync(join(src, ".install.lock")); mkdirSync(join(src, ".install-backups", "run"), { recursive: true });
+  const f = fx({ src });
+  for (const n of [".install.lock", ".install-backups"]) assert.ok(!existsSync(join(f.repo, "mods", n)), n);
+});
 
 test("an installed fixture: 9 check lines in the shared grammar, a summary, exit 0, accept-locks ok, the hooks lines skipped (nothing installed)", () => {
   const f = fx();

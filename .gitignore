@@ -11,3 +11,9 @@ coverage/
 *.tsbuildinfo
 __pycache__/
 .drover/
+# install.sh (safe updates): sidecar copies, retained old files, temp and lock names
+*.new
+.install-backups
+.drover-tmp.*
+.drover-aside.*
+.install.lock
