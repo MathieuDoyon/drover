@@ -2,7 +2,9 @@
 // View-model for the write controls on a remote project's cards (T-MWHVWR8TIJB): pure, so the views stay thin.
 // The state comes from io.js remoteWriteState(); the ops go to io.js remoteSend(), which builds the real request (remote-write.js).
 
-export const OFF_TIP = "not available for omarchy projects yet"; // start / wake / next / agent stay off
+export const OFF_TIP = "not available for projects on the remote machine yet"; // start / wake / next / agent stay off
+export const offTip = (machine) => (machine ? `not available for projects on ${machine} yet` : OFF_TIP);
+const named = (machine) => machine || "the remote machine";
 const COLUMNS = ["backlog", "todo", "doing", "review", "blocked", "done"];
 
 // { on, tip } for any control that writes a card. ws = remoteWriteState(localId).
@@ -58,7 +60,7 @@ export function editOps(card, { title, desc, note, priority, tags, assignee, par
   return ops;
 }
 
-// The card as it is on omarchy once `op` was saved: the editor's new baseline (a revert is then a change, a saved edit is not sent again).
+// The card as it is on the remote once `op` was saved: the editor's new baseline (a revert is then a change, a saved edit is not sent again).
 export function applied(card, op) {
   if (op?.op === "move") return { ...card, column: op.column };
   if (op?.op !== "edit") return card;
@@ -77,10 +79,10 @@ export function outcomeText(o) {
   if (!o) return "";
   switch (o.status) {
     case "saved": return "Saved";
-    case "stale": return "card changed on omarchy: reloaded, try again";
+    case "stale": return `card changed on ${named(o.machine)}: reloaded, try again`;
     case "expired": return "not applied, too old";
     case "pending": return "sent, may still apply";
-    case "unknown": return "outcome unknown: check the card on omarchy";
+    case "unknown": return `outcome unknown: check the card on ${named(o.machine)}`;
     case "refused": case "failed": return o.message || "not sent";
     default: {
       const first = String(o.text ?? "").split("\n")[0].trim() || `error: ${o.message ?? "unknown"}`;
@@ -89,8 +91,8 @@ export function outcomeText(o) {
   }
 }
 
-// The "Writes to omarchy" toggle in the project editor. remote = the saved binding; ws = remoteWriteState.
+// The "Writes to <machine>" toggle in the project editor. remote = the saved binding; ws = remoteWriteState.
 export function writesToggle(remote, ws) {
   const on = remote?.writes !== false;
-  return { on, label: `Writes to ${remote?.machine ?? "omarchy"}`, note: on ? "on" : ws?.frozen ? "frozen" : "off, waiting for sends in flight" };
+  return { on, label: `Writes to ${named(remote?.machine)}`, note: on ? "on" : ws?.frozen ? "frozen" : "off, waiting for sends in flight" };
 }

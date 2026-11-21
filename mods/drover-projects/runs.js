@@ -525,7 +525,7 @@ export const terminalRecord = (address, agent, now, envNames, extra = {}) =>
 // Pure. Stamps `ended` on a terminal the first time it is seen gone, and on the run once all its terminals are gone.
 // The time is when it was first OBSERVED gone (the app may have been closed), not an exact end time.
 // Only terminals with a numeric `started` (saved by a launch that records it) are observed: legacy records stay untouched.
-// Returns the same array when nothing changed, so the caller writes only on a change.
+// Returns the same array when nothing changed, so the caller writes only on a change. Ending a run also drops its `line`.
 export function markEnded(runs, live, alive, now) {
   let changed = false;
   const out = runs.map((r) => {
@@ -537,9 +537,11 @@ export function markEnded(runs, live, alive, now) {
       return { ...t, ended: now };
     });
     const all = terminals.every((t) => typeof t.started === "number" && t.ended != null);
-    if (!tChanged && (!all || r.ended != null)) return r;
+    if (!tChanged && (!all || r.ended != null) && !(r.ended != null && r.line)) return r;
     changed = true;
-    return { ...r, terminals: tChanged ? terminals : r.terminals, ...(all && r.ended == null ? { ended: now } : {}) };
+    // The live line (drover line) goes with the run's end: dropped in the same pass that stamps it, or later for a run that ended with one.
+    const { line, ...rest } = r;
+    return { ...(all || r.ended != null ? rest : r), terminals: tChanged ? terminals : r.terminals, ...(all && r.ended == null ? { ended: now } : {}) };
   });
   return changed ? out : runs;
 }

@@ -1,4 +1,4 @@
-// Remote project step 2, the io.js wiring (T-MWHVWR8TIJB): the writer behind Board/Tasks. Stubbed host, fake omarchy; no real hc, no sleeps.
+// Remote project step 2, the io.js wiring (T-MWHVWR8TIJB): the writer behind Board/Tasks. Stubbed host, fake box1; no real hc, no sleeps.
 import { test, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import { register } from "node:module";
@@ -9,7 +9,7 @@ const R = await import("../_lib/remote.js");
 const IO = await import("../_lib/io.js");
 const S = await import("../_lib/store.js");
 
-const RID = "P-REMOTE1", LID = "P-ONREM", M = "omarchy";
+const RID = "P-REMOTE1", LID = "P-ONREM", M = "box1";
 const SENTINEL = "SENTINEL-sk-not-a-real-secret-0042";
 const card = (id, project, extra = {}) => ({ id, title: `title ${id}`, desc: "", column: "todo", priority: "P2", tags: [], project, archived: false, notes: [], ...extra });
 const REMOTE_PROJECT = (extra = {}) => ({ id: LID, name: "pairstone", repos: [], folders: [], branch: "main", remote: { machine: M, projectId: RID, id: "B-1", ...extra } });
@@ -18,7 +18,7 @@ const base = (p) => p.split("/").pop();
 
 let host, timers, om, notifies;
 const mkCx = () => { const cx = { notify: () => notifies.push(1), spawn: (fn) => Promise.resolve().then(() => fn(cx)).catch(() => {}), timer: { every: (_ms, fn) => timers.push(() => fn(cx)) } }; return cx; };
-// omarchy: its inbox, its board, and the hc surface the laptop sees.
+// box1: its inbox, its board, and the hc surface the laptop sees.
 beforeEach(() => {
   timers = []; notifies = [];
   om = { inbox: {}, step1: [], remote: [], boardReads: 0, board: { "drover.projects": [{ id: RID, name: "r" }], "drover.tasks": [card("T-R1", RID, { rev: 4 }), card("T-R2", RID)], "drover.agents": { env: SENTINEL } } };
@@ -88,7 +88,7 @@ test("remoteSend: a move carries the cached rev, the outcome is saved, and the b
   assert.ok(notifies.length > 0);
 });
 
-test("the whole payload is a local argv item; no remote argv carries it, and the omarchy-only sentinel never reaches the laptop's logs or cache", async () => {
+test("the whole payload is a local argv item; no remote argv carries it, and the box1-only sentinel never reaches the laptop's logs or cache", async () => {
   const cx = await ready();
   const p = IO.remoteSend(LID, { op: "note", id: "T-R1", text: "hello" }, cx);
   await until(() => om.step1.length === 1 && IO.remoteWriter().inflight(M) === 0, "staged");
@@ -121,7 +121,7 @@ test("ownership: local producers still cannot put a card into the remote project
   assert.equal(JSON.stringify(host.state["drover.tasks"]), tasks);
   const p = IO.remoteSend(LID, { op: "add", title: "from laptop", project: "P-LOCAL" }, cx);
   await until(() => om.step1.length === 1 && IO.remoteWriter().inflight(M) === 0, "staged");
-  assert.equal(JSON.parse(om.step1[0].args[3]).project, RID, "the project is forced to the one on omarchy");
+  assert.equal(JSON.parse(om.step1[0].args[3]).project, RID, "the project is forced to the one on box1");
   om.consume(() => "ok: T-NEW1 added");
   for (;;) { fire(); if (await Promise.race([p, drain(2).then(() => null)])) break; }
   assert.equal(JSON.stringify(host.state["drover.tasks"]), tasks, "no local card was created");
@@ -149,7 +149,7 @@ test("cleanup runs when the machine turns fresh (the reconnect): the inbox is li
   assert.equal(om.sawList, true);
 });
 
-// #70: PROTOCOL is 5. The remote writer's gates are minimums (writes >= 2, fields >= 3): omarchy on 4 keeps working, and so does a 5.
+// #70: PROTOCOL is 5. The remote writer's gates are minimums (writes >= 2, fields >= 3): box1 on 4 keeps working, and so does a 5.
 test("remoteWriteState: a protocol 4 or 5 answer keeps writes and the field controls on", async () => {
   for (const level of [4, 5]) {
     IO.resetRemoteWriter();

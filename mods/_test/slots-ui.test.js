@@ -95,14 +95,17 @@ test("Board: slot line 'Slots A/L · W waiting' only in a local project scope; h
 });
 
 for (const [name, Screen, prep] of [["Runs", Runs, (v) => v], ["Room", Room, (v) => v], ["Board", Board, (v) => { v.scope = `project:${P.id}`; return v; }]]) {
-  test(`${name}: one slotSnapshot per render, equal for 3, 30 and 300 cards and runs; the render writes nothing`, async () => {
+  test(`${name}: one slotSnapshot per render (Runs: per cache refresh), equal for 3, 30 and 300 cards and runs; the render writes nothing`, async () => {
     const counts = [];
     for (const n of [3, 30, 300]) {
       world(n, { spawn: name !== "Board" });
       const v = prep(mk(Screen));
       await ready(v, (o) => o.ids.length > 3);
       writes.length = 0;
-      const { calls } = slotCalls(v);
+      // Runs derives in its cache refresh (init, a tick, own saves): that is where its ONE snapshot is taken; its render takes none.
+      let calls;
+      if (name === "Runs") { globalThis.__slotCalls = 0; v.cache.refresh(); calls = globalThis.__slotCalls; assert.equal(slotCalls(v).calls, 0, "Runs: a render takes no snapshot"); }
+      else calls = slotCalls(v).calls;
       counts.push(calls);
       assert.deepEqual(writes, [], `${name} ${n}: a render writes no shared state`);
     }

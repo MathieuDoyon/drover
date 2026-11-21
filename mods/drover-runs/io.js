@@ -7,6 +7,8 @@ import { base64, httpProblem, jiraIssue, jiraKey, githubIssue, prItems } from ".
 import { ownerError, createRemote, bindings as remoteBindings, mergeRemote, cacheKey } from "./remote.js";
 import { createWriter } from "./remote-write.js";
 import { createNeedsCache } from "./needs.js";
+import { createHealth } from "./health.js";
+import { validate as validateLine, activeFor } from "./runline.js";
 import { WAKE_KEY, reschedule, addWake, decide, setStatus, wakeOp } from "./wake.js";
 import { apply as applyKey } from "./keys.js";
 import * as HE from "./herd-export.js";
@@ -15,6 +17,7 @@ import { bind as bindCfg, load as loadCfg, ready as cfgReady, cfg, KEY as CONFIG
 import { soulHash } from "./herd-export.js";
 import { lessonPaths, boundText } from "./lessons.js";
 import { exportName } from "./herd-share.js";
+import { classifyChecks, reviewOf, proofPathOf, buildEvidence, ghCall, ghProblem, repoOfUrl, ENV_BIN } from "./evidence.js";
 import { AGENTS_KEY, RUNS_KEY, config, plan, argv, leaderPrompt, createCardsPrompt, memberPrompt, worktreeOf, terminalName, startGuard, projectOfDrover, isLiveDrover, slotSnapshot, slotsOf, reconcile, runFolder, markEnded, orphanedWorkers, terminalRecord, agentKind, newUuid, withSessionFlag, withMarker, pickCodexSession, liveStatuses, memberStatus, resumeCandidates, resumeToken, resumeGuard, resumePrompt, resumedTerminal, resumedRun, linkResumed, sessionMarker, claimTtl, launchArgv, parseAgentEnv, envProblem, BIND_KEY, droverChoices, defaultDrover, maxRuns, keptRuns, pruneRuns } from "./runs.js";
 
 export const load = () => list(shared(KEY));
@@ -54,6 +57,9 @@ export const edit = (id, column, draft, large, parent, remoteCard) => {
   if (id == null) setShared(NEWTASK_KEY, { id: overlay, at: Date.now() });
   return overlay;
 };
+
+// B3a: the read-only proof dialog of a Review card (hosted by drover-todos, see drover-todos/proof.js). It names the card by id AND project and reads this machine only.
+export const openProof = ({ id, project }) => openOverlay({ mod: "drover-todos", kind: "dialog", modal: true, width: 720, height: 0.8, props: { proof: { id, project: project ?? null } } });
 
 // The guard in shared state: { id, at } (a Create dialog is open; its View refreshes `at` every HEARTBEAT_MS and clears it on close),
 // or { pending: true, at, token } (a key press reserving its slot), or an older plain id string. Shared state is the channel
@@ -154,10 +160,50 @@ export function watchRemote(cx, enabled = () => true) {
   cx.timer?.every?.(1000, tick);
   tick(cx);
 }
+// ---- Machines in the sidebar (T-MWO2HEHGIEC): a polled health cache. health.js is pure; this is its host side. ----
+// The list is local (`hc machine ls --json`). A read is the mod host's exec of `hc exec --on <m> ... python3 -c <fixed script>`: argv only (the host has no stdin).
+// The host call carries a ms timeout above hc's own 20 s, so it always settles. Nothing here writes to a machine, and render only reads machineView().
+const MACHINE_LIST_MS = 8000, MACHINE_EXEC_MS = 22000;
+let machineScreen = () => true;
+const makeHealth = () => createHealth({
+  list: async () => {
+    const r = await hc(["machine", "ls", "--json"], { timeout: MACHINE_LIST_MS });
+    if (!r || r.code !== 0) throw new Error("machine ls");
+    const o = JSON.parse(r.stdout);
+    if (!Array.isArray(o?.machines)) throw new Error("machine ls shape");
+    return o.machines.map((m) => ({ name: m?.name, state: m?.state }));
+  },
+  exec: (argv) => exec("hc", argv, { timeout: MACHINE_EXEC_MS }),
+  now: () => Date.now(),
+  enabled: () => cfg("drover-tasks", "machine_polling") === true,
+  active: () => machineScreen(),
+});
+let health = makeHealth();
+export const machineView = () => health.view();
+export const resetMachineHealth = () => { health = makeHealth(); };
+export const retryMachine = (name) => health.retry(name);
+// The sidebar's own 1 s timer: health.tick() starts what is due (list, reads) and repaints only when the shown result changed. enabled(): the screen's switch.
+export function watchMachines(cx, enabled = () => true) {
+  machineScreen = enabled;
+  let last = "";
+  const tick = (cx) => {
+    health.tick();
+    const v = health.view();
+    const sig = JSON.stringify({ ...v, machines: v.machines.map((m) => ({ ...m, ageMs: m.ageMs === null ? null : Math.floor(m.ageMs / 60000) })) });
+    if (sig !== last) { last = sig; cx.notify?.(); }
+  };
+  cx.timer?.every?.(1000, tick);
+  tick(cx);
+}
 // What the Needs-you cache reads, once: every card (local and remote), runs, and the live agents and terminals. Called by a cache refresh only, never by render.
 export function needsWorld() {
   const m = loadMerged();
   return { tasks: m.tasks, remotes: m.remotes, runs: loadRuns(), agents: agents(), terminals: terminals(), wakes: loadWakes() };
+}
+// What the Runs screen's cache reads (one read of each). resume: also the resume state of every run (a few shared keys per run), asked only while ended runs are shown.
+export function runsWorld({ resume = false } = {}) {
+  return { runs: loadRuns(), tasks: load(), projects: loadProjects(), agents: agents(), terminals: terminals(),
+    ...(resume ? { resumeOf: (id) => { const state = resumeState(id); return { state, can: state === "none" && canResume(id) }; } } : {}) };
 }
 // A screen's Needs-you cache: refreshed once now and every second by its own timer (live agent status has no event), repainting only when the result changed.
 // gate(): the screen's switch (false: no refresh, no remote read). remote: this screen also keeps the remote boards fresh (a mod copy may be the only one open).
@@ -1477,6 +1523,8 @@ async function drain() {
       continue;
     } else if (cmd?.op === "next") {
       reply = nextFor(cmd.from);
+    } else if (cmd?.op === "line") {
+      reply = lineOp(cmd);
     } else if (cmd?.op === "project-add") {
       reply = await projectAdd(cmd);
     } else if (cmd?.op === "add") {
@@ -1515,6 +1563,22 @@ async function writeReply(out, reply) {
   } catch {}
   await fs.unlink(tmp).catch(() => {});
   await fs.writeFile(out, reply);
+}
+
+// line (drover line): what a run says it is doing. Synchronous: the membership check and the write share one turn. Validated here again (a hand-written
+// request file skips the CLI); errors name a rule, never the text. `by` is a claimed terminal (same trust as `note`): it guards against mistakes only.
+function lineOp(cmd) {
+  const id = typeof cmd.id === "string" && /^T-[A-Z0-9]+$/.test(cmd.id) ? cmd.id : "";
+  const v = validateLine(cmd.text, cmd.progress);
+  if (!v.ok) return `error: ${v.error}`;
+  const { live, alive } = liveState();
+  const runs = loadRuns();
+  const by = typeof cmd.by === "string" ? cmd.by : "";
+  const hit = activeFor(runs, id, by, live, alive);
+  if (!hit) return `error: no active run for ${id || "that card"} from this terminal`;
+  const line = { text: v.text, ...(v.progress === null ? {} : { progress: v.progress }), at: Date.now(), by: terminalName(runs, by) || by };
+  setShared(RUNS_KEY, runs.map((r) => (r === hit.run ? { ...r, line } : r)));
+  return `ok: ${hit.run.id} line set`;
 }
 
 // config-set (protocol 5): the only config write an agent has. Local only (never in the remote writer's ops). Synchronous: the compare and the write share one turn.
@@ -1775,6 +1839,130 @@ export async function loadContext(run, task, current = () => true) {
     out.prs = prItems(rows);
   } catch (e) { if (e === CONTEXT_STALE) throw e; out.errors.push(`Pull requests: ${e?.message ?? e}`); }
   return out;
+}
+
+// B3a: the proof of one Review card, read when the dialog opens (never in render). READ-ONLY: git rev-parse/cat-file/log/diff and gh GETs
+// (repo view, pr list, pr view, api GET), each gh call as argv through `/usr/bin/env -u <every selector> gh …` (no shell) so it uses the app's own stored login.
+// Identity: head A is the PR head read in ONE `gh pr view` (with the checks); the base OID comes from that PR (never `origin/<base>`); log and diff
+// use those OIDs only. Without a PR, A is the worktree HEAD, read once. Anything that cannot be proven is `unknown`, never "fine".
+const SHA40 = /^[0-9a-f]{40}$/;
+const PR_URL_IN = /https:\/\/github\.com\/[\w.-]+\/[\w.-]+\/pull\/\d+/g;
+const ghRun = (args, cwd) => { const c = ghCall(args); return exec(c.cmd, c.args, { ...(cwd ? { cwd } : {}), timeout: 30000 }).catch((e) => ({ code: 1, stdout: "", stderr: String(e?.message ?? e) })); };
+const gitRead = (args, cwd) => exec("git", args, { ...(cwd ? { cwd } : {}), timeout: 15000 }).catch(() => ({ code: 1, stdout: "", stderr: "" }));
+const jsonOf = (r) => { try { return JSON.parse(r.stdout); } catch { return undefined; } };
+const PR_FIELDS = "number,url,state,baseRefName,baseRefOid,headRefName,headRefOid,statusCheckRollup";
+
+// The PR numbers a pr note names. ONLY a PR-qualified reference counts: a full PR URL or `pull/N`, "PR #N", "pull request #N". A bare "#N" is
+// ignored (it could be an issue): it is never an explicit PR and never an ambiguity. Write "PR #N" in a pr note to be recognized.
+const prNumbers = (text) => [...new Set([...text.matchAll(/\b(?:(?:PR|pull\s+request)\s*#|pull\/)(\d+)\b/gi)].map((m) => Number(m[1])))];
+export async function loadEvidence(task, run, current = () => true) {
+  const live = () => { if (!current()) throw CONTEXT_STALE; };
+  live();
+  const notes = Array.isArray(task?.notes) ? task.notes : [];
+  const handoffNote = [...notes].reverse().find((n) => n?.kind === "handoff");
+  const wt = run?.worktree ?? null;
+  const base = { at: Date.now(), summary: { title: String(task?.title ?? ""), desc: String(task?.desc ?? "") }, handoff: handoffNote ? { text: String(handoffNote.text ?? ""), by: handoffNote.by ?? null, at: handoffNote.at ?? null } : null, proof: proofPathOf(notes), actor: null, localDiffers: false };
+  const done = (parts, extra = {}) => ({ ...base, changes: { state: "unavailable", reason: "no PR head to compare" }, ...extra, evidence: buildEvidence({ checks: classifyChecks(undefined, { noPr: parts.pr?.state === "none" }), verdict: reviewOf(notes, parts.head ?? null), ...parts }) });
+  const unknown = (reason, parts = {}) => done({ pr: { state: "unknown", reason }, ...parts });
+
+  // The PR the card names is authoritative; a branch search is only for a card that names none.
+  const fromSource = task?.source?.kind === "github" && /\/pull\/\d+/.test(task.source.url ?? "") ? (String(task.source.url).match(PR_URL_IN) ?? [])[0] ?? null : null;
+  const noteUrls = notes.filter((n) => n?.kind === "pr").flatMap((n) => String(n.text ?? "").match(PR_URL_IN) ?? []);
+  const fromNote = noteUrls.at(-1) ?? null;
+  if (fromSource && fromNote && fromSource !== fromNote) return unknown("ambiguous");
+  // A pr note that names the PR by number only ("PR #5") is explicit too, in the recorded repo (read below). Two numbers, or a number that is
+  // not the URL's, are ambiguous; an explicit reference that cannot be resolved is unknown, never a fall-through to "no PR".
+  let namedNum = null;
+  const refsOf = (n) => (n?.kind === "pr" ? prNumbers(String(n.text ?? "")) : []);
+  const newestRefs = [...notes].reverse().map(refsOf).find((l) => l.length) ?? [];
+  if (!fromSource && !fromNote) {
+    if (newestRefs.length > 1) return unknown("ambiguous");
+    namedNum = newestRefs[0] ?? null;
+  } else {
+    const urlNum = Number((fromSource ?? fromNote).match(/\/pull\/(\d+)/)[1]);
+    if (newestRefs.some((x) => x !== urlNum)) return unknown("ambiguous");
+  }
+  const named = fromSource ?? fromNote;
+
+  const envOk = (await exec("test", ["-x", ENV_BIN]).catch(() => ({ code: 1 }))).code === 0;
+  live();
+  if (!envOk) return unknown("identity"); // gh's selectors cannot be removed: no gh request at all
+  if (!named && !namedNum && !wt?.branch) return unknown("no-branch");
+  const folderOk = wt?.path ? await isDir(wt.path) : false;
+  live();
+  const cwd = folderOk ? wt.path : wt?.repo ?? null; // a finished run's worktree folder is gone: gh asks from the repo, qualified by the recorded branch
+
+  let url = named, repo = named ? repoOfUrl(named) : null;
+  if (named && !repo) return unknown("unexpected");
+  if (!named && namedNum && !cwd) return unknown("no-repo"); // nowhere to read the repo from
+  if (!named) {
+    const rv = await ghRun(["repo", "view", "--json=nameWithOwner"], cwd);
+    live();
+    if (rv.code !== 0) return unknown(ghProblem(rv.stderr));
+    repo = jsonOf(rv)?.nameWithOwner;
+    if (!/^[\w.-]+\/[\w.-]+$/.test(repo ?? "")) return unknown("unexpected");
+    if (namedNum) url = `https://github.com/${repo}/pull/${namedNum}`;
+    else {
+    const ls = await ghRun(["pr", "list", "--head", wt.branch, "--state", "all", "-R", repo, "--json=number,url,state"], cwd);
+    live();
+    if (ls.code !== 0) return unknown(ghProblem(ls.stderr), { repo });
+    const rows = jsonOf(ls);
+    if (!Array.isArray(rows)) return unknown("unexpected", { repo });
+    if (rows.length > 1) return unknown("ambiguous", { repo });
+    if (rows.length === 0) { // no PR in any state: the evidence is the worktree commit, read once
+      if (!folderOk) return unknown("worktree-gone", { repo });
+      const h = await gitRead(["rev-parse", "HEAD"], wt.path);
+      live();
+      const head = h.code === 0 ? h.stdout.trim() : "";
+      if (!SHA40.test(head)) return unknown("unexpected", { repo });
+      return done({ repo, pr: { state: "none" }, head, headSource: "worktree" }, { changes: { state: "unavailable", reason: "no PR, so no base to compare" } });
+    }
+    url = rows[0].url;
+    if (repoOfUrl(url) !== repo) return unknown("repo-mismatch", { repo });
+    }
+  }
+
+  // ONE read of the PR: its head, its checks and (when this gh offers it) its base OID all come from the same answer.
+  let pv = await ghRun(["pr", "view", url, `--json=${PR_FIELDS}`], cwd);
+  if (pv.code !== 0 && /unknown json field/i.test(pv.stderr ?? "")) pv = await ghRun(["pr", "view", url, `--json=${PR_FIELDS.replace("baseRefOid,", "")}`], cwd);
+  live();
+  if (pv.code !== 0) return unknown(ghProblem(pv.stderr), { repo });
+  const p = jsonOf(pv);
+  if (!p || typeof p !== "object" || repoOfUrl(p.url) !== repo || !Number.isInteger(p.number) || !SHA40.test(p.headRefOid ?? "")) return unknown(p && repoOfUrl(p.url) !== repo ? "repo-mismatch" : "unexpected", { repo });
+  let baseSha = SHA40.test(p.baseRefOid ?? "") ? p.baseRefOid : null;
+  if (!baseSha) { // GET the PR's base: never the local origin/<base>, which can be arbitrarily stale
+    const api = await ghRun(["api", `repos/${repo}/pulls/${p.number}`, "--jq=.base.sha"], cwd);
+    live();
+    const sha = api.code === 0 ? String(api.stdout).trim() : "";
+    if (SHA40.test(sha)) baseSha = sha;
+  }
+  const head = p.headRefOid;
+  const who = await ghRun(["api", "user", "--jq=.login"], cwd);
+  live();
+  const login = who.code === 0 ? String(who.stdout).trim() : "";
+  const extra = { actor: /^[\w-]{1,39}(\[bot\])?$/.test(login) ? login : null };
+  if (folderOk) { // shown only: the local branch differs from the PR head (A is still what everything uses)
+    const h = await gitRead(["rev-parse", "HEAD"], wt.path);
+    live();
+    extra.localDiffers = h.code === 0 && SHA40.test(h.stdout.trim()) && h.stdout.trim() !== head;
+  }
+  let changes;
+  if (!baseSha) changes = { state: "unavailable", reason: "PR base not known" };
+  else if (!cwd) changes = { state: "unavailable", reason: "no local checkout" };
+  else {
+    const hasA = (await gitRead(["cat-file", "-e", `${head}^{commit}`], cwd)).code === 0;
+    const hasB = hasA && (await gitRead(["cat-file", "-e", `${baseSha}^{commit}`], cwd)).code === 0;
+    live();
+    if (!hasA) changes = { state: "unavailable", reason: "head not fetched" };
+    else if (!hasB) changes = { state: "unavailable", reason: "base not fetched" };
+    else {
+      const lg = await gitRead(["log", "--oneline", `${baseSha}..${head}`], cwd);
+      const df = await gitRead(["diff", "--stat", `${baseSha}...${head}`], cwd);
+      live();
+      changes = lg.code === 0 && df.code === 0 ? { state: "ok", commits: lg.stdout.split("\n").filter(Boolean), files: df.stdout.trimEnd() } : { state: "unavailable", reason: "git could not list the changes" };
+    }
+  }
+  return done({ repo, pr: { state: "found", number: p.number, url: p.url, prState: p.state }, base: p.baseRefName ?? null, baseSha, head, headSource: "pr", checks: classifyChecks(p.statusCheckRollup) }, { ...extra, changes });
 }
 
 // Keeps the last good part when a refresh fails it, with the error beside it.

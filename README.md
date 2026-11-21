@@ -116,7 +116,7 @@ Node 22. `mods/install.sh` runs every test, then installs. Edit the shared libra
 
 ## Status
 
-Early and in daily use. Needs Herdr 0.1.15 or later. Tested on macOS; a Linux install as a service is described in the [omarchy guide](docs/guides/omarchy-permanent.md) (`deploy/omarchy/`). Screens are read-only for Jira and GitHub, and agents never push or merge without your permission.
+Early and in daily use. Needs Herdr 0.1.15 or later. Tested on macOS; other machines are used through `hc`, see [Remote machines](docs/guides/remote-machines.md). Screens are read-only for Jira and GitHub, and agents never push or merge without your permission.
 
 ## License
 

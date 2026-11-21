@@ -15,7 +15,7 @@ const IO = await import(new URL("../_lib/io.js", import.meta.url).href);
 const NAV = await import(new URL("../_lib/needsnav.js", import.meta.url).href);
 
 const P = { id: "P-1", name: "Alpha", repos: [], folders: [], branch: "main" };
-const PR = { id: "P-R", name: "Omarchy", repos: [], folders: [], branch: "main", remote: { machine: "omarchy", projectId: "P-9", id: "B-1", writes: true } };
+const PR = { id: "P-R", name: "box1", repos: [], folders: [], branch: "main", remote: { machine: "box1", projectId: "P-9", id: "B-1", writes: true } };
 // odd cards are in progress with a gone agent (Needs you), even ones are doing with no agent: n cards give ceil(n/2) in the Needs you group.
 const card = (i, o = {}) => ({ id: `T-${i}`, title: `card ${i}`, column: "doing", priority: "P2", tags: [], created: i, updated: i, project: P.id, archived: false, agent: i % 2 ? `t${100 + i}` : null, run: null, notes: [], desc: "", assignee: null, source: null, ...o });
 const LAYOUT = (needsPage) => ({ id: "root", type: "row", children: [{ id: "drover", type: "column", hidden: false, children: [
@@ -27,7 +27,7 @@ function setup(View, tasks, { remote = null, layout = LAYOUT(false), agentsList 
   IO.resetRemoteWriter();
   const calls = Object.fromEntries([...SIDE, "agents", "notified"].map((k) => [k, 0]));
   const raw = { "drover.tasks": tasks, "drover.projects": remote ? [P, PR] : [P], "drover.runs": [], ...extraRaw };
-  if (remote) raw["drover.remote.omarchy.P-9"] = { at: Date.now(), tasks: remote, picks: { assignees: [], projects: [] } };
+  if (remote) raw["drover.remote.box1.P-9"] = { at: Date.now(), tasks: remote, picks: { assignees: [], projects: [] } };
   const runs = [], overlays = [];
   const host = {
     props: {}, notified: [], home: "/h", appHome: "/nowhere", state: new Proxy(raw, { set(o, k, v) { calls.set++; o[k] = v; return true; } }),

@@ -53,4 +53,4 @@ Wakeups → `+`, or in a terminal `drover wake <terminal|T-…> <when> "<message
 
 ### Use the agent CLI
 
-`~/.config/herdr-app/mods/drover-tasks/bin/drover` (no arguments prints help). Started agents get its path in their prompt.
+`~/.config/herdr-app/mods/drover-tasks/bin/drover` (no arguments prints help). Started agents get its path in their prompt. An agent in a run says what it is doing with `drover line <T-…> "<text, 40 characters at most>" [--progress n]`: the line shows on the run card and the Tasks row, and goes when the run ends (see [Runs](mods/runs.md#live-line)).

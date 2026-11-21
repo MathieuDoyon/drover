@@ -99,9 +99,9 @@ test("counts ignore filters: the input is every card, there is no filter argumen
 });
 
 test("a remote card is in its group by its qualified key (a remote card has no local agent, so it is never Needs you)", () => {
-  const t = card({ id: "T-R", column: "blocked", remote: { machine: "omarchy", projectId: "P-9" } });
+  const t = card({ id: "T-R", column: "blocked", remote: { machine: "box1", projectId: "P-9" } });
   const r = needsCounts([t], none, new Set(), []);
-  assert.deepEqual(r.byGroup.blocked, ["omarchy/P-9/T-R"]);
+  assert.deepEqual(r.byGroup.blocked, ["box1/P-9/T-R"]);
   assert.equal(r.counts.needs, 0);
 });
 
@@ -123,11 +123,11 @@ function pick(r) { return r && { group: r.group, reason: r.reason }; }
 
 // ---- Review round 1: cards of different boards can share an id; each keeps its own row, group and identity. ----
 import { cardKey } from "../_lib/needs.js";
-const remote = (o, machine = "omarchy", projectId = "P-9") => card({ ...o, project: "P-L", remote: { machine, projectId } });
+const remote = (o, machine = "box1", projectId = "P-9") => card({ ...o, project: "P-L", remote: { machine, projectId } });
 
 test("cardKey: a local card keeps its id; a remote card is qualified by machine and remote project", () => {
   assert.equal(cardKey(card({ id: "T-1" })), "T-1");
-  assert.equal(cardKey(remote({ id: "T-1" })), "omarchy/P-9/T-1");
+  assert.equal(cardKey(remote({ id: "T-1" })), "box1/P-9/T-1");
   assert.notEqual(cardKey(remote({ id: "T-1" }, "a")), cardKey(remote({ id: "T-1" }, "b")));
   assert.notEqual(cardKey(remote({ id: "T-1" }, "a", "P-1")), cardKey(remote({ id: "T-1" }, "a", "P-2")));
 });

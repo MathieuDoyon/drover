@@ -263,7 +263,7 @@ test("invalid ops are refused with the inbox's errors and commit nothing", async
   const dir = tmp();
   const id = (await addCard(dir, "card")).result.id;
   const cases = [
-    ["unknown note kind", env("note", { id, text: "x", kind: "bogus" }), /Unknown note kind bogus: use decision, log, blocker, pr, handoff/],
+    ["unknown note kind", env("note", { id, text: "x", kind: "bogus" }), /Unknown note kind bogus: use decision, log, blocker, pr, handoff, review/],
     ["bad priority", env("add", { title: "t", priority: "P9" }), /Bad priority P9: use P0, P1, P2, P3/],
     ["unknown column", env("move", { id, column: "nowhere" }), /Unknown column nowhere \(use /],
     ["bad parent", env("add", { title: "t", parent: "T-NOPE" }), /Parent T-NOPE not found/],
@@ -394,6 +394,18 @@ test("import is idempotent by movedFrom across two nonces and carries the notes"
   assert.equal(noProject.ok, false, "a project that is not on the board is refused");
   const badFrom = await sub(dir, env("import", { movedFrom: "", task }));
   assert.equal(badFrom.ok, false);
+});
+
+test("import refuses a malformed review note and keeps a valid one", async () => {
+  const dir = tmp();
+  const base = { title: "has a review", column: "review", created: NOW - 5000 };
+  const bad = await sub(dir, env("import", { movedFrom: "src-rv-1", task: { ...base, notes: [{ at: NOW - 4000, by: "inspector", text: "all good", kind: "review" }] } }));
+  assert.equal(bad.ok, false);
+  assert.match(String(bad.error ?? ""), /review note/i);
+  const text = `head=${"d".repeat(40)} verdict=pass report=/r/review.md`;
+  const good = ok(await sub(dir, env("import", { movedFrom: "src-rv-2", task: { ...base, notes: [{ at: NOW - 4000, by: "inspector", text, kind: "review" }] } })));
+  assert.ok(good.result.id);
+  assert.equal(newest(dir).tasks[0].notes[0].kind, "review");
 });
 
 const SECRET_A = "sk" + "-live-" + "0123456789abcdef";

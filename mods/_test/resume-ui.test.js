@@ -22,7 +22,8 @@ const walk = (n, out = []) => { out.push(n); for (const k of n.kids ?? []) walk(
 const nodeOf = (root, id) => walk(root[NODE]).find((n) => n.id === id);
 let host, sim, cx, view;
 // The element stub records only while __rec is set.
-const draw = () => { globalThis.__rec = { ids: [], texts: [] }; try { return view.render(cx); } finally { globalThis.__rec = undefined; } };
+// Runs draws from its cache, refreshed by a 1 s tick: each draw is preceded by a tick.
+const draw = () => { if (view instanceof Runs) view.cache.refresh(); globalThis.__rec = { ids: [], texts: [] }; try { return view.render(cx); } finally { globalThis.__rec = undefined; } };
 
 // A scripted git for a worktree that is still there and registered (so resume does not need real git here).
 const gitOk = (args) => {

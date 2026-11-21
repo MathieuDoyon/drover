@@ -52,7 +52,7 @@ Squads → **Export…** and **Import…**, or `drover agents export` and `drove
 
 **`queued` is not restored.** When no Tasks, Board or Wakeups mod is open (a headless machine), an import answers `queued:` and applies later, when a mod opens, and not at all after 1 hour or if the herd changed. Check `drover squads` before you call it done.
 
-**A headless machine** (for example a Linux box over `hc`): see [Headless machine over hc](guides/share-a-herd.md#headless-machine-over-hc). The permanent omarchy box is not on protocol 4 yet, so that recipe is not verified there.
+**A headless machine** (for example a Linux box over `hc`): see [Headless machine over hc](guides/share-a-herd.md#headless-machine-over-hc). Set the machine up first: [Remote machines](guides/remote-machines.md).
 
 ## The `drover` command-line tool
 
@@ -64,7 +64,7 @@ Squads → **Export…** and **Import…**, or `drover agents export` and `drove
 | `projects`, `squads`, `next` | List projects, squads and agents; show free slots and Ready cards (queue mode) |
 | `add "<title>" [--desc …] [--tag …] [--column …] [--priority P0-P3] [--project …] [--parent <T-…>]` | Create a task |
 | `move <T-…> <backlog\|ready\|in-progress\|review\|blocked\|done>` | Move a card (an agent never moves to done). The names are the Board's column names; the old `todo` and `doing` still work as input |
-| `note <T-…> [--kind decision\|log\|blocker\|pr\|handoff] "<text>"`, `edit`, `link`, `archive`, `task-project` | Notes and edits |
+| `note <T-…> [--kind decision\|log\|blocker\|pr\|handoff\|review] "<text>"`, `edit`, `link`, `archive`, `task-project` | Notes and edits |
 | `project add "<name>" --repo <abs path> [--branch <b>] [--folder <abs path>]…` | Create a project (for a headless Drover); same request again answers `exists` |
 | `start <T-…\|-> <squad\|agent> [--worktree]` | Open a squad on a task; its leader reports to `$HC_TERMINAL_ID` |
 | `agents export [--out <file>] [--agent <id>]… [--squad <id>]…`, `agents import <file> [--confirm <token>]` | Export or import the herd (import is a dry run until `--confirm`; protocol 4) |

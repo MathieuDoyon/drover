@@ -82,7 +82,7 @@ Edit `mods/_lib/*.js` only; the copies in each mod are tracked and refreshed by 
 ## Not covered here
 
 - Board data, agents and squads from another computer live in `~/.config/herdr-app/shared.json`. A new home starts empty.
-- Running Drover as a service on a Linux box: [guide](guides/omarchy-permanent.md).
+- Using another machine (Linux or macOS) through `hc`: [Remote machines](guides/remote-machines.md).
 
 ## Remove
 

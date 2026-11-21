@@ -3,6 +3,7 @@
 // Pure: no herdr import, so `node --test mods/_lib` runs it.
 import { parseSourceUrl } from "./sources.js";
 import { isOrgSlug } from "./lessons.js";
+import { parseReview } from "./evidence.js";
 
 export const KEY = "drover.tasks";
 export const COLUMNS = [
@@ -209,7 +210,10 @@ export function saveText(tasks, id, { title, desc }, now = Date.now()) {
 
 // Property edits that save at once: one field, patched onto the stored task. "status" is the column.
 // Why a note was written: the badge on the card. A note without a kind is a plain note.
-export const NOTE_KINDS = ["decision", "log", "blocker", "pr", "handoff"];
+// `review` is structured: `head=<40-hex> verdict=pass|adverse report=<abs path>` (see evidence.js). A review note that does not parse is refused.
+export const NOTE_KINDS = ["decision", "log", "blocker", "pr", "handoff", "review"];
+export const REVIEW_NOTE_FORMAT = "head=<40-hex commit> verdict=pass|adverse report=<absolute path>";
+export const reviewTextError = (kind, text) => (kind === "review" && !parseReview(text) ? `Bad review note: use ${REVIEW_NOTE_FORMAT} (a path with spaces in double quotes)` : null);
 
 const PATCH_FIELDS = { title: "title", desc: "desc", status: "column", priority: "priority", assignee: "assignee", project: "project", tags: "tags", parent: "parent" };
 export function patchField(tasks, id, field, value, now = Date.now()) {
@@ -347,6 +351,8 @@ export function applyCommand(tasks, cmd, now, ctx) {
     const cur = tasks.find((t) => t.id === cmd.id);
     if (!text) return { error: "Note is empty" };
     if (!cur) return { error: `Task ${cmd.id} not found` };
+    const bad = reviewTextError(kind, text);
+    if (bad) return { error: bad };
     const by = String(cmd.by ?? "").trim() || "you";
     return update(tasks, cmd.id, { notes: [...(cur.notes ?? []), { id: freshNoteId(cur.notes), at: now ?? Date.now(), by, text, ...(kind ? { kind } : {}) }] }, now);
   }
@@ -358,6 +364,8 @@ export function applyCommand(tasks, cmd, now, ctx) {
     if (cmd.op === "note-rm") return update(tasks, cmd.id, { notes: notes.filter((n) => n.id !== cmd.noteId) }, now);
     const text = String(cmd.text ?? "").trim();
     if (!text) return { error: "Note is empty" };
+    const bad = reviewTextError(notes.find((n) => n.id === cmd.noteId)?.kind, text); // an edit keeps the kind, so a review note stays parseable
+    if (bad) return { error: bad };
     return update(tasks, cmd.id, { notes: notes.map((n) => (n.id === cmd.noteId ? { ...n, text, edited: cmd.now ?? now ?? Date.now() } : n)) }, now);
   }
   if (cmd.op === "edit") { // protocol 3: title, desc, priority, tags, assignee, parent, project in ONE update (one rev bump); omitted = untouched

@@ -1,4 +1,4 @@
-// Remote project, step 2: the laptop writes to omarchy's inbox (T-MWHVWR8TIJB). Fake hc runner (records argv + stdin); no real hc, no sleeps.
+// Remote project, step 2: the laptop writes to box1's inbox (T-MWHVWR8TIJB). Fake hc runner (records argv + stdin); no real hc, no sleeps.
 import { test, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import { register } from "node:module";
@@ -12,13 +12,13 @@ const { until, drain } = await import(new URL("./stubs/until.js", import.meta.ur
 const W = await import("../_lib/remote-write.js");
 const R = await import("../_lib/remote.js");
 
-const M = "omarchy", PID = "P-REMOTE1";
+const M = "box1", PID = "P-REMOTE1";
 const SENTINEL = "SENTINEL-sk-not-a-real-secret-0042";
-const EPOCH = 1_700_000_000; // omarchy's `date +%s`
+const EPOCH = 1_700_000_000; // box1's `date +%s`
 const KEY = R.cacheKey(M, PID);
 const DIR = ".config/herdr-app/data/drover-inbox";
 
-// A fake hc. `inbox` is omarchy's folder: { name -> text }. `mode` decides what the send does:
+// A fake hc. `inbox` is box1's folder: { name -> text }. `mode` decides what the send does:
 //   Step 1 (local exec) stages the JSON as `.<nonce>.tmp`; step 2 (remote exec) renames it. mode: ok | stage-fail: step 1 fails |
 //   before: step 2 drops before the rename | after: rename done, reply lost
 const sc = (a) => a[a.indexOf("-c") + 1]; // the sh -c script
@@ -68,7 +68,7 @@ function fakeHc() {
     }
     return { code: 2, stdout: "", stderr: "unexpected" };
   };
-  // omarchy's consumer: answers every .json file with `reply(cmd)`.
+  // box1's consumer: answers every .json file with `reply(cmd)`.
   f.consume = (reply) => { for (const n of Object.keys(f.inbox)) if (n.endsWith(".json")) { const cmd = JSON.parse(f.inbox[n]); delete f.inbox[n]; f.inbox[n.replace(/\.json$/, ".result")] = reply(cmd, n); } };
   return f;
 }
@@ -97,7 +97,7 @@ async function enable() {
   clock += 1000; await w.tick(); await p;
   hc.calls.length = 0;
 }
-// Send an op, let omarchy answer it, tick, return the outcome.
+// Send an op, let box1 answer it, tick, return the outcome.
 async function sendAndAnswer(op, reply) {
   const n = hc.sends().length;
   const p = w.send(M, PID, op);
@@ -133,7 +133,7 @@ test("1a any op outside the whitelist is refused and nothing is sent", async () 
   assert.equal(hc.sends().length, 0);
 });
 
-test("1a two argv-only steps: the JSON is a local argv item only; the remote script has the nonce as $0 and omarchy stamps date +%s", async () => {
+test("1a two argv-only steps: the JSON is a local argv item only; the remote script has the nonce as $0 and box1 stamps date +%s", async () => {
   await enable();
   await sendAndAnswer({ op: "move", id: "T-AB1", column: "doing" }, "ok: T-AB1 -> doing");
   const s1 = lastSend();
@@ -270,7 +270,7 @@ test("1b3 frozen is reported only after the in-flight sends end", async () => {
   clock += 1000; await w.tick(); void p;
 });
 
-// the drain-check (a disposable inbox) is deploy/omarchy/drain-check.sh, Job 2.
+// the drain-check (a disposable inbox) is the deploy drain-check.sh, Job 2.
 
 // ---- 1c: result mapping ----
 test("1c ok saves, stale reloads, expired says too old", async () => {
@@ -278,7 +278,7 @@ test("1c ok saves, stale reloads, expired says too old", async () => {
   let o = await sendAndAnswer({ op: "move", id: "T-AB1", column: "doing" }, "ok: T-AB1 -> doing");
   assert.equal(o.status, "saved");
   o = await sendAndAnswer({ op: "move", id: "T-AB1", column: "doing" }, "error: stale: card T-AB1 is at rev 9, request saw 7");
-  assert.equal(o.status, "stale"); assert.equal(o.message, "card changed on omarchy");
+  assert.equal(o.status, "stale"); assert.equal(o.message, "card changed on the remote machine");
   assert.deepEqual(reloads, [[M, PID]]);
   o = await sendAndAnswer({ op: "move", id: "T-AB1", column: "doing" }, "error: expired: arrived 300s ago, ttl 120000ms; not applied");
   assert.equal(o.status, "expired"); assert.equal(o.message, "not applied, too old");
@@ -437,7 +437,7 @@ test("1g step 1 leftovers: an own-origin `.L<origin>-*.tmp` the server reports a
   void p;
 });
 
-// ---- T-MWKX74YE6RM: a staging file that is never renamed must not sit in omarchy's inbox ----
+// ---- T-MWKX74YE6RM: a staging file that is never renamed must not sit in box1's inbox ----
 test("1h step 1 fails although the file landed: the own staging file is removed at once, nothing is renamed", async () => {
   await enable();
   hc.mode = "stage-landed-fail";
@@ -726,7 +726,7 @@ const FIELD_OPS = [
   { op: "edit", id: "T-AB1", assignee: "none" }, { op: "edit", id: "T-AB1", parent: "T-AB2" }, { op: "edit", id: "T-AB1", parent: "none" }, { op: "edit", id: "T-AB1", project: "P-OTHER" },
   { op: "edit", id: "T-AB1", title: "new", priority: "P1" }, { op: "add", title: "x", assignee: { kind: "squad", id: "cattle-drive" } },
 ];
-const TIP = "omarchy needs the update for priority, labels, assignee, parent and project";
+const TIP = "box1 needs the update for priority, labels, assignee, parent and project";
 
 test("T3 level 3: fields are on; the exact JSON of each new field", async () => {
   await enableAt(3);
@@ -788,7 +788,7 @@ test("T3 a downgrade (3 -> 2) after a reconnect refuses the fields again; an upg
 });
 test("T3 while the probe is stale or unanswered, fields are off with the generic reason, and a field send is refused", async () => {
   assert.equal(w.fields(M, PID).on, false);
-  assert.match(w.fields(M, PID).tip, /Checking omarchy|needs the update/);
+  assert.match(w.fields(M, PID).tip, /Checking box1|needs the update/);
   assert.equal((await w.send(M, PID, { op: "edit", id: "T-AB1", priority: "P0" })).status, "refused");
 });
 test("T3 an answer that is not 'ok: protocol N' (N>=2) keeps writes off", async () => {

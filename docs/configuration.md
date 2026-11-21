@@ -31,6 +31,7 @@ Each mod also has an `enabled` switch (default on; off hides the screen only). `
 | Room | `refresh_minutes` | 5 | 1-1440 | Minimum age before a run's context reloads |
 | Room | `pr_cap` | 10 | 1-100 | Linked PRs shown |
 | Room | `kept_contexts` | 30 | 1-1000 | Runs remembered |
+| Tasks | `machine_polling` | off | | Show a load meter for each linked machine in the Tasks sidebar. On, one short read per machine every 5 minutes through `hc exec --on` (10 minutes after a failed read). Off: the machine list shows with no numbers and no read. See [Tasks](mods/tasks.md#machines) |
 | Runs | `max_parallel` | 2 | 1-10 | Active squad runs per project. Runs on cards in Review or Blocked are waiting and do not count. An agent can set it on your request with `drover config max-parallel <n>` (the only setting it can change); see [Runs](mods/runs.md#parallel-runs) |
 | Runs | `kept` | 200 | 10-5000 | Ended runs remembered |
 | Wakeups | `min_repeat_minutes` | 5 | 1-1440 | Shortest repeat (the CLI uses it too) |

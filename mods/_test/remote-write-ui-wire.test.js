@@ -1,4 +1,4 @@
-// The write controls on remote cards, through the real Board and the Editor (T-MWHVWR8TIJB). Stub elements, fake omarchy; no sleeps.
+// The write controls on remote cards, through the real Board and the Editor (T-MWHVWR8TIJB). Stub elements, fake box1; no sleeps.
 // A disabled control carries a tooltip (the reason) and no click handler; an enabled one has the handler. Pixels are looked at natively.
 import { test, beforeEach } from "node:test";
 import assert from "node:assert/strict";
@@ -12,7 +12,7 @@ const S = await import("../_lib/store.js");
 const U = await import("../_lib/remote-write-ui.js");
 const NODE = Symbol.for("test.node");
 const findNode = (n, id) => (n.id === id ? n : n.kids.map((k) => findNode(k, id)).find(Boolean));
-const RID = "P-REMOTE1", LID = "P-ONREM", M = "omarchy";
+const RID = "P-REMOTE1", LID = "P-ONREM", M = "box1";
 const SENTINEL = "SENTINEL-sk-not-a-real-secret-0042";
 const card = (id, project, extra = {}) => ({ id, title: `title ${id}`, desc: "", column: "todo", priority: "P2", tags: [], project, archived: false, notes: [], ...extra });
 const REMOTE_PROJECT = (extra = {}) => ({ id: LID, name: "pairstone", repos: [], folders: [], branch: "main", remote: { machine: M, projectId: RID, id: "B-1", ...extra } });
@@ -21,7 +21,7 @@ const base = (p) => p.split("/").pop();
 
 let host, timers, om, notifies;
 const mkCx = () => { const cx = { notify: () => notifies.push(1), stop_propagation() {}, focus_handle: () => ({ focus() {} }), spawn: (fn) => Promise.resolve().then(() => fn(cx)).catch(() => {}), timer: { after() {}, every: (_ms, fn) => timers.push(() => fn(cx)) } }; return cx; };
-// omarchy: its inbox, its board, and the hc surface the laptop sees.
+// box1: its inbox, its board, and the hc surface the laptop sees.
 beforeEach(() => {
   timers = []; notifies = [];
   om = { inbox: {}, step1: [], remote: [], boardReads: 0, board: { "drover.projects": [{ id: RID, name: "r" }], "drover.tasks": [card("T-R1", RID, { rev: 4 }), card("T-R2", RID)], "drover.agents": { env: SENTINEL } } };
@@ -87,7 +87,7 @@ test("Board: before the probe answers every remote control is off with the reaso
   await until(() => { fire(); return host.state[CKEY]; }, "board read");
   const l = view(b, cx, "l-T-R1").node, r = view(b, cx, "r-T-R1").node, s = view(b, cx, "s-T-R1").node;
   assert.ok(r && !clickable(r)); assert.match(toolTip(r), /Checking|unreachable/);
-  assert.equal(toolTip(s), U.OFF_TIP);
+  assert.equal(toolTip(s), U.offTip("box1"));
   assert.ok(!clickable(view(b, cx, "new").node) && toolTip(view(b, cx, "new").node), "New is off with the reason");
   void l; void n;
 });
@@ -97,7 +97,7 @@ test("Board: with writes on the chevron sends a move, New opens the remote card 
   const b = new Board(); b.init({}, cx); b.scope = `project:${LID}`;
   const r = view(b, cx, "r-T-R1").node, s = view(b, cx, "s-T-R1").node;
   assert.ok(clickable(r) && toolTip(r) === undefined, "chevron is live");
-  assert.equal(toolTip(s), U.OFF_TIP, "start stays off");
+  assert.equal(toolTip(s), U.offTip("box1"), "start stays off");
   assert.ok(clickable(view(b, cx, "new").node));
   assert.match(view(b, cx, `wstatus-${LID}`).texts.join(" "), /writes on/);
   const n0 = om.step1.length;
@@ -156,9 +156,9 @@ test("job 10: create on a remote project opens the SAME Editor: breadcrumb, chip
   const t = view(v, cx, "editor").texts.join(" ");
   for (const re of [/Create manually/, /Create another/, /Switch to Agent/, /Create task/]) assert.match(t, re);
   assert.ok(view(v, cx, "trig-project").node, "the project chip is a picker now");
-  assert.match(t, /pairstone/); assert.match(t, /omarchy/);
+  assert.match(t, /pairstone/); assert.match(t, /box1/);
   for (const id of ["ed-mode", "ed-attach", "trig-assignee"]) // dead while a remote project is selected (the assignee says it needs the update at protocol 2)
-    { const n = view(v, cx, id).node; assert.ok(n, id); assert.ok(!clickable(n), `${id} is dead`); assert.equal(toolTip(n), id === "trig-assignee" ? FIELDS_TIP : U.OFF_TIP, `${id} says why`); }
+    { const n = view(v, cx, id).node; assert.ok(n, id); assert.ok(!clickable(n), `${id} is dead`); assert.equal(toolTip(n), id === "trig-assignee" ? FIELDS_TIP : U.offTip("box1"), `${id} says why`); }
   assert.ok(clickable(view(v, cx, "ed-create").node), "writes are on: Create works");
   v.toggleMode(cx); assert.equal(v.mode, "manual", "Switch to Agent does nothing here");
 });
@@ -230,7 +230,7 @@ test("job 10: a stale answer keeps the draft and says the card changed", async (
   await stage(1, "edit");
   om.consume(() => "error: stale");
   await until(async () => { fire(); await drain(2); return !v.inflight(); }, "answered");
-  assert.match(v.msg, /card changed on omarchy/);
+  assert.match(v.msg, /card changed on box1/);
   assert.equal(v.title.value(), "mine"); assert.deepEqual(host.closed, []);
 });
 
@@ -240,10 +240,10 @@ test("Project editor: the writes toggle flips remote.writes, keeps the binding, 
   const cx = cxOf();
   const ed = new ProjectEditor(cx);
   const before = view(ed, cx, "writes-note").texts.join(" ");
-  assert.match(before, /Writes to omarchy: on/);
+  assert.match(before, /Writes to box1: on/);
   ed.toggleWrites(cx);
   assert.equal(host.state["drover.projects"].find((p) => p.id === LID).remote.writes, false);
-  assert.match(view(ed, cx, "writes-note").texts.join(" "), /Writes to omarchy: frozen/);
+  assert.match(view(ed, cx, "writes-note").texts.join(" "), /Writes to box1: frozen/);
   ed.toggleWrites(cx);
   assert.equal(host.state["drover.projects"].find((p) => p.id === LID).remote.writes, true);
 });
@@ -252,16 +252,16 @@ test("Tasks: the ✓ on a remote Review card is off with the reason until writes
   om.board["drover.tasks"].push(card("T-R3", RID, { column: "review", rev: 2 }));
   let cx = cxOf();
   const v = new Tasks(); v.init({}, { ...cx, spawn() {} }); // init starts the inbox and wakeup loops: not under test
-  const first = view(v, cx, "ro-done-omarchy/P-REMOTE1/T-R3");
+  const first = view(v, cx, "ro-done-box1/P-REMOTE1/T-R3");
   await until(() => { fire(); return host.state[CKEY]; }, "board read");
-  const off = view(v, cx, "ro-done-omarchy/P-REMOTE1/T-R3").node;
+  const off = view(v, cx, "ro-done-box1/P-REMOTE1/T-R3").node;
   assert.ok(off && !clickable(off) && toolTip(off), "off with the reason before the probe answers");
-  assert.ok(!view(v, cx, "done-omarchy/P-REMOTE1/T-R3").node, "no live control yet");
+  assert.ok(!view(v, cx, "done-box1/P-REMOTE1/T-R3").node, "no live control yet");
   cx = await ready();
   fire(); // the 1 s refresh of the needs cache picks up the new write state (render only reads the cache)
-  const on = view(v, cx, "done-omarchy/P-REMOTE1/T-R3").node;
+  const on = view(v, cx, "done-box1/P-REMOTE1/T-R3").node;
   assert.ok(clickable(on), "live once writes are on");
-  assert.ok(!view(v, cx, "ro-done-omarchy/P-REMOTE1/T-R3").node);
+  assert.ok(!view(v, cx, "ro-done-box1/P-REMOTE1/T-R3").node);
   const n0 = om.step1.length;
   on.args.on_click[0](null, cx);
   await until(() => om.step1.length === n0 + 1, "move staged");
@@ -276,13 +276,13 @@ test("re-review 2.2 Tasks shows what happened to the ✓: stale, expired, error,
   const v = new Tasks(); v.init({}, { ...cx, spawn() {} });
   const press = async (reply) => {
     const n = om.step1.length;
-    view(v, cx, "done-omarchy/P-REMOTE1/T-R3").node.args.on_click[0](null, cx);
+    view(v, cx, "done-box1/P-REMOTE1/T-R3").node.args.on_click[0](null, cx);
     await until(() => om.step1.length === n + 1 && IO.remoteWriter().inflight(M) === 0, "staged");
     om.consume(() => reply);
     await until(async () => { fire(); await drain(2); return view(v, cx, "remote-msg").texts.join(" "); }, "a message is shown");
     return view(v, cx, "remote-msg").texts.join(" ");
   };
-  assert.match(await press("error: stale: card T-R3 is at rev 5, request saw 2"), /card changed on omarchy/);
+  assert.match(await press("error: stale: card T-R3 is at rev 5, request saw 2"), /card changed on box1/);
   assert.match(await press("error: expired: arrived 300s ago"), /not applied, too old/);
   assert.match(await press("error: unknown task T-R3"), /error: unknown task T-R3/);
   void cx0;
@@ -378,9 +378,9 @@ test("job 12: a remote card's edit modal has the right sidebar, in the local ord
   assert.ok(!clickable(view(v, cx, "prop-machine").node));
   assert.equal(toolTip(view(v, cx, "prop-status").node), undefined, "status is live");
   const t = view(v, cx, "ed-sidebar").texts.join(" ");
-  assert.match(t, /omarchy/); assert.match(t, /P1/); assert.match(t, /bug/);
+  assert.match(t, /box1/); assert.match(t, /P1/); assert.match(t, /bug/);
   assert.ok(!ids.includes("wake-plus") && !ids.includes("src-link"), "no local run/wake controls");
-  assert.match(t, new RegExp(U.OFF_TIP), "run/wake say they are not available");
+  assert.match(t, new RegExp(U.offTip("box1")), "run/wake say they are not available");
   v.setProp("status", "doing", cx); // saves at once, like the local editor
   assert.deepEqual(await stage(1, "move"), { op: "move", id: "T-R1", column: "doing", ifRev: 4, ttlMs: 120000 });
 });
@@ -420,7 +420,7 @@ test("job 13: global create lists local AND remote projects (remote labelled wit
   assert.ok(entry(v, cx, "P-LOCAL").node, "a local project");
   const r = entry(v, cx, LID);
   assert.ok(r.node, "the remote project is listed"); assert.ok(!clickable(r.node)); assert.ok(toolTip(r.node), "with the reason");
-  assert.ok(entry(v, cx, "P-LOCAL").texts.join(" ").includes("pairstone · omarchy"), "labelled with its machine");
+  assert.ok(entry(v, cx, "P-LOCAL").texts.join(" ").includes("pairstone · box1"), "labelled with its machine");
   cx = await ready();
   host.props = { overlay: "ov", edit: null, column: "todo" };
   v = new Editor(cx);
@@ -432,8 +432,8 @@ test("job 13: picking a remote project routes Create to the writer (add, project
   host.props = { overlay: "ov", edit: null, column: "todo" };
   const v = new Editor(cx);
   v.setProp("project", LID, cx); v.setProp("project", "P-LOCAL", cx); v.setProp("project", LID, cx); // back and forth: only the last counts
-  assert.match(view(v, cx, "editor").texts.join(" "), /omarchy/, "the machine of the pick is shown");
-  for (const id of ["ed-mode", "ed-attach", "trig-assignee"]) assert.equal(toolTip(view(v, cx, id).node), id === "trig-assignee" ? FIELDS_TIP : U.OFF_TIP, `${id} is inert for a remote pick`);
+  assert.match(view(v, cx, "editor").texts.join(" "), /box1/, "the machine of the pick is shown");
+  for (const id of ["ed-mode", "ed-attach", "trig-assignee"]) assert.equal(toolTip(view(v, cx, id).node), id === "trig-assignee" ? FIELDS_TIP : U.offTip("box1"), `${id} is inert for a remote pick`);
   v.title.set_value("from the global modal"); v.setProp("priority", "P1", cx);
   v.onCreate(cx);
   const b = await stage(1, "add");
@@ -450,7 +450,7 @@ test("job 13: switching back to a local project creates locally, and the control
   for (const id of ["ed-mode", "ed-attach"]) assert.ok(clickable(view(v, cx, id).node), `${id} is live for a local pick`);
   v.title.set_value("local one"); v.onCreate(cx);
   await drain(3);
-  assert.equal(om.step1.length, 0, "nothing sent to omarchy");
+  assert.equal(om.step1.length, 0, "nothing sent to box1");
   assert.ok(host.state["drover.tasks"].some((t) => t.title === "local one" && t.project === "P-LOCAL"), "created locally");
 });
 
@@ -516,7 +516,7 @@ test("job 14 (race B): a local Create waiting for a paste keeps the LOCAL target
   release(); v.busy = 0;
   await until(() => host.closed.length === 1, "closed");
   assert.ok(host.state["drover.tasks"].some((t) => t.title === "pasted one" && t.project === "P-LOCAL"), "created in the captured local project");
-  assert.equal(om.step1.length, 0, "nothing sent to omarchy");
+  assert.equal(om.step1.length, 0, "nothing sent to box1");
 });
 
 test("job 14: a refused local save keeps the modal open with the draft and shows the error", async () => {
@@ -590,7 +590,7 @@ test("job 16.1: the header id of a remote card copies on click", async () => {
   assert.deepEqual(clips, ["T-R1"]);
 });
 
-test("job 16.2: Activity shows omarchy's notes like local: kind badge, folded system logs (read-only), no write/agent menu items", async () => {
+test("job 16.2: Activity shows box1's notes like local: kind badge, folded system logs (read-only), no write/agent menu items", async () => {
   om.board["drover.tasks"][0].notes = NOTES; // the board is the truth for the thread
   const cx = await ready();
   openRemote(IO.loadMerged().tasks.find((x) => x.id === "T-R1"), "T-R1");
@@ -614,7 +614,7 @@ test("job 16.2: a note sent from the laptop shows in Activity once the board is 
   assert.doesNotMatch(view(v, cx, "editor").texts.join(" "), /fresh note/);
   v.note.value = () => "fresh note"; v.onCreate(cx);
   await stage(1, "note");
-  om.board["drover.tasks"] = om.board["drover.tasks"].map((x) => (x.id === "T-R1" ? { ...x, rev: 5, notes: [{ id: "n9", at: 1700000300000, by: "you", text: "fresh note" }] } : x)); // omarchy applied it
+  om.board["drover.tasks"] = om.board["drover.tasks"].map((x) => (x.id === "T-R1" ? { ...x, rev: 5, notes: [{ id: "n9", at: 1700000300000, by: "you", text: "fresh note" }] } : x)); // box1 applied it
   await saved(v, "saved");
   await until(async () => { fire(); await drain(2); return /fresh note/.test(view(v, cx, "editor").texts.join(" ")); }, "the note shows");
 });
@@ -673,7 +673,7 @@ test("T3 fields on (protocol 3): the sidebar rows are live pickers; off (protoco
   for (const id of ["priority", "assignee", "labels", "parent"]) assert.equal(toolTip(view(v, cx, `prop-${id}`).node), FIELDS_TIP, `${id} is dead with the reason`);
 });
 
-test("T3 the options come only from omarchy: its assignees, same-project parents (no self or descendant), bound projects of this machine, remote tags", async () => {
+test("T3 the options come only from box1: its assignees, same-project parents (no self or descendant), bound projects of this machine, remote tags", async () => {
   withSecond();
   const cx = await ready(3);
   host.state["drover.agents"] = { agents: [{ id: "laptop-only", name: "Laptop only" }], squads: [] }; // the laptop's own herd must not leak in
@@ -734,7 +734,7 @@ test("E2 one pick in flight: the rows say 'saving…', other picks are refused (
   v.close(cx); await until(() => host.closed.length === 1, "close works once settled");
 });
 
-test("E2 a stale pick reloads omarchy's card: an UNTOUCHED title/description follows it (no phantom edit), an EDITED one is kept", async () => {
+test("E2 a stale pick reloads box1's card: an UNTOUCHED title/description follows it (no phantom edit), an EDITED one is kept", async () => {
   withSecond();
   const cx = await ready(3);
   openCard("T-R1");
@@ -780,7 +780,7 @@ test("E2 a LATE Saved project pick sets the rows from the destination card; a Sa
   } finally { Date.now = realNow; }
 });
 
-test("E2 a LATE stale pick reverts the rows to omarchy's value", async () => {
+test("E2 a LATE stale pick reverts the rows to box1's value", async () => {
   withSecond();
   const cx = await ready(3);
   openCard("T-R1");
@@ -791,12 +791,12 @@ test("E2 a LATE stale pick reverts the rows to omarchy's value", async () => {
     await stage(1, "priority");
     skew = 11000; fire();
     await until(() => !v.picking, "pending");
-    assert.equal(toolTip(view(v, cx, "prop-priority").node), "waiting for omarchy…", "rows stay off while an outcome is unknown");
+    assert.equal(toolTip(view(v, cx, "prop-priority").node), "waiting for box1…", "rows stay off while an outcome is unknown");
     om.board["drover.tasks"] = om.board["drover.tasks"].map((t) => (t.id === "T-R1" ? { ...t, rev: 6, priority: "P3" } : t));
     om.consume(() => "error: stale: card T-R1 is at rev 6, request saw 4");
     skew = 60000;
     await until(async () => { fire(); await drain(2); view(v, cx, "ed-create"); return v.priority === "P3" && v.fixedRemote.rev === 6; }, "reverted");
-    assert.match(v.msg, /card changed on omarchy/);
+    assert.match(v.msg, /card changed on box1/);
   } finally { Date.now = realNow; }
 });
 
@@ -823,7 +823,7 @@ test("T3 fields off: a pick sends nothing and changes nothing; the title flush c
   openCard("T-R1");
   const v = new Editor(cx);
   v.setProp("priority", "P0", cx); await drain(3);
-  assert.equal(sends().length, 0); assert.equal(v.priority, "P1", "the row keeps omarchy's value");
+  assert.equal(sends().length, 0); assert.equal(v.priority, "P1", "the row keeps box1's value");
   v.title.value = () => "renamed"; void v.flushSave(cx);
   assert.deepEqual(await stage(1, "edit"), { op: "edit", id: "T-R1", title: "renamed", ifRev: 4, ttlMs: 120000 });
 });
@@ -835,7 +835,7 @@ test("T3 a project pick is one request at once, then both boards are reloaded an
   const v = new Editor(cx);
   v.setProp("project", LID2, cx);
   assert.deepEqual(await stage(1, "project"), { op: "edit", id: "T-R1", project: RID2, ifRev: 4, ttlMs: 120000 });
-  om.board["drover.tasks"] = om.board["drover.tasks"].map((t) => (t.id === "T-R1" ? { ...t, project: RID2, rev: 9, priority: "P3" } : t)); // omarchy moved it
+  om.board["drover.tasks"] = om.board["drover.tasks"].map((t) => (t.id === "T-R1" ? { ...t, project: RID2, rev: 9, priority: "P3" } : t)); // box1 moved it
   om.consume(() => "ok: moved"); await picked(v, "saved");
   await until(() => v.fixedRemote?.project === LID2 && v.fixedRemote.rev === 9, "the editor sits on the destination card");
   assert.equal(v.project, LID2);
@@ -843,7 +843,7 @@ test("T3 a project pick is one request at once, then both boards are reloaded an
   assert.deepEqual(await stage(2, "a following pick goes to the destination"), { op: "edit", id: "T-R1", priority: "P0", ifRev: 9, ttlMs: 120000 });
 });
 
-test("T3 a stale answer shows the banner and the row goes back to omarchy's value; the next pick carries the reloaded rev", async () => {
+test("T3 a stale answer shows the banner and the row goes back to box1's value; the next pick carries the reloaded rev", async () => {
   withSecond();
   const cx = await ready(3);
   openCard("T-R1");
@@ -854,8 +854,8 @@ test("T3 a stale answer shows the banner and the row goes back to omarchy's valu
   om.board["drover.tasks"] = om.board["drover.tasks"].map((t) => (t.id === "T-R1" ? { ...t, rev: 6, priority: "P3" } : t)); // someone else changed it
   om.consume(() => "error: stale: card T-R1 is at rev 6, request saw 4");
   await picked(v, "answered");
-  assert.match(v.msg, /card changed on omarchy/);
-  assert.equal(v.priority, "P3", "reset to omarchy's value");
+  assert.match(v.msg, /card changed on box1/);
+  assert.equal(v.priority, "P3", "reset to box1's value");
   assert.equal(v.fixedRemote.rev, 6);
   assert.deepEqual(host.closed, []);
   v.setProp("priority", "P0", cx);
@@ -990,7 +990,7 @@ test("E(a) a remote edit has the expand icon; expand reopens the SAME remote car
   host.props = { overlay: "ov2", ...opened[0].props };
   const w = new Editor(cx);
   assert.deepEqual([w.title.value(), w.desc.value(), w.note.value(), w.priority, w.labels, w.assignee, w.parent, w.project, w.column],
-    ["new title", "new desc", "half a note", "P1", ["bug"], null, null, LID, "todo"], "the text drafts travel; the picks are already saved, so the baseline is what omarchy has");
+    ["new title", "new desc", "half a note", "P1", ["bug"], null, null, LID, "todo"], "the text drafts travel; the picks are already saved, so the baseline is what box1 has");
   assert.ok(w.fixedRemote && w.fixedRemote.rev === 4, "the same remote card, same baseline rev");
   assert.ok(view(w, cx, "ed-expand").node, "and it can shrink back");
   assert.equal(host.closed.at(-1), "ov", "the old dialog closed after the new one opened");
@@ -1001,14 +1001,14 @@ test("E(b) the remote edit's project list RENDERS 'No project' and other machine
   const cx = await ready(3);
   openCard("T-R1");
   const v = new Editor(cx);
-  for (const [id, tip] of [["none", "an omarchy card needs a project"], ["P-LOCAL", "move between machines comes later"], ["P-ELSE", "move between machines comes later"]]) {
+  for (const [id, tip] of [["none", "a remote card needs a project"], ["P-LOCAL", "move between machines comes later"], ["P-ELSE", "move between machines comes later"]]) {
     const n = entry(v, cx, id).node;
     assert.ok(n, `${id} is listed`); assert.ok(!clickable(n), `${id} has no click handler`); assert.equal(toolTip(n), tip, id);
   }
   assert.equal(toolTip(entry(v, cx, LID2).node), undefined, "a project on this machine is pickable at protocol 3");
 });
 
-test("E(c) a cache entry without picks reads as 'loading omarchy's lists', triggers a re-read; with picks the project is pickable", async () => {
+test("E(c) a cache entry without picks reads as 'loading box1's lists', triggers a re-read; with picks the project is pickable", async () => {
   withSecond();
   const cx = await ready(3);
   openCard("T-R1");
@@ -1017,10 +1017,10 @@ test("E(c) a cache entry without picks reads as 'loading omarchy's lists', trigg
   host.state[CKEY] = { at: cached.at, tasks: cached.tasks }; // what an older mod copy writes
   const v = new Editor(cx);
   const reloads = []; v.remoteReload = async (id) => { reloads.push(id); };
-  assert.equal(toolTip(entry(v, cx, LID2).node), "loading omarchy's lists, try again");
+  assert.equal(toolTip(entry(v, cx, LID2).node), "loading box1's lists, try again");
   assert.ok(!clickable(entry(v, cx, LID2).node));
   assert.ok(reloads.length >= 1, "a re-read was asked for"); assert.equal(reloads[0], LID);
-  om.boardFail = false; await IO.remote.retry(M, RID); // omarchy answers again: the lists are back
+  om.boardFail = false; await IO.remote.retry(M, RID); // box1 answers again: the lists are back
   assert.ok(host.state[CKEY].picks);
   assert.equal(toolTip(entry(v, cx, LID2).node), undefined);
   assert.notEqual(toolTip(entry(v, cx, LID2).node), `not a project on ${M}`);
@@ -1066,12 +1066,12 @@ test("E3 a hung reload after a stale pick releases the lock after the bound, kee
   assert.ok(v.picking);
   for (const f of [...later]) f(cx);
   await until(() => !v.picking, "the lock is released");
-  assert.match(v.msg, /could not reload omarchy: reopen the card/);
+  assert.match(v.msg, /could not reload box1: reopen the card/);
   assert.equal(v.priority, "P1", "rows from the last known card");
   v.close(cx); await until(() => host.closed.length === 1, "close works");
 });
 
-test("E3 a hung reload after a SAVED project pick says 'saved, but could not reload omarchy' and releases the lock", async () => {
+test("E3 a hung reload after a SAVED project pick says 'saved, but could not reload box1' and releases the lock", async () => {
   withSecond();
   const cx = await ready(3);
   const later = []; cx.timer.after = (ms, fn) => later.push(fn);
@@ -1083,7 +1083,7 @@ test("E3 a hung reload after a SAVED project pick says 'saved, but could not rel
   om.consume(() => "ok: moved");
   await until(async () => { fire(); await drain(2); return later.length > 1; }, "the reload is waiting");
   await until(async () => { for (const f of later.splice(0)) f(cx); await drain(2); return !v.picking; }, "the lock is released (each reload has its own bound)");
-  assert.match(v.msg, /saved, but could not reload omarchy: reopen the card/);
+  assert.match(v.msg, /saved, but could not reload box1: reopen the card/);
   assert.equal(v.project, LID2);
 });
 
@@ -1151,7 +1151,7 @@ test("F a stale flush shows the banner, KEEPS the typed text, rebases rev and ro
   om.board["drover.tasks"] = om.board["drover.tasks"].map((x) => (x.id === "T-R1" ? { ...x, rev: 6, priority: "P3", title: "someone else" } : x));
   om.consume(() => "error: stale: card T-R1 is at rev 6, request saw 4");
   await until(async () => { fire(); await drain(2); return !v.inflight(); }, "answered");
-  assert.match(v.msg, /card changed on omarchy/);
+  assert.match(v.msg, /card changed on box1/);
   assert.equal(t.title(), "mine", "the typed text is kept"); assert.equal(v.fixedRemote.rev, 6); assert.equal(v.priority, "P3");
   v.autosave(cx); tick();
   assert.deepEqual(await stage(2, "retry"), { op: "edit", id: "T-R1", title: "mine", ifRev: 6, ttlMs: 120000 });
@@ -1191,7 +1191,7 @@ test("F Save belongs to the note composer: it sends only the note op, no title/d
 });
 
 // ---- Fix F2: ONE remote operation in flight per editor (flush, pick, note go through one serializer) ----
-const NOT_SENT = "Not sent yet: waiting for omarchy. Close again to discard your last edit.";
+const NOT_SENT = "Not sent yet: waiting for box1. Close again to discard your last edit.";
 const pendingPick = async (v, cx, field = "priority", val = "P0") => { // leaves a pick with an unknown outcome
   v.setProp(field, val, cx);
   await stage(1, "pick");
@@ -1441,7 +1441,7 @@ test("F5/F7 a LATE stale answer is never auto-resent: the text stays, rev rebase
     om.board["drover.tasks"] = om.board["drover.tasks"].map((x) => (x.id === "T-R1" ? { ...x, rev: 6 } : x));
     om.consume(() => "error: stale: card T-R1 is at rev 6, request saw 4");
     skew = 30000; // the probe is still fresh
-    await until(async () => { fire(); await drain(2); view(v, cx, "ed-create"); tick(); return /card changed on omarchy/.test(v.msg) && !v.inflight(); }, "the stale answer is shown");
+    await until(async () => { fire(); await drain(2); view(v, cx, "ed-create"); tick(); return /card changed on box1/.test(v.msg) && !v.inflight(); }, "the stale answer is shown");
     await loops();
     assert.equal(sends().length, 1, "0 automatic retries");
     assert.equal(t.title(), "mine"); assert.equal(v.fixedRemote.rev, 6);
@@ -1491,20 +1491,20 @@ test("Tasks: an expired probe is re-asked by the timer refresh only, never by re
   const cx = cxOf();
   const v = new Tasks(); v.init({}, { ...cx, spawn() {} });
   fire();
-  assert.ok(clickable(view(v, cx, "done-omarchy/P-REMOTE1/T-R3").node), "writes on while the probe is fresh");
+  assert.ok(clickable(view(v, cx, "done-box1/P-REMOTE1/T-R3").node), "writes on while the probe is fresh");
   const real = Date.now;
   Date.now = () => real() + 61000; // the last `ok: protocol` answer is now 61 s old
   try {
     const sent = () => om.step1.length + om.remote.length;
     const n0 = sent();
-    for (let i = 0; i < 3; i++) view(v, cx, "done-omarchy/P-REMOTE1/T-R3");
+    for (let i = 0; i < 3; i++) view(v, cx, "done-box1/P-REMOTE1/T-R3");
     await drain(3);
     assert.equal(sent(), n0, "render started no probe");
-    assert.ok(clickable(view(v, cx, "done-omarchy/P-REMOTE1/T-R3").node), "render shows the cached control");
+    assert.ok(clickable(view(v, cx, "done-box1/P-REMOTE1/T-R3").node), "render shows the cached control");
     fire();
     await until(() => sent() > n0, "the timer refresh re-asked the probe");
     const n1 = sent();
-    for (let i = 0; i < 3; i++) view(v, cx, "done-omarchy/P-REMOTE1/T-R3");
+    for (let i = 0; i < 3; i++) view(v, cx, "done-box1/P-REMOTE1/T-R3");
     await drain(3);
     assert.equal(sent(), n1, "render after the refresh started nothing either");
   } finally { Date.now = real; }

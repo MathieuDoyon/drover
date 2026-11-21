@@ -4,7 +4,7 @@
 //
 // Contract these tests fix (the names the implementation must have):
 //   mods/_lib/machines.js (pure; copied to mods/drover-tasks/machines.js through _lib/copies.txt) exports
-//     SHIPPED            the 19 relative paths (the plan's 13, plus hold.js and publish.js that machines.js imports, plus the 3 headless writer files and remote.js (its ownership check)) under mods/drover-tasks that are copied
+//     SHIPPED            the 21 relative paths (the plan's 13, plus hold.js and publish.js that machines.js imports, plus the 3 headless writer files and remote.js (its ownership check)) under mods/drover-tasks that are copied
 //     buildManifest(srcRoot) -> { id, files: [{ path, sha256, mode: "755"|"644", sourceTime: <mtime ms>, test: [argv with {gen} {node} {python3}] }] }
 //     generationId(files) -> hash of the sorted "path sha mode" lines (what buildManifest().id is)
 //     expandTest(argv, { gen, node, python3 })
@@ -38,7 +38,7 @@ const FINDER = join(TASKS, "bin/find-runtime.sh");
 const CLI = join(TASKS, "bin/drover");
 const M = () => import("../_lib/machines.js"); // loaded inside each test, so a missing module fails that test, not the whole file
 
-const SHIPPED = ["bin/drover", "bin/drover-export.mjs", "bin/drover-machines.mjs", "bin/find-runtime.sh", "bin/drover-headless", "bin/drover-headless.mjs", "headless-board.js", "remote.js", "machines.js", "herd-export.js", "runs.js", "store.js", "config.js", "config-schema.js", "lessons.js", "workfolder.js", "sources.js", "hold.js", "publish.js"];
+const SHIPPED = ["bin/drover", "bin/drover-export.mjs", "bin/drover-machines.mjs", "bin/find-runtime.sh", "bin/drover-headless", "bin/drover-headless.mjs", "bin/drover-asks-check.mjs", "bin/asks-lib.mjs", "headless-board.js", "remote.js", "machines.js", "herd-export.js", "runs.js", "store.js", "config.js", "config-schema.js", "lessons.js", "workfolder.js", "sources.js", "hold.js", "publish.js", "bin/drover-health.py", "bin/drover-line.mjs", "runline.js", "evidence.js"];
 const T_OLD = Date.UTC(2026, 0, 1), T_NEW = Date.UTC(2026, 0, 2), T_LATER = Date.UTC(2026, 0, 3);
 
 const cleanup = [];
@@ -208,6 +208,10 @@ test("manifest: test argvs are argv (no shell), end on the file's own {gen} path
       assert.equal(f.test.length, 5, f.path);
       assert.doesNotMatch(f.test[3], /\{gen\}|\{node\}/, "the import script has no placeholder: the path is process.argv[1]");
       scripts.add(f.test[3]);
+    } else if (f.path.endsWith(".py")) {
+      // a syntax check that writes nothing: py_compile would put a __pycache__ into the immutable generation
+      assert.deepEqual(f.test, ["{python3}", "-c", "import sys; compile(open(sys.argv[1],'rb').read(), sys.argv[1], 'exec')", `{gen}/${f.path}`], f.path);
+      assert.ok(!f.test.some((a) => /py_compile/.test(a)), "no py_compile");
     } else assert.deepEqual(f.test.slice(0, 2), ["bash", "-n"], f.path);
   }
   assert.equal(scripts.size, 1, "one constant import script for every .js");
@@ -645,6 +649,17 @@ test("install: a file edited on the remote is kept without --force (also on the 
   assert.equal(forced.ok, true, JSON.stringify(forced));
   assert.equal(readFileSync(join(m.home, CURRENT, "store.js"), "utf8"), readFileSync(join(s, "store.js"), "utf8"));
   assert.notEqual(manifestOf(m).files.find((f) => f.path === "store.js").kept, true);
+});
+
+test("the health script ships; doctor and check on the installed machine leave the generation tree unchanged (no __pycache__, no byte changed)", async () => {
+  const { m, s } = await fresh();
+  const { doctor, check } = await M();
+  assert.ok(existsSync(join(m.home, CURRENT, "bin/drover-health.py")), "the health script is in the generation");
+  const before = RT.snapshot(m.home);
+  assert.equal((await doctor(RT.makeRuntime(m), o(m, s))).ok, true);
+  assert.equal((await check(RT.makeRuntime(m), o(m, s))).exitCode, 0);
+  assert.deepEqual(RT.snapshot(m.home), before, "doctor and check changed nothing, no new path");
+  assert.ok(!Object.keys(RT.snapshot(m.home)).some((k) => /__pycache__|\.pyc$/.test(k)));
 });
 
 test("check: read-only (no write call, nothing changes on the remote), per-file states, exit 1 on any drift, exit 0 on a whole install", async () => {

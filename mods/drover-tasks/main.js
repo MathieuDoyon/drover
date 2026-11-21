@@ -5,12 +5,15 @@ import { v_flex, h_flex, InputState, Input, Popover } from "gpui-base";
 import { agents, terminals, run, theme, shared, setShared } from "herdr";
 import { bind, isEnabled, whenLoaded, ready as cfgReady } from "./config.js";
 import { GROUPS, projectOf, add, update, matches, menuChange, FILTER_FIELDS, toggleFilter, clearFilters, matchesFilter, filterValues, searchFilters, filterChips } from "./store.js";
-import { load, loadRuns, loadProjects, loadConfig, spaceProject, sidebarSpace, save, edit, pick, openBoard, watchInbox, watchWakes, modSettings, needsWorld, startNeeds, retryRemote, remoteSend, remoteWriteState, takeRemoteOutcomes } from "./io.js";
+import { load, loadRuns, loadProjects, loadConfig, spaceProject, sidebarSpace, save, edit, pick, openProof, openBoard, watchInbox, watchWakes, modSettings, needsWorld, startNeeds, retryRemote, remoteSend, remoteWriteState, takeRemoteOutcomes, watchMachines, machineView } from "./io.js";
 import { cardKey } from "./needs.js";
-import { OFF_TIP, controlState, moveOp, outcomeText } from "./remote-write-ui.js";
+import { lineLabel } from "./runline.js";
+import { offTip, controlState, moveOp, outcomeText } from "./remote-write-ui.js";
 import { READONLY_TIP } from "./remote.js";
+import { rowLines } from "./health.js";
 
 const FOLD = "drover.tasks.fold";
+const MACHINES_FOLD = "drover.tasks.machines-fold"; // the Machines section's own fold flag
 // { field: [values] } per space (each sidebar follows its own Drover's project), "drover.tasks.filters" when no space is known. Never defaults to hiding anything.
 const FILTERS = "drover.tasks.filters";
 const filtersKey = () => { const sp = sidebarSpace(); return sp ? `${FILTERS}:${sp}` : FILTERS; };
@@ -31,6 +34,8 @@ export default class Tasks extends View {
     // Grouping, dots, counts and the remote write controls are derived HERE (init + a 1 s timer), never in render: render reads cache.get() only.
     // Live agent status and terminal liveness have no event, so the timer is the defined refresh; a repaint only when the result changed.
     this.cache = startNeeds(cx, { read: () => this.world(), gate: () => isEnabled("drover-tasks"), remote: true }); // remote: reads each remote-bound project every 15 s while the panel is on
+    // Machines: its own 1 s timer ticks the health poller (a list read, and a read per linked machine only when machine_polling is on); render reads machineView() only.
+    watchMachines(cx, () => isEnabled("drover-tasks"));
     this.pop = null; // "filter" while the filter popover is open
     this.filterView = null; // the field whose values the popover shows (null: the field list)
     this.fsearch = InputState.new({ placeholder: "Filter by field or value…" });
@@ -77,7 +82,7 @@ export default class Tasks extends View {
 
   // A live agent takes the click (focus it); such a row also gets a pencil that opens the editor.
   hasLiveAgent(task) { return Boolean(task.agent) && this.cache.get().agentAddrs.has(task.agent); }
-  // ✓ on a card of another machine: moves it to Done through omarchy's inbox when writes are on, else off with the reason.
+  // ✓ on a card of another machine: moves it to Done through the remote's inbox when writes are on, else off with the reason.
   remoteDone(task, off, icon) {
     const w = this.cache.get().controls[task.project] ?? { on: false, tip: "Checking, try again in a moment" };
     if (!w.on) return off(`ro-done-${cardKey(task)}`, "✓", w.tip);
@@ -111,15 +116,19 @@ export default class Tasks extends View {
     const projects = loadProjects();
     const off = (id, text, tip = READONLY_TIP) => div().id(id).w(22).h(22).flex_none().flex().items_center().justify_center().rounded(5).text_size(12).text_color(t.dim).opacity(0.5).tooltip(tip).child(text);
     const stale = (task) => Boolean(task.remote) && v.remotes.some((r) => r.localId === task.project && r.state !== "fresh");
+    const lineFor = (task, at) => (at.group === "working" && !task.remote ? v.lines.get(cardKey(task)) : undefined);
     const row = ({ task, at }) => h_flex().id(`task-${cardKey(task)}`).min_h(40).px(8).py(4).gap(8).items_center().rounded(7).when(stale(task), (el) => el.opacity(0.55))
       .cursor_pointer().hover((s) => s.bg(t.hover)).on_click(() => this.open(task))
       .child(dot(task, at))
       .child(v_flex().flex_1().min_w(0)
         .child(div().truncate().text_size(12.5).child(task.title))
         .child(div().truncate().text_size(10.5).text_color(t.dim)
-          .child([task.id, task.priority, projectOf(task, projects)?.name, task.remote?.machine, at.reason, ...task.tags.map((g) => `#${g}`)].filter(Boolean).join(" · "))))
+          .child([task.id, task.priority, projectOf(task, projects)?.name, task.remote?.machine, lineFor(task, at) ? null : at.reason, ...task.tags.map((g) => `#${g}`)].filter(Boolean).join(" · ")))
+        // The run's live line (drover line), from the cache: a Working card only, never a remote card. Older than 10 min: dimmed.
+        .when(Boolean(lineFor(task, at)), (el) => el.child(div().truncate().text_size(10.5).text_color(lineFor(task, at).stale ? t.dim : t.muted).when(lineFor(task, at).stale, (d) => d.opacity(0.5)).child(lineLabel(lineFor(task, at))))))
       .when(this.hasLiveAgent(task), (el) => el.child(icon(`edit-${cardKey(task)}`, "✎", "Edit task", () => this.editTask(task.id))))
-      .when(at.group === "todo", (el) => el.child(task.remote ? off(`ro-start-${cardKey(task)}`, "▶", OFF_TIP) : icon(`start-${cardKey(task)}`, "▶", "Start", () => pick(task.id))))
+      .when(at.group === "todo", (el) => el.child(task.remote ? off(`ro-start-${cardKey(task)}`, "▶", offTip(task.remote?.machine)) : icon(`start-${cardKey(task)}`, "▶", "Start", () => pick(task.id))))
+      .when(at.group === "review", (el) => el.child(task.remote ? off(`ro-proof-${cardKey(task)}`, "▤", "Proof reads this machine only") : icon(`proof-${cardKey(task)}`, "▤", "Proof", () => openProof(task))))
       .when(at.group === "review", (el) => el.child(task.remote ? this.remoteDone(task, off, icon) : icon(`done-${cardKey(task)}`, "✓", "Done", (cx) => { save(update(load(), task.id, { column: "done" })); this.refreshNow(cx); })));
 
     const group = ([id, name]) => {
@@ -192,6 +201,28 @@ export default class Tasks extends View {
       .child(div().flex_1().min_w(0).child(`${r.name}: ${r.banner}`))
       .child(div().id(`retry-${r.localId}`).h(22).px(8).flex().items_center().flex_none().rounded(6).bg(t.solid).text_color(t.solid_foreground).cursor_pointer()
         .on_click((_e, cx) => { cx.stop_propagation(); retryRemote(r.machine, r.projectId, cx); }).child("Retry")));
+    const machines = () => {
+      const mv = machineView(); // memory only
+      if (!mv.machines.length) return null;
+      const folded = shared(MACHINES_FOLD) === true;
+      const mrowEl = (m) => {
+        const { lines, level, tip } = rowLines(m);
+        const dim = m.state === "failed" || m.state === "offline" || m.state === "stale";
+        return h_flex().id(`machine-${m.name}`).min_h(34).px(8).py(4).gap(8).items_center().rounded(7).when(dim, (el) => el.opacity(0.55)).when(Boolean(tip), (el) => el.tooltip(tip))
+          .child(div().w(7).h(7).flex_none().rounded(4).bg(m.link === "connected" ? t.idle : t.dim))
+          .child(v_flex().flex_1().min_w(0).gap(2)
+            .child(div().truncate().text_size(12.5).child(m.name))
+            .children(lines.map((l) => div().truncate().text_size(10.5).text_color(t.dim).child(l)))
+            .when(level !== null, (el) => el.child(div().h(3).w_full().rounded(2).bg(t.hover).child(div().h(3).w(`${Math.round(level)}%`).rounded(2).bg(level >= 90 ? t.foreground : level >= 70 ? t.muted : t.dim)))));
+      };
+      return v_flex().id("machines").gap(1).px(4).pb(8)
+        .child(h_flex().id("g-machines").h(24).px(8).gap(6).items_center().cursor_pointer()
+          .on_click(() => setShared(MACHINES_FOLD, !folded))
+          .child(div().text_size(11).text_color(t.muted).font_medium().child(`${folded ? "▸" : "▾"} Machines`))
+          .child(div().text_size(11).text_color(t.dim).child(String(mv.machines.length)))
+          .when(mv.listState === "unknown", (el) => el.child(div().text_size(11).text_color(t.dim).child("list unknown"))))
+        .when(!folded, (el) => el.children(mv.machines.map(mrowEl)));
+    };
     const empty = v.tasks.length === 0 ? "No tasks. Type a title and press Enter." : rows.length === 0 ? (filterCount > 0 ? "Nothing matches this filter." : "Nothing to show.") : null;
     return v_flex().id("root").size_full().bg(t.chrome).text_color(t.foreground)
       .child(h_flex().h(34).px(10).items_center().gap(6)
@@ -205,6 +236,7 @@ export default class Tasks extends View {
       .when(Boolean(this.remoteMsg), (el) => el.child(div().id("remote-msg").mx(8).mb(6).px(8).text_size(11.5).text_color(t.muted).child(this.remoteMsg)))
       .child(empty
         ? div().p(12).text_size(12).text_color(t.dim).child(empty)
-        : v_flex().id("groups").flex_1().min_h(0).overflow_y_scrollbar().px(4).pb(8).gap(6).children(GROUPS.map(group).filter(Boolean)));
+        : v_flex().id("groups").flex_1().min_h(0).overflow_y_scrollbar().px(4).pb(8).gap(6).children(GROUPS.map(group).filter(Boolean)))
+      .children([machines()].filter(Boolean));
   }
 }

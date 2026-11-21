@@ -31,6 +31,7 @@
 // | drover-board.visible_columns   | board main.js columns() (card 6)         | all 6 ids of store.js COLUMNS; unknown ids and an empty list are rejected |
 // | drover-board.default_sort      | board main.js sort per column (card 6)   | manual (a column's own Sort menu choice wins)   |
 // | drover-reader.max_text         | reader main.js (card 5)                  | = 4000                                          |
+// | drover-tasks.machine_polling   | io.js watchMachines -> health.js (T-MWO2HEHGIEC), read with cfg() each tick | false: off by default, live (_test/machines-sidebar.test.js) |
 //
 // `live: false` is only for a timer interval, which the host fixes when the timer starts ("applies when the screen reopens").
 // `enabled` is read by every screen through isEnabled() (config.js); off = screen only (data and the drover CLI stay).
@@ -59,6 +60,8 @@ export const SCHEMA = [
   { mod: "drover-config", key: "work_folder", title: "Work folder", type: "enum", enum: ["repo", "project"], default: "project", live: true, alias: { run: "project" }, // a saved "run" (removed mode) reads as project in every layer
     description: "Where agents write plans, scouts, reviews and lane logs. Applies to runs started after a change.\nproject — ~/.config/drover-herdr/work/<project>/, shared by all runs of a project; later runs read earlier plans and reviews.\nrepo — .drover/ in the repo or worktree." },
   ...TOGGLEABLE.map(enabled),
+  { mod: "drover-tasks", key: "machine_polling", title: "Machine health", type: "boolean", default: false, live: true,
+    description: "Show a load meter for each linked machine in the Tasks sidebar. On, it runs one short read per linked machine every 5 minutes through hc exec --on (a failed machine is retried after 10 minutes). Off by default: the machine list still shows, with no numbers and no read on any machine." },
   { mod: "drover-agents", key: "default_squad", title: "Default squad", type: "text", default: "", empty: true, live: true,
     pattern: /^[A-Za-z0-9][A-Za-z0-9._-]*$/, patternError: "A squad id, for example s1 (see the Squads screen). Empty means no default squad",
     description: "Squad the start dialog selects when nothing was used before. Empty: the claude agent, as before. What you used last still wins." },

@@ -12,7 +12,8 @@ CFG.setSettings("drover-runs", {});
 const cx = { notify() {}, spawn() {}, timer: { every() {} } };
 const MIN = 60000, T0 = Date.now() - 90 * MIN;
 const term = (address, role, extra = {}) => ({ address, name: `n-${address}`, role, agent: "claude", model: null, started: T0, ...extra });
-const render = (view) => { globalThis.__rec = { ids: [], texts: [] }; view.render(cx); const r = globalThis.__rec; globalThis.__rec = null; return r; };
+// The screen draws from its cache, refreshed by a 1 s tick: these tests change the world and draw at once, so each draw is preceded by a tick.
+const render = (view) => { view.cache.refresh(); globalThis.__rec = { ids: [], texts: [] }; view.render(cx); const r = globalThis.__rec; globalThis.__rec = null; return r; };
 let v;
 beforeEach(() => {
   H.state = {}; H.agents = []; H.terminals = [];

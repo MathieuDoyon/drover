@@ -206,7 +206,7 @@ test("a node that cannot load the core (exit 3) falls back to an open mod; any o
   assert.match(final.stderr, /^error: fake/);
 });
 
-test("headless export through a symlink installed elsewhere (the omarchy ~/.local/bin/drover layout)", async () => {
+test("headless export through a symlink installed elsewhere (the box1 ~/.local/bin/drover layout)", async () => {
   withShared();
   const bin = mkdtempSync(join(tmpdir(), "icli-bin-"));
   const link = join(bin, "drover");
@@ -248,7 +248,7 @@ test("export through the consumer (no node): same ~ rewrite and warnings", async
   assert.match(r.stderr, /warning: wrangler · command · local-path/);
 });
 
-// #70 raised PROTOCOL to 5. Every gate is a minimum: an install on 4 (omarchy) keeps working, and so does 5.
+// #70 raised PROTOCOL to 5. Every gate is a minimum: an install on 4 (box1) keeps working, and so does 5.
 test("agents export passes the protocol gate at 4 and at 5 (a minimum, not an equality)", async () => {
   for (const level of [4, 5]) {
     responder = setInterval(() => {

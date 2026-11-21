@@ -1,0 +1,34 @@
+#!/bin/sh
+# drover-asks-hook set|clear: the registered hook command. Signal only: it never prints, never answers a dialog, never waits more than ~3 s and ALWAYS exits 0.
+# The whole shell is silenced first (redirection only, nothing that can print runs before it); the payload on stdin is saved on fd 3 for node.
+exec 2>/dev/null
+trap 'exit 0' EXIT
+exec 3<&0 >/dev/null 2>&1 </dev/null
+src="$0"
+case "$src" in */*) ;; *) src="$(command -v -- "$src")" ;; esac
+while [ -L "$src" ]; do
+  ldir="${src%/*}"; src="$(readlink "$src")"
+  case "$src" in /*) ;; *) src="$ldir/$src" ;; esac
+done
+here="${src%/*}"
+# node: PATH only, else the absolute path the installer recorded (read only if it is a regular file). No probing on this hot path.
+node="$(command -v node)" || node=""
+if [ -z "$node" ]; then
+  rt="${HERDR_APP_HOME:-${HOME:-/nonexistent}/.config/herdr-app}/data/drover-asks-runtime"
+  if [ -f "$rt" ]; then read -r node < "$rt" || :; fi
+  { [ -n "$node" ] && [ -f "$node" ] && [ -x "$node" ]; } || exit 0
+fi
+"$node" "$here/asks-hook.mjs" "$@" <&3 &
+pid=$!
+# deadline: a node that never runs any JS is killed at 3 s; the watcher is reaped on every path
+(
+  trap 'kill "$sp"; exit 0' TERM
+  sleep 3 & sp=$!
+  wait "$sp"
+  kill -9 "$pid"
+) &
+wd=$!
+wait "$pid"
+kill "$wd"
+wait "$wd"
+exit 0

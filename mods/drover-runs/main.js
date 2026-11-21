@@ -2,10 +2,10 @@
 // A stopped agent is "stopped: check the result", never "done": only the person or `drover move` says review.
 import { View, div } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
-import { agents, terminals, run, theme, setShared, shared } from "herdr";
-import { RUNS_KEY, liveStatuses, runStatus, runTitle, slotSnapshot, slotLine, runBadge, lineageOf, squadRows, stopTargets, openCommand } from "./runs.js";
-import { age } from "./sources.js";
-import { load, loadRuns, loadProjects, edit, observeEnded, modSettings, resumeSquad, canResume, cancelResume, recoverResume, resumeState } from "./io.js";
+import { run, theme, setShared, shared } from "herdr";
+import { RUNS_KEY, runBadge, stopTargets, openCommand } from "./runs.js";
+import { createRunsCache } from "./runscache.js";
+import { loadRuns, edit, observeEnded, modSettings, resumeSquad, cancelResume, recoverResume, runsWorld } from "./io.js";
 import { bind, isEnabled, whenLoaded, ready as cfgReady } from "./config.js";
 import { gated } from "./ui.js";
 
@@ -18,15 +18,25 @@ export default class Runs extends View {
     this.resumeBusy = null;
     bind({ shared, modSettings });
     this.started = false;
-    this.stopped = false; // seen off since the last render that was on
+    this.stopped = false; // seen off since the last tick that was on
+    // Everything render draws is derived HERE (init, a 1 s tick, after the screen's own saves), never in render: render reads this.cache.get() only.
+    this.cache = createRunsCache({ read: () => runsWorld({ resume: this.showEnded }) });
+    this.cache.refresh();
+    // The 1 s tick: starts the screen when it is on (idempotent: also the off -> on transition, which observes again) and refreshes the cache; a repaint only when it changed.
+    cx.timer.every(1000, (cx) => { this.ensureStarted(cx); if (this.started && isEnabled("drover-runs") && this.cache.refresh()) cx.notify(); });
     whenLoaded("drover-runs", cx, (cx) => this.ensureStarted(cx));
   }
+
+  forget(id) { setShared(RUNS_KEY, loadRuns().filter((x) => x.id !== id)); }
+
+  // After the screen's own save or toggle: derive again now, so the next render shows it without waiting for the tick.
+  refreshNow() { this.cache.refresh(); }
 
   // Resume squad on an ended run: one click = one resumeSquad call (the flag is set before the first await). A failure is notified by resumeSquad itself.
   startResume(id, cx) {
     if (this.resumeBusy) return;
     this.resumeBusy = id;
-    cx.spawn(async (cx) => { try { await resumeSquad(id); } finally { this.resumeBusy = null; cx.notify(); } });
+    cx.spawn(async (cx) => { try { await resumeSquad(id); } finally { this.resumeBusy = null; this.refreshNow(); cx.notify(); } });
     cx.notify();
   }
 
@@ -34,7 +44,7 @@ export default class Runs extends View {
   startRecover(id, adopt, cx) {
     if (this.resumeBusy) return;
     this.resumeBusy = id;
-    cx.spawn(async (cx) => { try { await recoverResume(id, { adopt }); } finally { this.resumeBusy = null; cx.notify(); } });
+    cx.spawn(async (cx) => { try { await recoverResume(id, { adopt }); } finally { this.resumeBusy = null; this.refreshNow(); cx.notify(); } });
     cx.notify();
   }
 
@@ -45,28 +55,21 @@ export default class Runs extends View {
     if (this.started) { if (this.stopped) { this.stopped = false; observeEnded(); } return; }
     this.started = true;
     observeEnded();
+    this.cache.refresh();
     cx.timer.every(60000, (cx) => { if (!isEnabled("drover-runs")) return; observeEnded(); cx.notify(); }); // ages; saves first-observed end times
   }
 
   render(cx) {
     const t = theme();
-    this.ensureStarted(cx);
     { const g = gated("drover-runs"); if (g) return g; }
-    const live = liveStatuses(agents(), terminals());
-    const alive = new Set(terminals().map((x) => x.address));
-    const tasks = new Map(load().map((x) => [x.id, x]));
-    const runs = loadRuns(), cards = load();
-    // One snapshot for the whole render: plain values go down to the cards (never computed per card).
-    const snap = slotSnapshot(runs, cards, live, alive);
-    const slotLines = loadProjects().map((p) => slotLine(snap.byProject.get(p.id), snap.limit, p.name)).filter(Boolean);
-    const all = runs.map((r) => ({ r, status: runStatus(r, live, alive), waiting: snap.waitingRunIds.has(r.id) }));
-    const shown = all.filter((x) => this.showEnded || x.status !== "ended");
+    const v = this.cache.get(); // memory only: no exec, read, write, timer or spawn below this line
+    const { all, slotLines, endedCount: ended, alive } = v;
+    const shown = this.showEnded ? all : v.active; // both lists were derived by the cache: render only picks one
     const color = { blocked: t.blocked, working: t.working, stopped: t.done, ended: t.dim, gone: t.dim, running: t.idle, idle: t.idle, done: t.done };
     const link = (id, text, action) => div().id(id).h(22).px(7).flex().items_center().rounded(5).text_size(11.5).text_color(t.muted)
-      .cursor_pointer().hover((s) => s.bg(t.raised).text_color(t.foreground)).on_click((_e, cx) => { action(); cx.notify(); }).child(text);
+      .cursor_pointer().hover((s) => s.bg(t.raised).text_color(t.foreground)).on_click((_e, cx) => { action(); this.refreshNow(); cx.notify(); }).child(text);
 
-    const card = ({ r, status, waiting }) => {
-      const task = tasks.get(r.task);
+    const card = ({ r, status, waiting, task, title, startedText, rows, line, lineText, resume }) => {
       const stop = () => {
         if (this.confirm !== r.id) { this.confirm = r.id; return; }
         this.confirm = null;
@@ -75,11 +78,12 @@ export default class Runs extends View {
       return v_flex().id(`run-${r.id}`).p(10).gap(6).rounded(9).bg(t.background).border_1().border_color(t.border)
         .child(h_flex().gap(8).items_center()
           .child(div().w(8).h(8).rounded(4).bg(waiting ? t.dim : color[status]))
-          .child(div().flex_1().truncate().text_size(13).child(runTitle(r, task)))
+          .child(div().flex_1().truncate().text_size(13).child(title))
           .child(div().text_size(11).text_color(waiting ? t.dim : color[status]).child(runBadge(waiting, LABEL[status]))))
         .child(div().text_size(11).text_color(t.dim).truncate()
-          .child([r.id, r.name, `started ${age(r.started)} ago`, task ? `column ${task.column}` : "task deleted", r.worktree?.branch].filter(Boolean).join(" · ")))
-        .children(squadRows(lineageOf(r, all.map((x) => x.r), live, alive, Date.now())).map((m) => {
+          .child([r.id, r.name, `started ${startedText} ago`, task ? `column ${task.column}` : "task deleted", r.worktree?.branch].filter(Boolean).join(" · ")))
+        .when(Boolean(line), (el) => el.child(div().truncate().text_size(11).text_color(line.stale ? t.dim : t.muted).when(line.stale, (d) => d.opacity(0.5)).child(lineText)))
+        .children(rows.map((m) => {
           const row = h_flex().id(`m-${r.id}-${m.address}`).min_h(26).px(6).pl(6 + m.depth * 14).gap(8).items_center().rounded(6)
             .when(m.dim, (el) => el.opacity(0.5))
             .when(m.focusable, (el) => el.cursor_pointer().hover((x) => x.bg(t.hover)).on_click(() => run(openCommand(m), { terminal: m.address })));
@@ -97,19 +101,18 @@ export default class Runs extends View {
           .when(Boolean(r.worktree), (el) => el.child(div().flex_1().truncate().text_size(10.5).text_color(t.dim).child(r.worktree.path)))
           .when(!r.worktree, (el) => el.child(div().flex_1()))
           .when(status !== "ended", (el) => el.child(link(`stop-${r.id}`, this.confirm === r.id ? "Click again to kill all" : "Stop", stop)))
-          .when(status === "ended" && (this.resumeBusy === r.id || resumeState(r.id) === "live"), (el) => el.child(link(`resume-cancel-${r.id}`, "Cancel resume", () => cancelResume(r.id))))
-          .when(status === "ended" && this.resumeBusy !== r.id && resumeState(r.id) === "needs-recovery", (el) => el
+          .when(status === "ended" && (this.resumeBusy === r.id || resume?.state === "live"), (el) => el.child(link(`resume-cancel-${r.id}`, "Cancel resume", () => cancelResume(r.id))))
+          .when(status === "ended" && this.resumeBusy !== r.id && resume?.state === "needs-recovery", (el) => el
             .child(div().h(22).px(7).flex().items_center().text_size(11.5).text_color(t.blocked).child("Resume needs recovery"))
             .child(div().id(`resume-recover-${r.id}`).h(22).px(7).flex().items_center().rounded(5).text_size(11.5).text_color(t.foreground).cursor_pointer().hover((x) => x.bg(t.raised))
               .on_click((_e, cx) => this.startRecover(r.id, true, cx)).child("Recover"))
             .child(div().id(`resume-abandon-${r.id}`).h(22).px(7).flex().items_center().rounded(5).text_size(11.5).text_color(t.muted).cursor_pointer().hover((x) => x.bg(t.raised))
               .on_click((_e, cx) => this.startRecover(r.id, false, cx)).child("Cancel")))
-          .when(status === "ended" && this.resumeBusy !== r.id && resumeState(r.id) === "none" && canResume(r.id), (el) => el.child(div().id(`resume-${r.id}`).h(22).px(7).flex().items_center().rounded(5).text_size(11.5).text_color(t.muted)
+          .when(status === "ended" && this.resumeBusy !== r.id && resume?.state === "none" && resume.can, (el) => el.child(div().id(`resume-${r.id}`).h(22).px(7).flex().items_center().rounded(5).text_size(11.5).text_color(t.muted)
             .cursor_pointer().hover((x) => x.bg(t.raised).text_color(t.foreground)).on_click((_e, cx) => this.startResume(r.id, cx)).child("Resume squad")))
-          .when(status === "ended", (el) => el.child(link(`forget-${r.id}`, "Forget", () => setShared(RUNS_KEY, loadRuns().filter((x) => x.id !== r.id))))));
+          .when(status === "ended", (el) => el.child(link(`forget-${r.id}`, "Forget", () => this.forget(r.id)))));
     };
 
-    const ended = all.length - all.filter((x) => x.status !== "ended").length;
     return v_flex().id("root").size_full().bg(t.surface).text_color(t.foreground)
       .child(h_flex().h(36).px(12).gap(8).items_center().border_b_1().border_color(t.border)
         .child(div().flex_1().text_size(13).font_semibold().child("Runs"))

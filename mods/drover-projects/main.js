@@ -41,7 +41,7 @@ export class ProjectEditor {
     this.branch = InputState.new({ placeholder: "main", value: p?.branch ?? "main" });
     // Remote binding (an existing project only): the project's cards then live on another machine, read-only here.
     const r = p ? remoteOf(loadProjects(), p.id) : null;
-    this.machine = InputState.new({ placeholder: "omarchy", value: r?.machine ?? "" });
+    this.machine = InputState.new({ placeholder: "machine name", value: r?.machine ?? "" });
     this.remoteId = InputState.new({ placeholder: "P-… (the project's id on that machine)", value: r?.projectId ?? "" });
     this.remoteMsg = null; this.binding = false; this.bindGen = 0;
     this.org = InputState.new({ placeholder: "acme (optional)", value: p?.org ?? "" });

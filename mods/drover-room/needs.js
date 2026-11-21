@@ -1,7 +1,8 @@
 // Needs-you view (T-MWO2HFFHWRB): which group each card sits in, and the counts. Pure and memory-only: no I/O, no globals.
 // needsCounts() derives; createNeedsCache() keeps the last result. refresh() runs OUTSIDE render (init and a timer), get() only reads memory.
 import { attention, sorted } from "./store.js";
-import { liveAgents, reviewLive, dotKind } from "./runs.js";
+import { liveAgents, reviewLive, dotKind, runStatus } from "./runs.js";
+import { lineOf } from "./runline.js";
 
 export const GROUP_IDS = ["needs", "review", "working", "todo", "blocked"];
 
@@ -25,7 +26,7 @@ export function wakeAttention(wakes, now) {
 // tasks: every card (no filter, remote cards included). live: Map address -> { status } (liveAgents). alive: Set of terminal addresses.
 // runs: the run records (for the review-live dot). wakes + now: the wakeup records and the clock (failed automation joins Needs you).
 // Returns { rows: Map key -> { group, reason, dot }, byGroup: { group: [key] } (cards only), attention: [{ kind: "card"|"wake", key, at, reason }] oldest first,
-// counts } (key: cardKey). counts.needs is the length of `attention`: what the page, the switch and the chip show.
+// counts, lines: Map key -> { text, progress, ageMin, stale } of each LOCAL card's live run line (see lineViews) } (key: cardKey). counts.needs is the length of `attention`: what the page, the switch and the chip show.
 export function needsCounts(tasks, live, alive, runs = [], wakes = [], now = Date.now()) {
   const statuses = new Map([...live].map(([k, v]) => [k, v?.status]).filter(([, s]) => s));
   const rows = new Map();
@@ -46,12 +47,36 @@ export function needsCounts(tasks, live, alive, runs = [], wakes = [], now = Dat
     .sort((a, b) => a.at - b.at || a.key.localeCompare(b.key));
   const counts = Object.fromEntries(GROUP_IDS.map((g) => [g, byGroup[g].length]));
   counts.needs = list.length;
-  return { rows, byGroup, attention: list, counts };
+  return { rows, byGroup, attention: list, counts, lines: lineViews(tasks, runs, statuses, alive, now) };
+}
+
+// The live run line (drover line) of each LOCAL card: from the latest started run of the card that is still active (not stamped ended, not ended by the
+// live state), through lineOf. A remote card has no run on this machine and gets none, even when a local run shares its bare id. Derived here, once per
+// refresh; a screen's render only does lines.get(cardKey(task)). The view carries ageMin and stale, so the result changes once a minute, not each second.
+function lineViews(tasks, runs, statuses, alive, now) {
+  const lines = new Map();
+  const best = new Map(); // task id -> { run, status } with the greatest numeric `started` (no started counts as 0; the list order breaks ties: newest first)
+  for (const r of runs) {
+    if (!r?.task || r.ended != null || !Array.isArray(r.terminals) || !r.terminals.length) continue;
+    const status = runStatus(r, statuses, alive);
+    if (status === "ended") continue;
+    const cur = best.get(r.task);
+    if (!cur || (Number.isFinite(r.started) ? r.started : 0) > (Number.isFinite(cur.run.started) ? cur.run.started : 0)) best.set(r.task, { run: r, status });
+  }
+  for (const task of tasks) {
+    if (task.remote) continue;
+    const hit = best.get(task.id);
+    const view = hit ? lineOf(hit.run, hit.status, now) : null;
+    if (view) lines.set(cardKey(task), view);
+  }
+  return lines;
 }
 
 const EXTRA = { tasks: [], byId: new Map(), remotes: [], controls: {}, agentAddrs: new Set(), live: new Map() };
 const EMPTY = Object.freeze({ ...needsCounts([], new Map(), new Set(), []), ...EXTRA });
-const signatureOf = (v) => v.attention.map((a) => `${a.key}|${a.reason}|${a.at}|${a.wake ? `${a.wake.name ?? ""}|${a.wake.target ?? ""}|${a.wake.reason ?? ""}` : ""}`).join(",") + "#" + GROUP_IDS.map((g) => `${g}:${v.byGroup[g].map((id) => { const r = v.rows.get(id); return `${id}|${r.reason ?? ""}|${r.dot}`; }).join(",")}`).join(";");
+// Structural (JSON), never delimiter-joined: a valid line text may contain any delimiter and must not collide with another set of lines.
+const linesSig = (v) => JSON.stringify([...v.lines].map(([k, l]) => [k, l.text, l.progress, l.ageMin, l.stale]));
+const signatureOf = (v) => linesSig(v) + "##" + v.attention.map((a) => `${a.key}|${a.reason}|${a.at}|${a.wake ? `${a.wake.name ?? ""}|${a.wake.target ?? ""}|${a.wake.reason ?? ""}` : ""}`).join(",") + "#" + GROUP_IDS.map((g) => `${g}:${v.byGroup[g].map((id) => { const r = v.rows.get(id); return `${id}|${r.reason ?? ""}|${r.dot}`; }).join(",")}`).join(";");
 // What else a screen draws from the cache must also change the signature, or the screen would not repaint: the card fields a row shows,
 // the remote banners, the remote write controls and the set of live pane agents.
 const fingerprintOf = (v) => [

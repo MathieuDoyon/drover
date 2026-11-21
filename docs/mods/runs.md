@@ -34,9 +34,21 @@ drover config max-parallel 4     # set (1-10)
 
 This is the only setting an agent can change, and the rule for agents is to do it only when you ask, in plain text in its own terminal, never to unblock itself. Each change shows a notice with the terminal that asked (the terminal is what the caller claims; it is not verified). `drover config` needs Drover mods at protocol 5: with older mods it says to update them, and with no Drover mod open it changes nothing. A change that gets no answer within 5 seconds is reported as not confirmed, and the request expires after 60 seconds.
 
+## Live line
+
+A working run can say what it is doing. In a terminal of the run, `drover line <T-…> "reading the code" --progress 40` (the text is 40 characters at most, the progress a whole number from 0 to 100 and optional) stores a line on the run, and the run card shows one extra row under the id line: `reading the code · 40% · 3m` (the elapsed time is whole minutes, `<1m` under one). The same line shows on the card's row in the Working group of [Tasks](tasks.md). Leaders post one at each STATUS (the herd rules in [Agents and the herd](../agents.md)).
+
+- A line older than 10 minutes is dimmed. It is gone when the run ends (a run that ends while the screen is open loses it at the next second; the record drops it when the end is saved). A new line replaces the old one; one without `--progress` drops the old percentage.
+- There is no time-left estimate.
+- The command checks the text before it sends anything: too long, a newline or control character, a bad progress, a secret-shaped text or a home folder path is refused with the rule name and nothing is written. The secret scan is best effort (the same rules as the herd export): never put a value in a line.
+- Which terminal may post is checked against the runs (a terminal of an active run of that card). The terminal is what the caller claims, as for `drover note`: it guards against mistakes on this machine, not against someone who can already write to your Drover inbox.
+- A request that waits more than 5 minutes with no Drover mod open expires instead of showing late. An older Drover mod (not reloaded) answers `Unknown drover command`: reopen the window after an install.
+
+The screen draws from a cache that is refreshed when it starts, every second and after its own actions; drawing it reads memory only.
+
 ## Data it reads and writes
 
-Reads and writes `drover.runs`.
+Reads and writes `drover.runs` (the live line is `line` on a run, dropped when the run is marked ended).
 
 ## Resume squad
 

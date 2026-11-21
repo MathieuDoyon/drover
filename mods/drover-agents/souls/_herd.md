@@ -15,7 +15,7 @@ Read `hc --skill` once, at your first turn. It is the manual for `hc`, the tool 
 | Read an agent's screen | `hc read <t> --lines 120` |
 | Run a check | `hc run --cwd <dir> "<cmd>"` (blocks, returns the exit code) |
 | Slow check | `hc run --bg --no-notify --name chk-<n> --cwd <dir> "<cmd>"` then `hc wait chk-<n>` |
-| Tasks | `drover tasks [tag]` · `drover task <T-…>` · `drover add "<title>" --desc "…" --tag <epic> [--parent <T-…>]` · `drover move <T-…> <column>` (`backlog`, `ready`, `in-progress`, `review`, `blocked`, `done`; the Board's names; a squad agent never moves to `done`; only the owner, or a Drover on the owner's explicit order) · `drover note <T-…> [--kind decision\|log\|blocker\|pr\|handoff] "<text>"` (see "Notes on the card") · `drover edit <T-…> --title/--desc/--parent <T-…|none>` · `drover projects` · `drover add … --project <id|name>` · `drover tasks --project <id|name>` · `drover link <T-…> <issue URL\|none>` (a card made without its issue: run it right after `gh issue create`, so the card shows its Source) · `drover task-project <T-…> <id|name|none>` |
+| Tasks | `drover tasks [tag]` · `drover task <T-…>` · `drover add "<title>" --desc "…" --tag <epic> [--parent <T-…>]` · `drover move <T-…> <column>` (`backlog`, `ready`, `in-progress`, `review`, `blocked`, `done`; the Board's names; a squad agent never moves to `done`; only the owner, or a Drover on the owner's explicit order) · `drover line <T-…> "<what you do now, 40 characters at most>" [--progress n]` (see section 2) · `drover note <T-…> [--kind decision\|log\|blocker\|pr\|handoff] "<text>"` (see "Notes on the card") · `drover edit <T-…> --title/--desc/--parent <T-…|none>` · `drover projects` · `drover add … --project <id|name>` · `drover tasks --project <id|name>` · `drover link <T-…> <issue URL\|none>` (a card made without its issue: run it right after `gh issue create`, so the card shows its Source) · `drover task-project <T-…> <id|name|none>` |
 | GitHub issue (linked card) | `gh issue edit <n> -R <o/r> --add-label "<l>" --remove-label "<l>" --add-assignee @me` · `gh issue close <n> -R <o/r> -c "<text>"` · `gh issue reopen <n> -R <o/r>` · `gh label create "<l>" -R <o/r>` |
 | Jira issue (linked card) | Atlassian MCP: get the issue's transitions, transition it, assign it to the current user |
 | Parallel runs limit | `drover config max-parallel` (show) · `drover config max-parallel <n>` (set, 1-10; see rule 12) |
@@ -34,6 +34,7 @@ Read `hc --skill` once, at your first turn. It is the manual for `hc`, the tool 
 - End each turn that changes state with 1 status line, and send it to your parent or leader:
   `STATUS: <WORD> <task> · <1-line detail> · next: <what you do next>`
   Words: `READY`, `WORKING`, `GO`, `HELP`, `BLOCKED`, `READY_FOR_REVIEW`, `READY_FOR_PR`, `PR_OPEN #N`, `CHANGES`, `DONE`.
+- A leader also runs `drover line <T-…> "<what you do now, 40 characters at most>" [--progress n]` at each STATUS: the Runs card and the Tasks row show it (dimmed after 10 minutes, gone when the run ends). No secrets, no paths in it; a refused line is rewritten, never forced.
 
 ## 3. Waiting
 

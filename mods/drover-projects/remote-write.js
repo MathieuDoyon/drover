@@ -1,5 +1,5 @@
 // Canonical copy lives in mods/_lib; mods/install.sh copies it into each drover-* mod.
-// Remote project, step 2: the laptop writes to omarchy's drover inbox (T-MWHVWR8TIJB).
+// Remote project, step 2: the laptop writes to the remote's drover inbox (T-MWHVWR8TIJB).
 // Pure logic: the hc runner and the shared-state accessors are injected. No setTimeout (a mod has none): the owner calls tick() every
 // second, and every deadline here is measured on the injected now(). Nothing is ever resent: a request that may have landed stays in
 // the pending list until its result (or "outcome unknown") settles it.
@@ -23,9 +23,9 @@ export const INBOX = ".config/herdr-app/data/drover-inbox";
 export const OPS = ["move", "note", "edit", "add", "archive"];
 
 // A send is 2 steps, both argv-only: the payload is NEVER in a remote argv or in script text.
-//  1. LOCAL: the JSON is an argv item of a local sh (`$1`); `hc file write` streams it to omarchy as a dot-named staging file (the consumer ignores it).
+//  1. LOCAL: the JSON is an argv item of a local sh (`$1`); `hc file write` streams it to the remote as a dot-named staging file (the consumer ignores it).
 export const STAGE_SCRIPT = 'printf %s "$1" | hc file write --on "$2" "$3"';
-//  2. REMOTE: the only shell text that runs on omarchy. The nonce is `$0`; omarchy's clock stamps the final name (the arrival evidence for ttlMs).
+//  2. REMOTE: the only shell text that runs on the remote. The nonce is `$0`; the remote's clock stamps the final name (the arrival evidence for ttlMs).
 export const SEND_SCRIPT = 'd=$HOME/.config/herdr-app/data/drover-inbox; f=$(date +%s)-$0; mv "$d/.$0.tmp" "$d/$f.json" && echo "$f.json"';
 export const FIND_SCRIPT = 'l=$(ls "$HOME/.config/herdr-app/data/drover-inbox") || exit 3; printf \'%s\\n\' "$l" | grep -F -- "-$0."'; // exit 3 = the listing failed, 1 = listed and absent
 export const LIST_SCRIPT = 'ls "$HOME/.config/herdr-app/data/drover-inbox"';
@@ -86,7 +86,7 @@ export function classify(text) {
   const t = String(text ?? "").trim();
   const first = t.split("\n")[0].slice(0, 200);
   if (/^ok:/.test(t)) return { status: "saved", message: "saved", text: first };
-  if (/^error:\s*stale\b/.test(t)) return { status: "stale", message: "card changed on omarchy", text: first };
+  if (/^error:\s*stale\b/.test(t)) return { status: "stale", message: "card changed on the remote machine", text: first };
   if (/^error:\s*expired\b/.test(t)) return { status: "expired", message: "not applied, too old", text: first };
   if (/^error:/.test(t)) return { status: "error", message: first.replace(/^error:\s*/, "") || "error", text: first };
   return { status: "error", message: "unexpected answer from the machine", text: first };
@@ -119,7 +119,7 @@ export function createWriter({ run, exec, getShared, setShared, now = Date.now, 
   const probeOf = (machine) => { let p = probes.get(machine); if (!p) probes.set(machine, (p = { ok: false, level: 0, at: null, reason: null, inflight: false, tryAt: null, gen: 0, seq: 0, cur: 0, wasWritable: true })); return p; };
   // A send that may still reach the rename (any copy's): its owner is beating and its hc call has not returned (an abandoned call counts, with no
   // age cut-off), or the owner went silent and another writer adopted it: that one counts for 2 x ttl after the adoption (`inflightUntil`), since
-  // adoption moves the reconciliation, it does not prove the call ended. This status serves the freeze switch; deploy/omarchy/drain-check.sh stays
+  // adoption moves the reconciliation, it does not prove the call ended. This status serves the freeze switch; the retained legacy drain check stays
   // the authoritative gate before a rollback.
   const ttlOf = (e) => e.ttlMs ?? TTL_MS;
   const sending = (machine) => pending().filter((e) => e.machine === machine && ((e.state === "sending" && now() - (e.beat ?? e.at) < 2 * ttlOf(e)) || (e.inflightUntil ?? 0) > now())).length;
@@ -306,7 +306,7 @@ export function createWriter({ run, exec, getShared, setShared, now = Date.now, 
     checking.add(e.nonce);
     try {
       if (now() - e.at > (e.ttlMs ?? TTL_MS) + (e.probe ? 60000 : 3600000)) {
-        drop(e.nonce); finish(e.nonce, gone(e, "unknown", "outcome unknown: check the card on omarchy"), e.probe);
+        drop(e.nonce); finish(e.nonce, gone(e, "unknown", `outcome unknown: check the card on ${e.machine}`), e.probe);
         void removeResult(e.machine, `.${e.nonce}.tmp`); // a rename that never ran left its staging file
         return true;
       }

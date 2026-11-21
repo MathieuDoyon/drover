@@ -389,7 +389,7 @@ test("tasks off: draws nothing (an empty div, no stub text, no rows); keeps the 
   const { rec } = withRec(() => view.render(cx));
   assert.deepEqual(rec.ids, [], "no elements with ids");
   await idle();
-  quiet([30000, 15000, 1000, 1000]); // the two 1 s timers (needs cache refresh, remote watch) are idle while off;
+  quiet([30000, 15000, 1000, 1000, 1000]); // the three 1 s timers (needs cache refresh, remote watch, machines watch) are idle while off;
 });
 
 test("tasks off -> on -> off -> on", async () => {
@@ -462,21 +462,24 @@ test("agents: the picker and editor dialogs other screens open are not switched 
 const ENDED_RUN = { ...RUN, terminals: [{ address: "t1", name: "Lead", role: "leader", agent: "x", started: 1 }] };
 const endedHost = { terminals: [{ address: "t9" }], agents: [] };
 
-test("runs off: stub text, no observeEnded (no shared write, no kill), no timer; on again observes and starts the timer once", async () => {
+test("runs off: stub text, no observeEnded (no shared write, no kill), only the idle 1 s tick; on again observes (the tick starts it) and starts the ageing timer once", async () => {
   const state = { ...off("drover-runs"), "drover.runs": [ENDED_RUN] };
   const before = JSON.stringify(state["drover.runs"]);
   const { view, cx } = await mount("drover-runs", state, endedHost);
   assert.match(await show(view, cx), new RegExp(STUB));
   await tickAll(cx); await idle();
-  quiet();
+  quiet([1000]);
   assert.equal(JSON.stringify(globalThis.__host.state["drover.runs"]), before, "runs untouched while off");
   setConfig({});
   assert.doesNotMatch(await show(view, cx), new RegExp(STUB));
-  assert.notEqual(JSON.stringify(globalThis.__host.state["drover.runs"]), before, "on: the ended run is observed");
-  assert.deepEqual(log.timers.map((t) => t.ms), [60000]);
+  assert.equal(JSON.stringify(globalThis.__host.state["drover.runs"]), before, "render alone starts nothing: the tick does");
+  await tickAll(cx); await idle();
+  assert.notEqual(JSON.stringify(globalThis.__host.state["drover.runs"]), before, "on: the ended run is observed by the tick");
+  assert.deepEqual(log.timers.map((t) => t.ms), [1000, 60000]);
   setConfig(off("drover-runs")[CFG]);
   assert.match(await show(view, cx), new RegExp(STUB));
-  assert.equal(log.timers.length, 1);
+  await tickAll(cx);
+  assert.equal(log.timers.length, 2);
 });
 
 test("wakeups off: stub text; only the CLI inbox and wakeup consumers keep their timers; on adds the countdown timer once", async () => {
@@ -625,8 +628,8 @@ test("jira: a JQL typed while the first-enable settings load is pending is kept"
 
 // Inherited enabled (mod.json settings) with no shared override: every gate loads its own settings first.
 const SCREENS_CFG = [
-  ["drover-github", [], {}], ["drover-jira", [], {}], ["drover-room", [15000], roomHost], ["drover-board", [30000], {}], ["drover-todos", [], {}], ["drover-tasks", [30000, 15000, 1000, 1000], {}],
-  ["drover-agents", [], {}], ["drover-runs", [], {}], ["drover-wakeups", [30000, 15000], {}], ["drover-projects", [], {}], ["drover-reader", [], readerHost],
+  ["drover-github", [], {}], ["drover-jira", [], {}], ["drover-room", [15000], roomHost], ["drover-board", [30000], {}], ["drover-todos", [], {}], ["drover-tasks", [30000, 15000, 1000, 1000, 1000], {}],
+  ["drover-agents", [], {}], ["drover-runs", [1000], {}], ["drover-wakeups", [30000, 15000], {}], ["drover-projects", [], {}], ["drover-reader", [], readerHost],
 ];
 const inheritedHost = (mod, settings) => ({ readTextFile: async (p) => { log.read.push(p); return new RegExp(`mods/${mod}/mod\\.json$`).test(p) ? JSON.stringify({ settings }) : null; } });
 

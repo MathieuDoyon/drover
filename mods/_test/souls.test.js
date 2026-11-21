@@ -327,3 +327,14 @@ test("drover soul: the Drover logs the owner and chain events in the card's lane
   assert.match(d, /Lane log timing/);
   assert.match(d, /lane-<T-id>\.md/);
 });
+
+test("_herd.md: a leader posts a run line at each STATUS (drover line, 40 characters, no secrets or paths), and the Tasks row lists the command", () => {
+  const h = soul("_herd");
+  assert.match(h, /\| Tasks \|[^\n]*`drover line <T-…> "<[^"]*>" \[--progress n\]`/);
+  const s = h.match(/\n- [^\n]*`drover line <T-…>[^\n]*\n/)?.[0] ?? "";
+  assert.match(s, /leader/i);
+  assert.match(s, /STATUS/);
+  assert.match(s, /40/);
+  assert.match(s, /no secret/i);
+  assert.match(s, /no path/i);
+});

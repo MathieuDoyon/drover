@@ -7,25 +7,25 @@ register("./hooks.js", import.meta.url);
 const U = await import("../_lib/remote-write-ui.js");
 const W = await import("../_lib/remote-write.js");
 
-const card = (extra = {}) => ({ id: "T-AB1", title: "old title", desc: "old desc", column: "todo", priority: "P2", tags: [], project: "P-LOCAL", remote: { machine: "omarchy" }, ...extra });
+const card = (extra = {}) => ({ id: "T-AB1", title: "old title", desc: "old desc", column: "todo", priority: "P2", tags: [], project: "P-LOCAL", remote: { machine: "box1" }, ...extra });
 const ON = { remote: true, enabled: true, reason: null, frozen: false };
 
 test("control states: enabled -> no tip; otherwise the writer's reason; frozen says so", () => {
   assert.deepEqual(U.controlState(ON), { on: true, tip: null });
-  assert.deepEqual(U.controlState({ remote: true, enabled: false, reason: "omarchy needs the update", frozen: false }), { on: false, tip: "omarchy needs the update" });
-  assert.deepEqual(U.controlState({ remote: true, enabled: false, reason: "Checking omarchy, try again in a moment", frozen: false }), { on: false, tip: "Checking omarchy, try again in a moment" });
+  assert.deepEqual(U.controlState({ remote: true, enabled: false, reason: "box1 needs the update", frozen: false }), { on: false, tip: "box1 needs the update" });
+  assert.deepEqual(U.controlState({ remote: true, enabled: false, reason: "Checking box1, try again in a moment", frozen: false }), { on: false, tip: "Checking box1, try again in a moment" });
   assert.deepEqual(U.controlState({ remote: true, enabled: false, reason: "x", frozen: true }), { on: false, tip: "writes frozen" });
   assert.equal(U.controlState({ remote: true, enabled: false, reason: null, frozen: false }).tip, "writes are off");
   assert.equal(U.controlState(undefined).on, false);
 });
 
 test("agent ops stay off on a remote card, with the fixed tooltip", () => {
-  assert.equal(U.OFF_TIP, "not available for omarchy projects yet");
+  assert.equal(U.OFF_TIP, "not available for projects on the remote machine yet");
 });
 
 test("status line per remote project", () => {
   assert.equal(U.statusLine(ON), "writes on");
-  assert.equal(U.statusLine({ remote: true, enabled: false, reason: "omarchy needs the update", frozen: false }), "omarchy needs the update");
+  assert.equal(U.statusLine({ remote: true, enabled: false, reason: "box1 needs the update", frozen: false }), "box1 needs the update");
   assert.equal(U.statusLine({ remote: true, enabled: false, reason: "r", frozen: true }), "writes frozen");
 });
 
@@ -53,11 +53,11 @@ test("edit: only changed fields; a note is its own op; nothing to send is an emp
 
 test("outcome text: every writer outcome has a fixed message", () => {
   assert.equal(U.outcomeText({ status: "saved" }), "Saved");
-  assert.equal(U.outcomeText({ status: "stale" }), "card changed on omarchy: reloaded, try again");
+  assert.equal(U.outcomeText({ status: "stale", machine: "box1" }), "card changed on box1: reloaded, try again");
   assert.equal(U.outcomeText({ status: "expired" }), "not applied, too old");
   assert.equal(U.outcomeText({ status: "pending" }), "sent, may still apply");
-  assert.equal(U.outcomeText({ status: "unknown" }), "outcome unknown: check the card on omarchy");
-  assert.equal(U.outcomeText({ status: "refused", message: "omarchy needs the update" }), "omarchy needs the update");
+  assert.equal(U.outcomeText({ status: "unknown", machine: "box1" }), "outcome unknown: check the card on box1");
+  assert.equal(U.outcomeText({ status: "refused", message: "box1 needs the update" }), "box1 needs the update");
   assert.equal(U.outcomeText({ status: "failed", message: "not sent: nothing was applied" }), "not sent: nothing was applied");
   assert.equal(U.outcomeText({ status: "error", text: "error: unknown task T-ZZ\nsecond line" }), "error: unknown task T-ZZ");
   assert.equal(U.outcomeText({ status: "error", message: "unknown task T-ZZ" }), "error: unknown task T-ZZ");
@@ -65,9 +65,9 @@ test("outcome text: every writer outcome has a fixed message", () => {
 });
 
 test("writes toggle model: on by default, off reports frozen only when the writer says so", () => {
-  assert.deepEqual(U.writesToggle({ machine: "omarchy", projectId: "P-R" }, ON), { on: true, label: "Writes to omarchy", note: "on" });
-  assert.deepEqual(U.writesToggle({ machine: "omarchy", writes: false }, { frozen: true }), { on: false, label: "Writes to omarchy", note: "frozen" });
-  assert.deepEqual(U.writesToggle({ machine: "omarchy", writes: false }, { frozen: false }), { on: false, label: "Writes to omarchy", note: "off, waiting for sends in flight" });
+  assert.deepEqual(U.writesToggle({ machine: "box1", projectId: "P-R" }, ON), { on: true, label: "Writes to box1", note: "on" });
+  assert.deepEqual(U.writesToggle({ machine: "box1", writes: false }, { frozen: true }), { on: false, label: "Writes to box1", note: "frozen" });
+  assert.deepEqual(U.writesToggle({ machine: "box1", writes: false }, { frozen: false }), { on: false, label: "Writes to box1", note: "off, waiting for sends in flight" });
 });
 
 test("applied: a saved move becomes the card's column, so the status chip is not sent twice", () => {
@@ -76,7 +76,7 @@ test("applied: a saved move becomes the card's column, so the status chip is not
 });
 
 // ---- T-MWIA1D6HO84: the field ops of a Save ----
-const rcard = (extra = {}) => card({ rev: 5, priority: "P2", tags: ["a", "b"], assignee: null, parent: null, remote: { machine: "omarchy", projectId: "P-R1" }, ...extra });
+const rcard = (extra = {}) => card({ rev: 5, priority: "P2", tags: ["a", "b"], assignee: null, parent: null, remote: { machine: "box1", projectId: "P-R1" }, ...extra });
 test("editOps: only changed fields; text edit first, then the note, the project change LAST; ifRev (opened baseline) only on the first op", () => {
   const ops = U.editOps(rcard(), { title: "new", note: "hi", priority: "P0", tags: ["b", "c"], assignee: { kind: "agent", id: "wrangler" }, parent: "T-P", project: "P-R2" });
   assert.deepEqual(ops, [
@@ -109,7 +109,7 @@ test("applied: the saved fields become the editor's baseline; none clears", () =
 });
 test("fieldState: on only when the writer is on AND the probe allows fields; else the reason", () => {
   assert.deepEqual(U.fieldState({ ...ON, fields: { on: true, tip: null } }), { on: true, tip: null });
-  assert.deepEqual(U.fieldState({ ...ON, fields: { on: false, tip: "omarchy needs the update for priority, labels, assignee, parent and project" } }), { on: false, tip: "omarchy needs the update for priority, labels, assignee, parent and project" });
+  assert.deepEqual(U.fieldState({ ...ON, fields: { on: false, tip: "box1 needs the update for priority, labels, assignee, parent and project" } }), { on: false, tip: "box1 needs the update for priority, labels, assignee, parent and project" });
   assert.deepEqual(U.fieldState({ remote: true, enabled: false, reason: "r", frozen: false, fields: { on: true, tip: null } }), { on: false, tip: "r" });
   assert.equal(U.fieldState(undefined).on, false);
 });

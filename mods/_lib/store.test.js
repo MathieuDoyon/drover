@@ -945,8 +945,8 @@ test("note op rejects empty and whitespace-only text", () => {
 
 test("note op: kind is stored; none keeps the old shape; unknown is rejected", () => {
   const { tasks, task } = add([], { title: "A" });
-  assert.deepEqual(NOTE_KINDS, ["decision", "log", "blocker", "pr", "handoff"]);
-  for (const kind of NOTE_KINDS) assert.equal(applyCommand(tasks, { op: "note", id: task.id, text: "x", kind }).task.notes[0].kind, kind);
+  assert.deepEqual(NOTE_KINDS, ["decision", "log", "blocker", "pr", "handoff", "review"]);
+  for (const kind of NOTE_KINDS.filter((k) => k !== "review")) assert.equal(applyCommand(tasks, { op: "note", id: task.id, text: "x", kind }).task.notes[0].kind, kind); // review has its own structured text, tested below
   const plain = applyCommand(tasks, { op: "note", id: task.id, text: "x" }).task.notes[0];
   assert.ok(!("kind" in plain), "no kind key without a kind");
   assert.ok(!("kind" in applyCommand(tasks, { op: "note", id: task.id, text: "x", kind: "" }).task.notes[0]));
@@ -958,4 +958,46 @@ test("note op: old notes without a kind stay valid next to new ones", () => {
   const old = tasks.map((t) => ({ ...t, notes: [{ at: 1, by: "you", text: "old" }] }));
   const r = applyCommand(old, { op: "note", id: task.id, text: "new", kind: "log" });
   assert.deepEqual(r.task.notes.map((n) => n.kind), [undefined, "log"]);
+});
+
+// ---- the structured `review` note kind (B3a) ----
+const RV_HEAD = "c".repeat(40);
+const RV_OK = `head=${RV_HEAD} verdict=pass report="/work dir/review.md"`;
+const withTask = () => add([], { title: "T" }, 1);
+
+test("review note kind: listed, and accepted with valid text", () => {
+  assert.ok(NOTE_KINDS.includes("review"));
+  const a = withTask();
+  const r = applyCommand(a.tasks, { op: "note", id: a.task.id, kind: "review", text: RV_OK, by: "inspector" }, 5);
+  assert.equal(r.error, undefined);
+  assert.deepEqual(r.task.notes.map((n) => [n.kind, n.text, n.by]), [["review", RV_OK, "inspector"]]);
+});
+
+test("review note kind: malformed text is refused and nothing is written", () => {
+  const a = withTask();
+  for (const text of ["pass", `head=${RV_HEAD} verdict=pass`, `head=zz verdict=pass report=/x.md`, `head=${RV_HEAD} verdict=ok report=/x.md`, `head=${RV_HEAD} verdict=pass report=rel.md`]) {
+    const r = applyCommand(a.tasks, { op: "note", id: a.task.id, kind: "review", text }, 5);
+    assert.match(r.error, /review note/i, text);
+    assert.equal(r.tasks, undefined);
+  }
+});
+
+test("review note kind: editing a review note must still parse; other kinds edit freely", () => {
+  const a = withTask();
+  const added = applyCommand(a.tasks, { op: "note", id: a.task.id, kind: "review", text: RV_OK }, 5);
+  const id = added.task.notes[0].id;
+  const good = `head=${RV_HEAD} verdict=adverse report=/r2.md`;
+  assert.equal(applyCommand(added.tasks, { op: "note-edit", id: a.task.id, noteId: id, text: good }, 6).task.notes[0].text, good);
+  const bad = applyCommand(added.tasks, { op: "note-edit", id: a.task.id, noteId: id, text: "looks fine to me" }, 6);
+  assert.match(bad.error, /review note/i);
+  assert.equal(bad.tasks, undefined, "no mutation");
+  const plain = applyCommand(a.tasks, { op: "note", id: a.task.id, kind: "log", text: "anything goes" }, 5);
+  const edited = applyCommand(plain.tasks, { op: "note-edit", id: a.task.id, noteId: plain.task.notes[0].id, text: "still anything" }, 6);
+  assert.equal(edited.task.notes[0].text, "still anything");
+});
+
+test("other note kinds are unchanged", () => {
+  assert.deepEqual(NOTE_KINDS.filter((k) => k !== "review"), ["decision", "log", "blocker", "pr", "handoff"]);
+  const a = withTask();
+  assert.equal(applyCommand(a.tasks, { op: "note", id: a.task.id, kind: "bogus", text: "x" }, 5).error.startsWith("Unknown note kind bogus"), true);
 });

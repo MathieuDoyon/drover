@@ -63,7 +63,7 @@ test("Board: closed scope, filter and column menus are not built; an open one is
 
 // Board gate: the write gate of a remote project is computed once per render, not once per card (28 -> 820 shared reads for 1 -> 100 cards).
 test("Board: shared reads of one render do not grow with the number of remote cards", () => {
-  const M = "omarchy", RID = "P-REMOTE1", LID = "P-ONREM";
+  const M = "box1", RID = "P-REMOTE1", LID = "P-ONREM";
   const reads = (n) => {
     const rt = (i) => T(`T-R${i}`, { project: RID, column: "todo" });
     globalThis.__host.state = { "drover.tasks": [], "drover.projects": [{ id: LID, name: "pairstone", repos: [], folders: [], branch: "main", remote: { machine: M, projectId: RID, id: "B-1" } }],

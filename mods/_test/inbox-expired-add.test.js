@@ -4,7 +4,7 @@
 import { test, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import { register } from "node:module";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, utimesSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, existsSync, utimesSync } from "node:fs";
 import { execFile } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
@@ -49,7 +49,7 @@ const answer = (name) => until(() => existsSync(join(inbox, `${name}.result`)) &
 let n = 0;
 const send = async (cmd, opts) => { const name = `q${++n}`; drop(name, cmd, opts); startLoop(); return answer(name); };
 
-const DRAIN_CHECK = join(dirname(fileURLToPath(import.meta.url)), "../../deploy/omarchy/drain-check.sh");
+const DRAIN_CHECK = join(dirname(fileURLToPath(import.meta.url)), "../../deploy", readdirSync(join(dirname(fileURLToPath(import.meta.url)), "../../deploy")).find((d) => existsSync(join(dirname(fileURLToPath(import.meta.url)), "../../deploy", d, "drain-check.sh"))) ?? "", "drain-check.sh");
 const drainCheck = () => new Promise((resolve) => execFile("bash", [DRAIN_CHECK, inbox], { encoding: "utf8" }, (e, stdout) => resolve({ code: e ? e.code : 0, stdout })));
 
 test("1e an add whose TTL passed while the consumer was stopped creates no card, answers expired, and the file is gone", async () => {

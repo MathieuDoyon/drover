@@ -106,7 +106,7 @@ test("the stored value is replaced, not mutated, so a reader holding the old one
 test("the cache keys every card by board: byId holds both cards that share an id", async () => {
   const { cardKey } = await import("../_lib/needs.js");
   const local = T({ id: "T-X", title: "local", column: "todo", agent: null });
-  const rem = T({ id: "T-X", title: "remote", column: "blocked", agent: null, remote: { machine: "omarchy", projectId: "P-9" } });
+  const rem = T({ id: "T-X", title: "remote", column: "blocked", agent: null, remote: { machine: "box1", projectId: "P-9" } });
   const w = world({ tasks: [local, rem] });
   const c = createNeedsCache({ read: w.read, now: () => 1 });
   c.refresh();

@@ -158,7 +158,7 @@ test("a home with links but no stamp (installed before the stamp existed) prints
   assert.doesNotMatch(install(repo, home).stdout, NOTE);
 });
 
-// omarchy (Arch) runs this script too: no shasum there, and the GitHub mod may be skipped. Never a false alarm, never a failed install.
+// box1 (Arch) runs this script too: no shasum there, and the GitHub mod may be skipped. Never a false alarm, never a failed install.
 // A private bin dir with symlinks to only the tools install.sh needs, found on the real PATH. Hiding the hashers by editing PATH cannot work:
 // on Linux they sit in /usr/bin with every other tool. The dir is checked by listing it, not by running anything.
 const NEEDED = ["bash", "sh", "env", "cat", "cp", "mv", "rm", "ln", "install", "cmp", "readlink", "dirname", "basename", "git", "mkdir", "grep", "head", "tail", "sed", "awk", "tr", "sort", "ls", "date", "touch", "chmod", "uname", "cut", "wc", "expr", "test", "["];
@@ -202,7 +202,7 @@ test("with no hasher on a fresh home nothing is printed and nothing is stamped",
   assert.equal(existsSync(join(home, ".drover-lib-stamp")), false);
 });
 
-test("with drover-github/query.js absent (omarchy skips it) a changed _lib file still prints the note, and the install succeeds", () => {
+test("with drover-github/query.js absent (box1 skips it) a changed _lib file still prints the note, and the install succeeds", () => {
   const { repo, home } = fixture();
   assert.equal(install(repo, home).status, 0);
   rmSync(join(repo, "mods", "drover-github", "query.js"));

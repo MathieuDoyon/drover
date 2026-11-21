@@ -13,9 +13,9 @@ import { createHold, pushGuard } from "./hold.js";
 export { createHold, pushGuard };
 
 // Everything the CLI needs: the import chain of bin/drover and its helpers (the closure is checked before any transfer).
-export const SHIPPED = ["bin/drover", "bin/drover-export.mjs", "bin/drover-machines.mjs", "bin/find-runtime.sh", "bin/drover-headless", "bin/drover-headless.mjs", "headless-board.js", "remote.js", "machines.js", "hold.js", "publish.js", "herd-export.js", "runs.js", "store.js", "config.js", "config-schema.js", "lessons.js", "workfolder.js", "sources.js"];
+export const SHIPPED = ["bin/drover", "bin/drover-export.mjs", "bin/drover-machines.mjs", "bin/drover-health.py", "bin/find-runtime.sh", "bin/drover-headless", "bin/drover-headless.mjs", "bin/drover-asks-check.mjs", "bin/asks-lib.mjs", "headless-board.js", "remote.js", "machines.js", "hold.js", "publish.js", "herd-export.js", "runs.js", "store.js", "config.js", "config-schema.js", "lessons.js", "workfolder.js", "sources.js", "bin/drover-line.mjs", "runline.js", "evidence.js"];
 
-const SHARE = ".local/share/drover-herdr";
+export const SHARE = ".local/share/drover-herdr";
 const GEN = `${SHARE}/gen`;
 const ENTRY = ".local/bin/drover";
 const IMPORT_SCRIPT = 'import("node:url").then((u) => import(u.pathToFileURL(process.argv[1]).href))';
@@ -23,7 +23,9 @@ const sha256 = (buf) => createHash("sha256").update(buf).digest("hex");
 const fail = (code, message, extra = {}) => ({ ok: false, code, message, ...extra });
 
 // ---------------------------------------------------------------------------------------------------------- manifest
-const testArgv = (path) => (path.endsWith(".mjs") ? ["{node}", "--check", `{gen}/${path}`] : path.endsWith(".js") ? ["{node}", "--input-type=module", "-e", IMPORT_SCRIPT, `{gen}/${path}`] : ["bash", "-n", `{gen}/${path}`]);
+// The .py check only compiles in memory: py_compile would write a __pycache__ into the immutable generation.
+const PY_SYNTAX = "import sys; compile(open(sys.argv[1],'rb').read(), sys.argv[1], 'exec')";
+const testArgv = (path) => (path.endsWith(".mjs") ? ["{node}", "--check", `{gen}/${path}`] : path.endsWith(".py") ? ["{python3}", "-c", PY_SYNTAX, `{gen}/${path}`] : path.endsWith(".js") ? ["{node}", "--input-type=module", "-e", IMPORT_SCRIPT, `{gen}/${path}`] : ["bash", "-n", `{gen}/${path}`]);
 export function generationId(files) {
   const lines = files.map((f) => `${f.path} ${f.sha256} ${f.mode}\n`).sort().join("");
   return sha256(lines).slice(0, 16);

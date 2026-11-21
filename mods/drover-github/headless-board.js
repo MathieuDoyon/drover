@@ -11,7 +11,7 @@ import os from "node:os";
 import path from "node:path";
 import { createHash, randomBytes } from "node:crypto";
 import { ownerError } from "./remote.js";
-import { addCommand, update, applyCommand, protocolFields, inboxGate, projectKey, projectAddRequest, addProject, noteIds, list as normTasks, NOTE_KINDS, revOf } from "./store.js";
+import { addCommand, update, applyCommand, protocolFields, inboxGate, projectKey, projectAddRequest, addProject, noteIds, list as normTasks, NOTE_KINDS, reviewTextError, revOf } from "./store.js";
 
 export const SCHEMA = 1;
 export const CLI = "drover-headless";
@@ -243,6 +243,8 @@ function importCard(env, state, t) {
     const text = String(n?.text ?? "").trim();
     if (!text) return { error: "Note is empty" };
     if (n.kind != null && n.kind !== "" && !NOTE_KINDS.includes(n.kind)) return { error: `Unknown note kind ${n.kind}: use ${NOTE_KINDS.join(", ")}` };
+    const badReview = reviewTextError(n.kind, text);
+    if (badReview) return { error: badReview };
     notes.push({ at: Number.isSafeInteger(n.at) ? n.at : t, by: String(n.by ?? "").trim() || "you", text, ...(n.kind ? { kind: n.kind } : {}) });
   }
   const source = isObj(src.source) && typeof src.source.kind === "string" ? { kind: src.source.kind, id: src.source.id, url: src.source.url } : null;

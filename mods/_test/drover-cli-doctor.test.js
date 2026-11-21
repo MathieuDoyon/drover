@@ -1,10 +1,10 @@
 // T-MWO2HGQOEI2 (B5): `drover doctor` is a read-only report: mods linked and equal to the repo, _lib copies equal, souls present,
-// the _lib fingerprint vs the install.sh stamp, the CLI on PATH, a hook slot for B4a. One line per check, exit 0 unless a check FAILs.
+// the _lib fingerprint vs the install.sh stamp, the CLI on PATH, the asks hooks of Claude and Codex (B4a, read-only). One line per check, exit 0 unless a check FAILs.
 // Everything runs in a disposable repo copy and a disposable HERDR_APP_HOME, with a private PATH: no Herdr, hc or gh, never the real home.
 // The stamp is written by the REAL install.sh (fake `herdr-app check`), so doctor and installer must agree on the hash byte for byte.
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
-import { chmodSync, symlinkSync, mkdtempSync, mkdirSync, cpSync, readdirSync, lstatSync, readlinkSync, writeFileSync, appendFileSync, readFileSync, rmSync, existsSync, realpathSync, unlinkSync } from "node:fs";
+import { utimesSync, chmodSync, symlinkSync, mkdtempSync, mkdirSync, cpSync, readdirSync, lstatSync, readlinkSync, writeFileSync, appendFileSync, readFileSync, rmSync, existsSync, realpathSync, unlinkSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
@@ -65,17 +65,16 @@ const line = (r, check) => lines(r).find((l) => new RegExp(`^(ok|FAIL|WARN|skip)
 const status = (r, check) => line(r, check).split("  ")[0];
 const LINE = /^(ok|FAIL|WARN|skip)  [a-z-]+  .{0,100}$/;
 
-test("an installed fixture: 6 check lines in the shared grammar, a summary, exit 0, hooks skipped", () => {
+test("an installed fixture: 8 check lines in the shared grammar, a summary, exit 0, both hooks lines skipped (nothing installed)", () => {
   const f = fx();
   const r = doctor(f);
   assert.equal(r.status, 0, r.stdout + r.stderr);
   const ls = lines(r);
-  assert.equal(ls.length, 7, r.stdout);
-  for (const l of ls.slice(0, 6)) assert.match(l, LINE);
-  assert.deepEqual(ls.slice(0, 6).map((l) => l.split("  ")[1]), ["mods-linked", "lib-copies", "souls", "lib-stamp", "cli-path", "hooks"]);
-  assert.match(ls[6], /^doctor: 5 ok, 0 warn, 0 fail$/);
-  assert.equal(status(r, "hooks"), "skip");
-  assert.match(line(r, "hooks"), /B4a/);
+  assert.equal(ls.length, 9, r.stdout);
+  for (const l of ls.slice(0, 8)) assert.match(l, LINE);
+  assert.deepEqual(ls.slice(0, 8).map((l) => l.split("  ")[1]), ["mods-linked", "lib-copies", "souls", "lib-stamp", "cli-path", "hooks-claude", "hooks-codex", "hooks-locks"]);
+  assert.match(ls[8], /^doctor: 5 ok, 0 warn, 0 fail$/);
+  for (const c of ["hooks-claude", "hooks-codex", "hooks-locks"]) assert.equal(status(r, c), "skip", line(r, c));
   for (const c of ["mods-linked", "lib-copies", "souls", "lib-stamp", "cli-path"]) assert.equal(status(r, c), "ok", line(r, c));
 });
 
@@ -318,7 +317,7 @@ test("an unreadable _lib/copies.txt: FAIL with a fixed detail, exit 1, empty std
   assert.equal(r.status, 1, r.stdout);
   assert.equal(r.stderr, "", "a shell diagnostic leaked a path");
   assert.match(line(r, "lib-copies"), /^FAIL  lib-copies  _lib\/copies\.txt is missing or unreadable$/);
-  assert.equal(lines(r).length, 7, r.stdout);
+  assert.equal(lines(r).length, 9, r.stdout);
   assert.notEqual(status(r, "lib-stamp"), "ok"); // a manifest that cannot be read proves nothing
 });
 
@@ -328,9 +327,9 @@ test("a shared file listed in copies.txt but missing in _lib: all six lines and 
   const r = doctor(f);
   assert.equal(r.status, 1);
   assert.equal(r.stderr, "");
-  assert.equal(lines(r).length, 7, r.stdout);
+  assert.equal(lines(r).length, 9, r.stdout);
   assert.equal(status(r, "lib-stamp"), "skip", line(r, "lib-stamp"));
-  for (const c of ["cli-path", "hooks"]) assert.notEqual(line(r, c).startsWith("(no "), true, c);
+  for (const c of ["cli-path", "hooks-claude", "hooks-codex", "hooks-locks"]) assert.notEqual(line(r, c).startsWith("(no "), true, c);
   assert.match(lines(r).at(-1), /^doctor: \d+ ok, \d+ warn, \d+ fail$/);
 });
 
@@ -348,4 +347,151 @@ test("failure details are short and complete (count, first failure, the hint), n
   const k = fx();
   for (const n of ["wrangler.md", "scout.md", "qa.md"]) writeFileSync(join(k.repo, "mods", "drover-agents", "souls", n), "");
   assert.match(line(doctor(k), "souls"), /^FAIL  souls  3 of \d+: [a-z-]+\.md empty \(\+2 more\)$/);
+});
+
+// ---- the asks hooks check (T-MWO2HGDSXX1, B4a part A): read-only, reads two config files, prints only fixed phrases ----
+// HOME is a scratch dir in every test, and the explicit paths point there too: the real ~/.claude and ~/.codex are never read.
+const withNode = (f) => binDir(DOCTOR_TOOLS, f.hashers, { drover: f.cli, node: process.execPath });
+const hookScript = (f) => join(f.repo, "mods", "drover-tasks", "bin", "drover-asks-hook");
+const CLAUDE_SET = { PermissionRequest: "set", Notification: "set", PreToolUse: "set", PostToolUse: "clear", UserPromptSubmit: "clear", Stop: "clear", SessionEnd: "clear" };
+const CODEX_SET = { PermissionRequest: "set", PostToolUse: "clear", UserPromptSubmit: "clear", Stop: "clear" };
+const cfg = (script, events, extra = {}) => JSON.stringify({ theme: "dark", hooks: { Stop: [{ hooks: [{ type: "command", command: "/usr/local/bin/other-hook --flag" }] }], ...Object.fromEntries(Object.entries(events).map(([e, a]) => [e, [{ matcher: "", hooks: [{ type: "command", command: `${script} ${a}`, timeout: 5 }] }]])), ...extra } });
+const put = (root, rel, text) => { const p = join(root, rel); mkdirSync(dirname(p), { recursive: true }); writeFileSync(p, text); return p; };
+const hooksRun = (f, over = {}) => doctor(f, { path: withNode(f), env: { HOME: f.root, ...over } });
+const bothLines = (r) => [line(r, "hooks-claude"), line(r, "hooks-codex")];
+
+test("hooks: no config files: both lines skip, exit 0; a config with only other hooks is skip too", () => {
+  const f = fx();
+  let r = hooksRun(f);
+  assert.equal(r.status, 0); for (const l of bothLines(r)) assert.match(l, /^skip  hooks-(claude|codex)  /);
+  put(f.root, ".claude/settings.json", JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: "command", command: "other" }] }] } }));
+  r = hooksRun(f);
+  assert.match(line(r, "hooks-claude"), /^skip  hooks-claude  not installed/);
+});
+
+test("hooks: a full Claude and Codex set: ok on both, exit 0, only fixed phrases and counts", () => {
+  const f = fx();
+  put(f.root, ".claude/settings.json", cfg(hookScript(f), CLAUDE_SET));
+  put(f.root, ".codex/hooks.json", cfg(hookScript(f), CODEX_SET));
+  const r = hooksRun(f);
+  assert.equal(r.status, 0, r.stdout);
+  assert.match(line(r, "hooks-claude"), /^ok  hooks-claude  7 events call an existing script$/);
+  assert.match(line(r, "hooks-codex"), /^ok  hooks-codex  4 events call an existing script$/);
+  assert.equal(r.stderr, "");
+});
+
+test("hooks: a missing event, an unknown event, a gone script, a script that is not executable, a wrong action: WARN with a fixed reason, never FAIL", () => {
+  const f = fx();
+  const claude = (text) => { put(f.root, ".claude/settings.json", text); return line(hooksRun(f), "hooks-claude"); };
+  const { SessionEnd, ...fewer } = CLAUDE_SET;
+  assert.match(claude(cfg(hookScript(f), fewer)), /^WARN  hooks-claude  an event of the set is missing$/);
+  assert.match(claude(cfg(hookScript(f), { ...CLAUDE_SET, MadeUpEvent: "set" })), /^WARN  hooks-claude  an event is unknown to this Drover$/);
+  assert.match(claude(cfg(hookScript(f), { ...CLAUDE_SET, PermissionRequest: "clear" })), /^WARN  hooks-claude  an event has the wrong action$/);
+  assert.match(claude(cfg(join(f.root, "gone", "drover-asks-hook"), CLAUDE_SET)), /^WARN  hooks-claude  hook script missing$/);
+  const named = put(f.root, "x/drover-asks-hook", "#!/bin/sh\n"); chmodSync(named, 0o644);
+  assert.match(claude(cfg(named, CLAUDE_SET)), /^WARN  hooks-claude  hook script not executable$/);
+  assert.match(claude(cfg(hookScript(f), { ...CLAUDE_SET }).replace(" set\"", " bogus\"")), /^WARN  hooks-claude  hook command not recognised$/);
+  const r = hooksRun(f); assert.equal(r.status, 0, "a WARN never fails doctor");
+});
+
+test("hooks: Codex has no Notification event: registering it for Codex is an unknown event", () => {
+  const f = fx();
+  put(f.root, ".codex/hooks.json", cfg(hookScript(f), { ...CODEX_SET, Notification: "set" }));
+  assert.match(line(hooksRun(f), "hooks-codex"), /^WARN  hooks-codex  an event is unknown to this Drover$/);
+});
+
+test("hooks: malformed JSON, a non-object root, a huge file: WARN unreadable, no crash, no file content in the output", () => {
+  const f = fx();
+  for (const text of ["{ not json " + FAKE_SEC, "[]", "null", "123", "x".repeat(3_000_000)]) {
+    put(f.root, ".claude/settings.json", text);
+    const r = hooksRun(f);
+    assert.equal(r.status, 0); assert.match(line(r, "hooks-claude"), /^WARN  hooks-claude  config unreadable$/);
+    assert.ok(!r.stdout.includes(FAKE_SEC)); assert.equal(r.stderr, "");
+  }
+});
+
+test("hooks: no node on the PATH: both lines skip with a fixed phrase", () => {
+  const f = fx();
+  put(f.root, ".claude/settings.json", cfg(hookScript(f), CLAUDE_SET));
+  const r = doctor(f, { env: { HOME: f.root } }); // the default private PATH has no node
+  assert.match(line(r, "hooks-claude"), /^skip  hooks-claude  cannot read JSON \(no node\)$/);
+  assert.match(line(r, "hooks-codex"), /^skip  hooks-codex  cannot read JSON \(no node\)$/);
+});
+
+test("hooks: the output never holds a path, an env value or config content", () => {
+  const f = fx();
+  put(f.root, ".claude/settings.json", cfg(hookScript(f), CLAUDE_SET, { env: { TOKEN: SK }, FakeEvent: [{ hooks: [{ type: "command", command: `${GH("a")} ${hookScript(f)} set` }] }] }));
+  const r = hooksRun(f, { DROVER_CODEX_HOOKS: join(f.root, "secret-dir-" + FAKE_SEC, "hooks.json") });
+  const out = r.stdout + r.stderr;
+  for (const s of [f.root, SK, FAKE_SEC, "secret-dir", "settings.json", "hooks.json", "FakeEvent"]) assert.ok(!out.includes(s), `printed ${s}`);
+  assert.ok(!out.includes(GH("a")));
+});
+
+test("hooks: isolation: with only HOME=scratch the files read are scratch/.claude/settings.json and scratch/.codex/hooks.json; an empty HOME gives skip; flags and env override", () => {
+  const f = fx();
+  const good = cfg(hookScript(f), CLAUDE_SET), goodCodex = cfg(hookScript(f), CODEX_SET);
+  // a second tree with ok configs that must NOT be read when HOME points to an empty dir
+  const other = tmp("doctor-other-"); put(other, ".claude/settings.json", good); put(other, ".codex/hooks.json", goodCodex);
+  const emptyHome = tmp("doctor-empty-");
+  let r = hooksRun(f, { HOME: emptyHome });
+  for (const l of bothLines(r)) assert.match(l, /^skip  /, l);
+  r = hooksRun(f, { HOME: other });
+  assert.match(line(r, "hooks-claude"), /^ok  /); assert.match(line(r, "hooks-codex"), /^ok  /);
+  // flags override HOME
+  r = doctor(f, { path: withNode(f), args: ["doctor", "--claude-settings", join(other, ".claude", "settings.json"), "--codex-hooks", join(other, ".codex", "hooks.json")], env: { HOME: emptyHome } });
+  assert.match(line(r, "hooks-claude"), /^ok  /); assert.match(line(r, "hooks-codex"), /^ok  /);
+  // env override
+  r = hooksRun(f, { HOME: emptyHome, DROVER_CLAUDE_SETTINGS: join(other, ".claude", "settings.json"), DROVER_CODEX_HOOKS: join(other, ".codex", "hooks.json") });
+  assert.match(line(r, "hooks-claude"), /^ok  /); assert.match(line(r, "hooks-codex"), /^ok  /);
+  // a flag without a value is a usage error
+  assert.equal(doctor(f, { args: ["doctor", "--claude-settings"] }).status, 2);
+});
+
+test("hooks: the doctor changes nothing (the configs are byte-identical afterwards, no file is created)", () => {
+  const f = fx();
+  const a = put(f.root, ".claude/settings.json", cfg(hookScript(f), CLAUDE_SET)), b = put(f.root, ".codex/hooks.json", cfg(hookScript(f), CODEX_SET));
+  const before = [readFileSync(a, "utf8"), readFileSync(b, "utf8")];
+  hooksRun(f);
+  assert.deepEqual([readFileSync(a, "utf8"), readFileSync(b, "utf8")], before);
+  assert.deepEqual(readdirSync(join(f.root, ".claude")), ["settings.json"]);
+});
+
+test("hooks: a config path that is a FIFO (or a link to one) is a WARN unreadable, and doctor still finishes", () => {
+  const f = fx();
+  const fifo = join(f.root, "fifo-settings"); assert.equal(spawnSync("mkfifo", [fifo]).status, 0);
+  symlinkSync(fifo, join(f.root, "fifo-link"));
+  for (const p of [fifo, join(f.root, "fifo-link")]) {
+    const r = doctor(f, { path: withNode(f), args: ["doctor", "--claude-settings", p], env: { HOME: f.root } });
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    assert.match(line(r, "hooks-claude"), /^WARN  hooks-claude  config unreadable$/);
+  }
+});
+
+// hooks-locks: a lock dir of the asks hook older than 10 s (LOCK_STALE_MS) means a hook stopped mid-write; the hook itself reclaims it by age at its next run
+const lockDir = (f, name, ageMs) => { const p = join(f.home, "data", "drover-asks", name); mkdirSync(p, { recursive: true }); const t = (Date.now() - ageMs) / 1000; utimesSync(p, t, t); return p; };
+test("hooks-locks: no asks folder = skip; no lock or a young one = ok; a lock older than 10 s = WARN; fixed text, no path, never FAIL", () => {
+  const f = fx();
+  let r = hooksRun(f);
+  assert.match(line(r, "hooks-locks"), /^skip  hooks-locks  no asks folder yet$/);
+  mkdirSync(join(f.home, "data", "drover-asks"), { recursive: true });
+  writeFileSync(join(f.home, "data", "drover-asks", "t1.json"), "{}");
+  assert.match(line(hooksRun(f), "hooks-locks"), /^ok  hooks-locks  no stale lock$/);
+  lockDir(f, "t1.lock", 2_000);
+  assert.match(line(hooksRun(f), "hooks-locks"), /^ok  hooks-locks  no stale lock$/);
+  lockDir(f, "t2.lock", 30_000);
+  r = hooksRun(f);
+  assert.match(line(r, "hooks-locks"), /^WARN  hooks-locks  a lock is older than 10 s \(a hook stopped mid-write; the next hook clears it\)$/);
+  assert.equal(r.status, 0, "a WARN never fails doctor");
+  const out = r.stdout + r.stderr;
+  for (const s of [f.root, "t2.lock", "drover-asks"]) assert.ok(!out.includes(s), `printed ${s}`);
+});
+test("hooks-locks: a symlinked or plain-file lock name is ignored; no node = skip; the doctor creates nothing", () => {
+  const f = fx();
+  const d = join(f.home, "data", "drover-asks"); mkdirSync(d, { recursive: true });
+  writeFileSync(join(d, "t3.lock"), "not a dir"); const old = (Date.now() - 60_000) / 1000; utimesSync(join(d, "t3.lock"), old, old);
+  symlinkSync(f.root, join(d, "t4.lock"));
+  assert.match(line(hooksRun(f), "hooks-locks"), /^ok  hooks-locks  no stale lock$/);
+  lockDir(f, "t5.lock", 60_000);
+  assert.match(line(doctor(f, { env: { HOME: f.root } }), "hooks-locks"), /^skip  hooks-locks  cannot read the folder \(no node\)$/);
+  assert.deepEqual(readdirSync(d).sort(), ["t3.lock", "t4.lock", "t5.lock"]);
 });

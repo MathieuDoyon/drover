@@ -50,7 +50,7 @@ const PROJ = "drover.projects", CFG = "drover.agents";
 const projects = [
   { id: "P-A", name: "alpha", repos: [{ path: "/a", default: true }], folders: [], branch: "main" },
   { id: "P-B", name: "beta", repos: [{ path: "/b", default: true }], folders: [], branch: "main" },
-  { id: "P-R", name: "remote", repos: [], folders: [], branch: "main", remote: { machine: "omarchy", projectId: "P-X" } },
+  { id: "P-R", name: "remote", repos: [], folders: [], branch: "main", remote: { machine: "box1", projectId: "P-X" } },
 ];
 // cards: a (P-A), p (P-A, parent candidate), o (P-B, other project), c (P-A, child of a)
 const world = () => {
@@ -111,7 +111,7 @@ const BAD = (id) => [
   ["parent not a string", { parent: 5 }, /parent/i],
   ["project unknown", { project: "nope" }, /no project/],
   ["project not a string", { project: 5 }, /project/i],
-  ["project owned by another machine", { project: "remote" }, /omarchy/],
+  ["project owned by another machine", { project: "remote" }, /box1/],
 ];
 test("a bad value changes nothing: no field, no rev bump, in any field order", async () => {
   const id = world();
@@ -134,7 +134,7 @@ test("a card kept in a remote-owned project cannot be edited, even with only a p
   const id = world();
   host.state[KEY] = tasks().map((t) => (t.id === id.a ? { ...t, project: "P-R" } : t));
   const before = snap();
-  assert.match(await send({ op: "edit", id: id.a, priority: "P1" }), /^error: .*omarchy/);
+  assert.match(await send({ op: "edit", id: id.a, priority: "P1" }), /^error: .*box1/);
   assert.equal(snap(), before);
 });
 

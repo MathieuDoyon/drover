@@ -9,7 +9,7 @@ drover machines doctor  <machine> [--node <dir>] [--json]
 drover machines hold clear --reason <text>
 ```
 
-A machine is linked by you, with `hc machine add`; `drover machines` never adds one. Linux and macOS machines both work.
+Start with [Remote machines](remote-machines.md) for the whole path. A machine is linked by you, with `hc machine add`; `drover machines` never adds one. Linux and macOS machines both work.
 
 ## What the machine needs
 
@@ -46,9 +46,25 @@ While an install or update is unfinished, **nothing is pushed to any machine**. 
 - A killed install leaves the hold. Re-run `drover machines install <machine>`: the owner is gone, so the same machine resumes and finishes (the previous generation kept running the whole time).
 - A hold from another host, or a record that cannot be read, is never taken over by itself. Once you know no install is running, release it by hand: `drover machines hold clear --reason "<why>"`. That appends a `cleared` record with the reason `manual`; nothing is deleted.
 
-### For code that pushes to a machine (board writes, health, anything later)
+### For code that pushes to a machine (board writes, anything later)
 
 Call `pushGuard(hold)` from `machines.js` to ask whether anything is held, **and acquire the hold** when the push must not run next to an install. Checking and then acting is not exclusion: an install can start between the two. The directory holding the hold files is not fsynced; after a power loss the newest record can be missing, which means the hold behaves as the older state. That is an accepted limit.
+
+The machine health read (below) is **exempt** from the hold: it runs a fixed script that only reads, writes nothing on the machine and never touches `gen/`, so it can run while an install is unfinished.
+
+## Machine health
+
+`bin/drover-health.py` (shipped by `install`, python3 standard library only) prints one JSON object and exits 0 even when a field cannot be read. Run it by hand on a machine: `python3 ~/.local/share/drover-herdr/current/bin/drover-health.py`. Shape:
+
+```
+{"v":1,"os":"linux|darwin|other","cores":4,"load":{"one":1.6,"five":1.0,"fifteen":0.8},"loadPerCore":0.4,
+ "mem":{"totalMb":16000,"usedMb":9760,"pct":61},
+ "disks":{"home":{"totalMb":100000,"freeMb":60000,"pct":40},"tmp":{"totalMb":50000,"freeMb":45000,"pct":10}}}
+```
+
+A field it cannot read is `null`, never a guess. Linux reads `/proc/loadavg` and `/proc/meminfo` (used = total minus `MemAvailable`); macOS has no `/proc`, so it uses `sysctl hw.memsize` and `vm_stat` (free + inactive + speculative pages are available; the page size comes from the `vm_stat` header). `tmp` is the literal `/tmp`, not `$TMPDIR`. The output holds no name, path or environment value.
+
+The Tasks sidebar (setting `machine_polling`, off by default, see [Tasks](../mods/tasks.md#machines)) runs the same text from the laptop with no install needed: `hc exec --on <machine> --timeout 20 -- python3 -c <script text>`. **Deviation from the "payload never in argv" rule:** the script is passed as one argv item because the mod host has no stdin. That rule is about card data; this text is fixed, about 5 KB and carries nothing from the machine or the card. `_lib/health.js` embeds the file's exact text and a test keeps them byte-equal.
 
 ## doctor
 

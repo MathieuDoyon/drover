@@ -7,7 +7,7 @@ import { agents, terminals, theme, shared } from "herdr";
 import { liveAgents, liveStatuses, slotSnapshot, slotLine } from "./runs.js";
 import { COLUMNS, STATUS_ICON, projectOf, shiftVisible, reorder, matches, sorted, updatedAgo, clampText, sortCards, archiveDone, SORT_MODES, SCOPES, inScope, checklistProgress, ringGlyph, menuChange, FILTER_FIELDS, toggleFilter, clearFilters, matchesFilter, filterValues, searchFilters, filterChips, assigneeText } from "./store.js";
 import { load, loadProjects, loadRuns, loadConfig, save, edit, pick, openUrl, watchInbox, modSettings, loadMerged, watchRemote, retryRemote, remoteSend, remoteWriteState, takeRemoteOutcomes } from "./io.js";
-import { OFF_TIP, controlState, statusLine, moveOp, shiftOp, outcomeText } from "./remote-write-ui.js";
+import { offTip, controlState, statusLine, moveOp, shiftOp, outcomeText } from "./remote-write-ui.js";
 import { READONLY_TIP } from "./remote.js";
 import { bind, cfg, isEnabled, whenLoaded } from "./config.js";
 import { gated } from "./ui.js";
@@ -125,7 +125,7 @@ export default class Board extends View {
   drop(col, beforeId, cx) {
     const id = this.drag; this.drag = null; this.over = null;
     const rc = id ? loadMerged().tasks.find((x) => x.id === id && x.remote) : null;
-    if (rc) { const op = this.wstate(rc).on ? moveOp(rc, col) : null; if (op) this.rsend(rc.project, op, cx); } // a remote card moves through omarchy's inbox, to the column only
+    if (rc) { const op = this.wstate(rc).on ? moveOp(rc, col) : null; if (op) this.rsend(rc.project, op, cx); } // a remote card moves through the remote's inbox, to the column only
     else if (id && id !== beforeId) save(reorder(load(), id, col, beforeId));
     cx.notify();
   }
@@ -206,7 +206,7 @@ export default class Board extends View {
         .text_size(11).text_color(color).when(Boolean(iconName), (el) => el.child(svg(I(iconName)).size(11))).child(text);
       const ago = updatedAgo(x.updated);
       const ro = Boolean(x.remote); // a card of a project on another machine
-      const w = ro ? gateOf(x.project) : null; // its write controls: on when omarchy is reachable, updated and not frozen
+      const w = ro ? gateOf(x.project) : null; // its write controls: on when the remote is reachable, updated and not frozen
       const shift = (dir) => ro ? (w.on ? icon(`${dir < 0 ? "l" : "r"}-${x.id}`, dir < 0 ? "chevron-left" : "chevron-right", (cx) => { const op = shiftOp(x, this.visibleIds(), dir); if (op) this.rsend(x.project, op, cx); }) : off(`${dir < 0 ? "l" : "r"}-${x.id}`, dir < 0 ? "chevron-left" : "chevron-right", w.tip))
         : icon(`${dir < 0 ? "l" : "r"}-${x.id}`, dir < 0 ? "chevron-left" : "chevron-right", () => save(shiftVisible(load(), x.id, dir, this.visibleIds())));
       const dim = ro && staleNow(x) ? 0.55 : 1;
@@ -233,7 +233,7 @@ export default class Board extends View {
           .child(div().flex_1())
           .when(Boolean(x.source?.url), (el) => el.child(icon(`o-${x.id}`, "arrow-up-right", () => openUrl(x.source.url))))
           .when(ci > 0, (el) => el.child(shift(-1)))
-          .when(!x.agent && x.column !== "done", (el) => el.child(ro ? off(`s-${x.id}`, "play", OFF_TIP) : icon(`s-${x.id}`, "play",  () => pick(x.id))))
+          .when(!x.agent && x.column !== "done", (el) => el.child(ro ? off(`s-${x.id}`, "play", offTip(x.remote?.machine)) : icon(`s-${x.id}`, "play",  () => pick(x.id))))
           .when(ci < rs.visible.length - 1, (el) => el.child(shift(1))))
         .child(h_flex().gap(6).items_center().text_size(11.5).text_color(t.dim)
           .child(div().flex_1().min_w(0).truncate().text_color(status && status !== "gone" ? (t[status] ?? t.blocked) : t.dim).child(ro ? (x.agentText ?? "") : footerText(x, status, cfg_)))

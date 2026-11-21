@@ -14,7 +14,10 @@ usage() {
   cat >&2 <<'EOF'
 usage: drover tasks [tag|column] [--project <id|name>]   list tasks (id, column, priority, tags, title)
        drover task <T-…>                          one task with its description
-       drover note <T-…> [--kind decision|log|blocker|pr|handoff] "<text…>"   add a note to a task (after an owner decision or a scope)
+       drover note <T-…> [--kind decision|log|blocker|pr|handoff|review] "<text…>"   add a note to a task (after an owner decision or a scope)
+                                                  a review note is one line: head=<sha> verdict=pass|adverse report=<abs path> (full 40-hex commit; quote a path with spaces)
+       drover line <T-…> "<text, 40 characters at most>" [--progress 0-100]   say what your run is doing now (shows on the run card and the Tasks row; gone when the run ends).
+                                                  Post one at each STATUS. Never put a value (token, key, password) or a home path in it
        drover edit <T-…> [--title "<t>"] [--desc "<d>"] [--parent <T-…|none>]   replace the title, the description and/or the parent (1 flag at least)
        drover projects                            list projects (id, name, default repo)
        drover project add "<name>" --repo <abs path> [--branch <b>] [--folder <abs path>]…   create a project (repo = default; branch defaults to the repo's current one)
@@ -38,7 +41,7 @@ usage: drover tasks [tag|column] [--project <id|name>]   list tasks (id, column,
                                                   needs a card that is not Done or archived and an ended run. --cancel stops an attempt in flight;
                                                   after a crash the card stays claimed until you run --recover (kills what the attempt owns, adopts or releases)
                                                   or --cancel (abandons it). Nothing recovers by itself
-       drover doctor [--home <dir>]               read-only check of this install: mods linked, _lib copies, souls, stale loaded code hint, CLI on PATH (one line each; exit 1 on a FAIL; fixes nothing)
+       drover doctor [--home <dir>] [--claude-settings <file>] [--codex-hooks <file>]               read-only check of this install: mods linked, _lib copies, souls, stale loaded code hint, CLI on PATH, the asks hooks of Claude and Codex and their locks (one line each; exit 1 on a FAIL; fixes nothing)
        drover wake <terminal|T-…> <when> <message…>       once: now, 15m, 2h, 1d, 14:30, "tomorrow 9:00", "2026-11-12 09:00"
        drover wake <terminal|T-…> every <30m|2h|1d> <message…>   repeat (first time after one interval)
        drover wakes [terminal|T-…]                list wakeups (id, name, target, schedule, next, status, on/off)
@@ -292,9 +295,12 @@ doctor_first() {  # "<first entry>[ (+N more)]" from a newline-separated list, w
 }
 doctor() {
   local dhome="$home" me rm m t name total=0 nbad=0 bad="" anymiss=0 f cur manifest_ok=0
+  local cfg_claude="${DROVER_CLAUDE_SETTINGS:-${HOME:-}/.claude/settings.json}" cfg_codex="${DROVER_CODEX_HOOKS:-${HOME:-}/.codex/hooks.json}"
   while [ $# -gt 0 ]; do
     case "$1" in
       --home) [ $# -ge 2 ] || usage; dhome="$2"; shift 2 ;;
+      --claude-settings) [ $# -ge 2 ] || usage; cfg_claude="$2"; shift 2 ;;
+      --codex-hooks) [ $# -ge 2 ] || usage; cfg_codex="$2"; shift 2 ;;
       *) usage ;;
     esac
   done
@@ -360,8 +366,39 @@ doctor() {
   if [ -z "$cur" ] || [ ! -f "$cur" ]; then doctor_emit WARN cli-path "not on PATH (agents can still call it by full path)"
   elif [ "$(doctor_real "$cur")" = "$me" ]; then doctor_emit ok cli-path "on PATH"
   else doctor_emit WARN cli-path "PATH copy is another file"; fi
-  # 6. hooks: the slot for B4a (the hook check); nothing to look at before it exists.
-  doctor_emit skip hooks "not installed (B4a)"
+  # 6. hooks: the asks hook of each agent CLI (B4a). Read-only: a node helper reads the one config file and answers a fixed code; no path, value or content is ever printed.
+  # Absent file or no Drover hook = skip (the install is opt-in); a hook that is incomplete, unknown or points nowhere = WARN, never FAIL.
+  local node_bin="" kind file code
+  node_bin="$(command -v "${DROVER_NODE:-node}" 2>/dev/null)" || node_bin=""
+  for kind in claude codex; do
+    if [ "$kind" = claude ]; then file="$cfg_claude"; else file="$cfg_codex"; fi
+    if [ -z "$node_bin" ]; then doctor_emit skip "hooks-$kind" "cannot read JSON (no node)"; continue; fi
+    code="$("$node_bin" "$here/drover-asks-check.mjs" "$kind" "$file" 2>/dev/null </dev/null | head -n 1)" || code=""
+    case "$code" in
+      ok:[0-9]*) doctor_emit ok "hooks-$kind" "${code#ok:} events call an existing script" ;;
+      absent) doctor_emit skip "hooks-$kind" "no config file (not installed)" ;;
+      none) doctor_emit skip "hooks-$kind" "not installed (opt-in)" ;;
+      unreadable) doctor_emit WARN "hooks-$kind" "config unreadable" ;;
+      unknown) doctor_emit WARN "hooks-$kind" "an event is unknown to this Drover" ;;
+      missing) doctor_emit WARN "hooks-$kind" "an event of the set is missing" ;;
+      noscript) doctor_emit WARN "hooks-$kind" "hook script missing" ;;
+      noexec) doctor_emit WARN "hooks-$kind" "hook script not executable" ;;
+      action) doctor_emit WARN "hooks-$kind" "an event has the wrong action" ;;
+      command) doctor_emit WARN "hooks-$kind" "hook command not recognised" ;;
+      *) doctor_emit WARN "hooks-$kind" "check could not run" ;;
+    esac
+  done
+  # 7. hooks-locks: a <t>.lock folder of the asks hook older than 10 s (LOCK_STALE_MS) = a hook stopped mid-write; the next hook reclaims it by age. Fixed text only.
+  if [ -z "$node_bin" ]; then doctor_emit skip hooks-locks "cannot read the folder (no node)"
+  else
+    code="$("$node_bin" "$here/drover-asks-check.mjs" locks "$dhome/data/drover-asks" 2>/dev/null </dev/null | head -n 1)" || code=""
+    case "$code" in
+      nodir) doctor_emit skip hooks-locks "no asks folder yet" ;;
+      ok) doctor_emit ok hooks-locks "no stale lock" ;;
+      stale) doctor_emit WARN hooks-locks "a lock is older than 10 s (a hook stopped mid-write; the next hook clears it)" ;;
+      *) doctor_emit WARN hooks-locks "check could not run" ;;
+    esac
+  fi
   printf 'doctor: %d ok, %d warn, %d fail\n' "$doctor_ok" "$doctor_warn" "$doctor_fail"
   [ "$doctor_fail" -eq 0 ]
 }
@@ -379,6 +416,19 @@ case "${1:-}" in
     id="$2"; shift 2; kind=""
     if [ "${1:-}" = "--kind" ]; then [ $# -ge 3 ] || usage; kind="$2"; shift 2; fi
     send "{\"op\":\"note\",\"id\":\"$id\",\"text\":$(json "$*"),\"kind\":$(json "$kind"),\"by\":$(json "${HC_TERMINAL_ID:-}")}" 5 ;;
+  line)
+    [ $# -ge 3 ] && [[ "$2" =~ ^T-[A-Z0-9]+$ ]] || usage
+    id="$2"; shift 2; words=(); progress=""; have_progress=0 # supplied is not the same as non-empty: --progress "" must be refused, not dropped
+    while [ $# -gt 0 ]; do
+      if [ "$1" = "--progress" ]; then [ $# -ge 2 ] || usage; progress="$2"; have_progress=1; shift 2; else words+=("$1"); shift; fi
+    done
+    [ ${#words[@]} -gt 0 ] || usage
+    # The same checks as the consumer, BEFORE anything is written: a refused text (a secret, a home path) never lands in the inbox directory.
+    if [ "$have_progress" = 1 ]; then pargs=("$progress"); else pargs=(); fi  # the helper gets a progress argument only when the flag was supplied (even empty)
+    norm="$("${DROVER_NODE:-node}" "$here/drover-line.mjs" "${words[*]}" ${pargs[@]+"${pargs[@]}"})" || { echo "error: the line was not sent (checked before sending; node is needed for the check)" >&2; exit 2; }
+    text="${norm%%$'\n'*}"; progress=""; [[ "$norm" == *$'\n'* ]] && progress="${norm#*$'\n'}"  # the helper's normalised values go on the wire, never the raw argv
+    if [ -n "$progress" ]; then pj=",\"progress\":$progress"; else pj=""; fi
+    send "{\"op\":\"line\",\"id\":\"$id\",\"text\":$(json "$text")$pj,\"by\":$(json "${HC_TERMINAL_ID:-}"),\"ttlMs\":300000}" 5 ;;  # a line queued while no mod is open must not apply late as if fresh
   edit)
     [ $# -ge 4 ] && [[ "$2" =~ ^T-[A-Z0-9]+$ ]] || usage
     id="$2"; shift 2; fields=""

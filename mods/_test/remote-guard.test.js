@@ -15,7 +15,7 @@ const card = (id, project, extra = {}) => ({ id, title: `title ${id}`, desc: "",
 let home, inbox;
 const PKEY = "drover.projects", TKEY = "drover.tasks";
 const LOCAL = { id: "P-LOCAL", name: "mine", repos: [], folders: [], branch: "main" };
-const REMOTE = { id: "P-ONREM", name: "pairstone", repos: [], folders: [], branch: "main", remote: { machine: "omarchy", projectId: RID } };
+const REMOTE = { id: "P-ONREM", name: "pairstone", repos: [], folders: [], branch: "main", remote: { machine: "box1", projectId: RID } };
 function mkHost() {
   home = mkdtempSync(join(tmpdir(), "remote-home-"));
   inbox = join(home, "data/drover-inbox");
@@ -37,9 +37,9 @@ const send = async (cmd) => {
 test("2g ownership: inbox add --project, project reassignment and start reject the remote project; other projects still work", async () => {
   const host = mkHost();
   const before = JSON.stringify(host.state[TKEY]);
-  assert.match(await send({ op: "add", title: "x", project: "pairstone" }), /^error: .*omarchy/);
-  assert.match(await send({ op: "add", title: "x", project: "P-ONREM" }), /^error: .*omarchy/, "by id too");
-  assert.match(await send({ op: "project", id: "T-LOCAL1", project: "pairstone" }), /^error: .*omarchy/);
+  assert.match(await send({ op: "add", title: "x", project: "pairstone" }), /^error: .*box1/);
+  assert.match(await send({ op: "add", title: "x", project: "P-ONREM" }), /^error: .*box1/, "by id too");
+  assert.match(await send({ op: "project", id: "T-LOCAL1", project: "pairstone" }), /^error: .*box1/);
   assert.match(await send({ op: "start", task: "T-LOCAL1", project: "pairstone", runner: "claude" }), /^error: /);
   assert.equal(JSON.stringify(host.state[TKEY]), before, "nothing written");
   assert.match(await send({ op: "add", title: "fine", project: "mine" }), /^ok: T-/, "the local board still accepts other projects");
@@ -49,16 +49,16 @@ test("2g ownership: inbox add --project, project reassignment and start reject t
 test("2g ownership: a card already in the remote project cannot be claimed or launched; Tasks/Board save rejects it", async () => {
   const host = mkHost();
   host.state[TKEY] = [card("T-X", "P-ONREM", { id: "T-X" }), card("T-LOCAL1", "P-LOCAL")];
-  assert.match(await send({ op: "start", task: "T-X", runner: "claude" }), /^error: .*omarchy/);
+  assert.match(await send({ op: "start", task: "T-X", runner: "claude" }), /^error: .*box1/);
   assert.equal(host.state[TKEY][0].agent ?? null, null, "not claimed");
   const r = await IO.launch(host.state[TKEY][0], { kind: "agent", id: "claude" }, {});
-  assert.match(r.error, /omarchy/);
+  assert.match(r.error, /box1/);
   const { add, update } = await import("../_lib/store.js");
   host.notified.length = 0;
   assert.equal(IO.save(add(host.state[TKEY], { title: "new", project: "P-ONREM" })), null, "create");
   assert.equal(IO.save(update(host.state[TKEY], "T-LOCAL1", { project: "P-ONREM" })), null, "edit: move a card into it");
   assert.equal(host.notified.length, 2);
-  assert.match(host.notified[0].body, /omarchy/);
+  assert.match(host.notified[0].body, /box1/);
   assert.equal(host.state[TKEY].length, 2, "nothing saved");
   const ok = IO.save(add(host.state[TKEY], { title: "local", project: "P-LOCAL" }));
   assert.equal(ok.title, "local");
@@ -80,7 +80,7 @@ test("review M3: stored ownership counts too: task-less and bulk saves, moving a
   assert.equal(JSON.stringify(host.state[TKEY]), before);
   assert.ok(IO.save({ tasks: [kept, { ...host.state[TKEY][1], title: "fine" }], task: host.state[TKEY][1] }) !== null || host.state[TKEY][1].title === "fine", "a change to a local card only is saved");
   for (const cmd of [{ op: "project", id: "T-KEPT", project: "none" }, { op: "project", id: "T-KEPT", project: "mine" }, { op: "edit", id: "T-KEPT", title: "z" }, { op: "note", id: "T-KEPT", text: "n" }, { op: "move", id: "T-KEPT", column: "done" }, { op: "archive", id: "T-KEPT" }]) {
-    assert.match(await send(cmd), /^error: .*omarchy/, cmd.op);
+    assert.match(await send(cmd), /^error: .*box1/, cmd.op);
   }
   assert.equal(host.state[TKEY][0].project, "P-ONREM");
   assert.equal(host.state[TKEY][0].title, kept.title);

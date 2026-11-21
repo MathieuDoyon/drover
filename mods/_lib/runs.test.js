@@ -650,3 +650,23 @@ test("lineageOf / squadRows: session, cwd and resumeText; a legacy record has no
   assert.equal("cwd" in by.t4, false);
   assert.equal(by.t4.resumeText, null);
 });
+
+test("markEnded: drops the live line from a run it ends, and only that run", () => {
+  const line = { text: "reading", progress: 20, at: 1, by: "w" };
+  const runs = [
+    { id: "R1", task: "T-1", line, terminals: [{ address: "t1", started: 1 }] },
+    { id: "R2", task: "T-2", line, terminals: [{ address: "t2", started: 1 }] },
+  ];
+  const out = markEnded(runs, new Map(), new Set(["t2"]), 100);
+  assert.equal(out[0].ended, 100);
+  assert.equal("line" in out[0], false);
+  assert.equal(out[1].ended, undefined);
+  assert.deepEqual(out[1].line, line);
+});
+
+test("markEnded: a line on an already-ended run is dropped on the next pass", () => {
+  const runs = [{ id: "R1", ended: 50, line: { text: "x", at: 1 }, terminals: [{ address: "t1", started: 1, ended: 50 }] }];
+  const out = markEnded(runs, new Map(), new Set(), 100);
+  assert.equal("line" in out[0], false);
+  assert.equal(out[0].ended, 50, "the end time is not restamped");
+});

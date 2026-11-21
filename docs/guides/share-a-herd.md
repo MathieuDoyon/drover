@@ -27,23 +27,25 @@ Headless: `drover agents import herd.json` prints the plan and a token and write
 
 ## Headless machine over `hc`
 
-A machine with no screen (a Linux box running Drover as a service) has no Squads dialog. Use the CLI there, and carry the file with `hc`. Paths are relative to that machine's home, as `hc file` takes them.
+> **Legacy, local-app-only.** This recipe needs an existing Drover app or mod consumer on the remote machine. It is **not supported** on a machine set up as in [Remote machines](remote-machines.md) (no app, no mods): there `agents export` fails and `agents import` only queues. Moving a herd to such a machine is pending.
 
-> **Status:** a headless machine needs Drover mods with **protocol 4** for `agents import`, and `agents export` falls back to an open mod when it has no `node`. The permanent omarchy box is not on protocol 4 yet (follow-up card T-MWJUBIAKUB7), so this recipe is not verified there and has no live steps yet. To check a machine, run the dry run on it with a real file (`drover agents import herd-in.json`): an old Drover mod answers "too old … protocol 4 needed" and changes nothing. An old `drover` script without the verb only prints usage.
+A machine with no screen has no Squads dialog. Use the CLI there, and carry the file with `hc`. Set the machine up first: [Remote machines](remote-machines.md). Paths are relative to that machine's home, as `hc file` takes them. The examples use `<machine>`, a name from `hc machine ls`.
+
+Drover on that machine needs mods with **protocol 4** for `agents import`, and `agents export` falls back to an open mod when it has no `node`. To check a machine, run the dry run on it with a real file (`drover agents import herd-in.json`): an old Drover mod answers "too old … protocol 4 needed" and changes nothing. An old `drover` script without the verb only prints usage.
 
 Read the herd of the remote machine (read-only):
 
 ```sh
-hc exec --on omarchy sh -c 'bash -lc "drover agents export --out herd.json"'
-hc file read --on omarchy herd.json > herd-omarchy.json
+hc exec --on <machine> sh -c 'bash -lc "drover agents export --out herd.json"'
+hc file read --on <machine> herd.json > herd-remote.json
 ```
 
 Put a file on the remote machine and dry-run the import there:
 
 ```sh
-hc file write --on omarchy herd-in.json < herd.json
-hc exec --on omarchy sh -c 'bash -lc "drover agents import herd-in.json"'          # dry run: plan + token, writes nothing
-hc exec --on omarchy sh -c 'bash -lc "drover agents import herd-in.json --confirm <token>"'
+hc file write --on <machine> herd-in.json < herd.json
+hc exec --on <machine> sh -c 'bash -lc "drover agents import herd-in.json"'          # dry run: plan + token, writes nothing
+hc exec --on <machine> sh -c 'bash -lc "drover agents import herd-in.json --confirm <token>"'
 ```
 
 A remote write is yours to do explicitly; Drover never pushes a herd to another machine by itself.
