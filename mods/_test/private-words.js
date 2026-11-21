@@ -1,4 +1,4 @@
-// Private words for the "no machine or owner names" leak checks (machines-install.test.js, shipped-generic.test.js). Not a test file: both import it.
+// Private words for the "no machine or owner names" leak checks (machines-install-N.test.js, shipped-generic.test.js). Not a test file: both import it.
 import { spawnSync } from "node:child_process";
 import { userInfo, hostname } from "node:os";
 

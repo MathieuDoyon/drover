@@ -382,7 +382,9 @@ test("an uncertain lock (cannot create or read it): fail closed, zero writes", a
   const denied = { ...nfs, mkdir: async () => { throw Object.assign(new Error("denied"), { code: "EACCES" }); }, exists: async () => false };
   const w = world({ lock: createLock(denied, "/nowhere") });
   const r = await runAccept(refOf(w), w.deps);
-  assert.equal(r.outcome, "held");
+  assert.equal(r.outcome, "uncertain", "an unprovable lock is not claimed to be held by someone");
+  assert.match(r.text, /Could not take the Accept lock/);
+  assert.doesNotMatch(r.text, /Another Accept/);
   assert.deepEqual(w.log, []);
 });
 

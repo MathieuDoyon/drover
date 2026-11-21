@@ -3,6 +3,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { createLock } from "../_lib/accept.js";
 import { A, B, URL5, P, IO, Todos, host, open, render, rev, good, card, router, ok, prJson, until, has, delta, none, reviewNote, approvedNote, OLD, expiringCx } from "./accept-host.js";
 
 const KEY = "P-1__T-3";
@@ -101,6 +102,38 @@ test("a lock this process did not create: Accept off, 'Another Accept may be run
   assert.ok(!r.ids.some((i) => /release/i.test(i)), "no in-app Release control");
   assert.deepEqual(m.calls.writes, []);
   assert.ok(m.calls.log.every(([c]) => c !== "rm"), "the app never runs the command");
+});
+
+test("a lock state that cannot be read is not HELD: 'Cannot read the lock state', no clear command, Accept stays off", async () => {
+  const m = await open([good()], { trap: true });
+  const real = IO.acceptDeps();
+  IO.useAcceptDeps({ ...real, lock: { ...real.lock, state: async () => "unknown" } });
+  try {
+    m.v.proof.refresh(m.cx);
+    await until(() => m.v.proof.state === "ready" && m.v.proof.lock === "unknown", "unknown seen");
+    const r = render(m.v, m.cx);
+    assert.ok(has(r, "Cannot read the lock state"));
+    assert.ok(!has(r, "Another Accept"), "not claimed to be held");
+    assert.ok(!r.texts.some((t) => String(t).includes("rm -r")), "no clear command for a lock that may not exist");
+    assert.equal(m.v.proof.ready, false);
+    assert.ok(r.ids.includes("proof-accept-off") && !r.ids.includes("proof-accept"));
+  } finally { IO.useAcceptDeps(null); }
+});
+
+test("a click whose lock cannot be taken (code-less fs errors) never shows 'Another Accept' in the result line or after the refresh", async () => {
+  const m = await open([good()], { trap: true });
+  const real = IO.acceptDeps();
+  const broken = { readdir: async () => { throw new Error("permission denied"); }, mkdir: async () => { throw new Error("permission denied"); }, exists: async () => { throw new Error("permission denied"); }, readFile: async () => { throw new Error("permission denied"); }, writeFile: async () => { throw new Error("permission denied"); }, unlink: async () => {}, rmdir: async () => {} };
+  IO.useAcceptDeps({ ...real, lock: createLock(broken, "/nowhere") });
+  try {
+    await m.v.proof.accept(m.cx);
+    await until(() => m.v.proof.state === "ready" && m.v.proof.lock === "unknown", "unknown after the failed click");
+    const r = render(m.v, m.cx);
+    assert.ok(has(r, "Could not take the Accept lock"));
+    assert.ok(has(r, "Cannot read the lock state"));
+    assert.ok(!has(r, "Another Accept"), "neither the lock section nor the result line claims it is held");
+    assert.ok(r.ids.includes("proof-accept-off") && !r.ids.includes("proof-accept"));
+  } finally { IO.useAcceptDeps(null); }
 });
 
 test("restart after the merge: an earlier Accept stopped before the sync, the PR is MERGED at A: the dialog offers Finish (sync and Done), not Accept", async () => {

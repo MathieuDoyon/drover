@@ -11,6 +11,7 @@ import { reviewOf } from "./evidence.js";
 
 export const STEPS = ["lock", "bind", "re-read", "merge", "read-back", "source sync", "done"];
 export const HELD = "Another Accept may be running, or one stopped without finishing";
+export const NO_LOCK = "Could not take the Accept lock: cannot read or write the lock folder";
 const WORDS = ["conflict", "not-mergeable", "checks-required", "review-required", "queue-rejected", "head-moved", "auth", "offline", "unexpected", "head-mismatch", "closed", "blocked", "refreshed", "move"];
 const REST_CAP = 250; // the REST commit list of a PR holds at most 250
 const short = (sha) => (sha ? String(sha).slice(0, 7) : "?");
@@ -162,7 +163,12 @@ const firstLine = (s) => String(s ?? "").split("\n")[0];
 export function createLock(fsx, dir, { now = () => Date.now() } = {}) {
   const tokenFile = (key) => `${lockPath(dir, key)}/token`;
   const state = async (key) => {
-    try { await fsx.readdir(lockPath(dir, key)); return "present"; } catch (e) { return e?.code === "ENOENT" ? "none" : "unknown"; }
+    const path = lockPath(dir, key);
+    try { await fsx.readdir(path); return "present"; } catch (e) {
+      if (e?.code === "ENOENT") return "none";
+      // The Herdr host's fs errors carry no Node .code: only the host's own exists() answering false proves absence. Anything else stays unknown.
+      try { return (await fsx.exists?.(path)) === false ? "none" : "unknown"; } catch { return "unknown"; }
+    }
   };
   const read = async (key) => { try { return firstLine(await fsx.readFile(tokenFile(key), "utf8")); } catch { return null; } };
   // Removes the files a caller proved are its own: the token file, then the (now empty) directory. Never recursive.
@@ -214,7 +220,7 @@ async function chain(ref, deps, key) {
 
   const token = deps.token();
   const got = await deps.lock.acquire(key, token);
-  if (got !== "won") return out({ outcome: "held", text: HELD });
+  if (got !== "won") return got === "held" ? out({ outcome: "held", text: HELD }) : out({ outcome: "uncertain", text: NO_LOCK });
   // From here on, every handled end goes through finish(): it releases only the lock this run made. An exception leaves the lock for the owner.
   const finish = async (o) => { await deps.lock.release(key, token); return out(o); };
 

@@ -289,6 +289,38 @@ test("lock: a lock that exists is never replaced, however old; the state says pr
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+// The Herdr mod host's fs errors carry no Node .code: absence is proven by the host's exists(), never by e.code.
+const noCode = (msg = "no such file") => new Error(msg);
+const hostFs = ({ exists, held = new Set() } = {}) => {
+  const files = new Map();
+  const base = {
+    readdir: async (p) => { if (held.has(p)) return []; throw noCode(); },
+    mkdir: async (p, o) => { if (held.has(p)) throw noCode("exists"); if (!o?.recursive) held.add(p); },
+    writeFile: async (p, d) => { files.set(p, d); },
+    readFile: async (p) => { if (!files.has(p)) throw noCode(); return files.get(p); },
+    unlink: async (p) => { files.delete(p); },
+    rmdir: async (p) => { held.delete(p); },
+  };
+  return exists === undefined ? base : { ...base, exists };
+};
+
+test("lock: on a host whose errors have no .code, a missing lock is none when exists() says false", async () => {
+  assert.equal(await createLock(hostFs({ exists: async () => false }), "/d").state("k"), "none");
+});
+
+test("lock: acquire wins on a host fs whose errors have no .code", async () => {
+  const held = new Set();
+  const l = createLock(hostFs({ exists: async (p) => held.has(p), held }), "/d");
+  assert.equal(await l.acquire("k", "tok"), "won");
+  assert.equal(await l.read("k"), "tok");
+});
+
+test("lock: unproven absence is unknown, never none and never a rejection", async () => {
+  assert.equal(await createLock(hostFs({ exists: async () => true }), "/d").state("k"), "unknown", "exists but unreadable");
+  assert.equal(await createLock(hostFs(), "/d").state("k"), "unknown", "no exists()");
+  assert.equal(await createLock(hostFs({ exists: async () => { throw noCode("boom"); } }), "/d").state("k"), "unknown", "exists() rejects");
+});
+
 test("lock: if the lock cannot be created or read it fails closed (uncertain), not won", async () => {
   const denied = { ...nfs, mkdir: async () => { throw Object.assign(new Error("denied"), { code: "EACCES" }); }, exists: async () => false };
   assert.equal(await createLock(denied, "/nowhere/x").acquire("k", "t"), "uncertain");

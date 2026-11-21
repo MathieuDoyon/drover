@@ -81,7 +81,7 @@ The statuses on a PR have no commit id of their own: they are valid for A becaus
 
 The **Accept** button of the proof dialog runs the whole chain on your click, and only on your click. The click is permission for this repo, this PR number and this head commit (A), once. Nothing runs when the dialog opens, on Refresh or while it draws.
 
-1. **Lock.** One atomic `mkdir` of `<Herdr home>/data/drover-accept/<project>__<card>.lock` (a token file inside). Exactly one window wins; the other sees "Another Accept may be running, or one stopped without finishing" and writes nothing. A double click is one run.
+1. **Lock.** One atomic `mkdir` of `<Herdr home>/data/drover-accept/<project>__<card>.lock` (a token file inside). Exactly one window wins; the other sees "Another Accept may be running, or one stopped without finishing" and writes nothing. A lock folder that cannot be read or written is not called held: Accept says "Could not take the Accept lock: cannot read or write the lock folder" and the dialog says "Cannot read the lock state"; either way nothing is written and Accept stays off. A double click is one run.
 2. **Bind.** The repo, PR number and URL, base branch and base commit, and head A you looked at are frozen on the card as a log note (`accept: bound …`).
 3. **Re-read.** Everything is read again. A different head, or any difference in the PR (another PR, a new base, a no-PR branch that gained a PR) means: evidence refreshed, **nothing merged**, you read it and click again.
 4. **Merge.** `gh pr merge <PR URL> --squash --match-head-commit A`, as the Herdr `gh` login. Never `--admin`, `--auto` or `--delete-branch`, no push. GitHub refuses it if the head moved.

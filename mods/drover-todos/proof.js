@@ -184,7 +184,11 @@ export class Proof {
       body.push(d.proof ? link("proof-open-artifact", d.proof) : line("none", t.dim));
 
       body.push(head("Accept"));
-      if (this.lock !== "none") {
+      if (this.lock === "unknown") {
+        // The lock state could not be read: not proof that a lock exists, so no HELD claim and no clear command. Accept stays off (ready needs lock "none").
+        body.push(line("Cannot read the lock state: Accept stays disabled. Reopen Proof to check again", t.blocked));
+        body.push(line(`Lock: ${this.lockPath}`, t.muted));
+      } else if (this.lock !== "none") {
         // A lock this process did not make: never removed by the app, whatever its age. The PR is read-only evidence; clearing it is the owner's call.
         body.push(line(HELD, t.blocked));
         body.push(line(e.pr.state === "found" ? `PR #${e.pr.number} ${e.pr.prState} at ${short(e.head)}` : e.pr.state === "none" ? "No PR" : `PR unknown (${WHY[e.pr.reason] ?? e.pr.reason})`, t.muted));
@@ -205,7 +209,7 @@ export class Proof {
         else if (this.run.result) body.push(line(this.run.result.text ?? this.run.result.outcome, this.run.result.outcome === "done" ? t.accent : t.blocked));
       }
     }
-    const reason = this.run?.running ? "Running…" : this.lock !== "none" ? HELD : g?.reasons[0]?.text ?? (this.state === "reading" ? "Reading the proof…" : this.state === "missing" ? "Card not found here" : this.state === "error" ? "Could not read the proof" : "");
+    const reason = this.run?.running ? "Running…" : this.lock === "unknown" ? "Cannot read the lock state" : this.lock !== "none" ? HELD : g?.reasons[0]?.text ?? (this.state === "reading" ? "Reading the proof…" : this.state === "missing" ? "Card not found here" : this.state === "error" ? "Could not read the proof" : "");
     const label = g?.label ?? "Accept";
     return v_flex().id("root").size_full().bg(t.surface).text_color(t.foreground).text_size(13)
       .child(div().px(20).pt(16).pb(4).text_size(15).font_medium().child(`Proof${this.task ? `: ${this.task.id} ${this.task.title}` : ""}`))
