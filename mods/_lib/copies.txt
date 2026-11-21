@@ -32,3 +32,4 @@ runline.js
 runscache.js
 evidence.js
 jump.js
+accept.js

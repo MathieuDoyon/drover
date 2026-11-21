@@ -104,6 +104,8 @@ export default class Tasks extends View {
   // A live agent takes the click (focus it); such a row also gets a pencil that opens the editor.
   hasLiveAgent(task) { return Boolean(task.agent) && this.cache.get().agentAddrs.has(task.agent); }
   // ✓ on a card of another machine: moves it to Done through the remote's inbox when writes are on, else off with the reason.
+  // The check mark on a local Review row opens the proof / Accept dialog: it never moves the card (Done is the end of the Accept chain, or your own move elsewhere).
+  acceptRow(task) { openProof(task); }
   remoteDone(task, off, icon) {
     const w = this.cache.get().controls[task.project] ?? { on: false, tip: "Checking, try again in a moment" };
     if (!w.on) return off(`ro-done-${cardKey(task)}`, "✓", w.tip);
@@ -150,7 +152,7 @@ export default class Tasks extends View {
       .when(this.hasLiveAgent(task), (el) => el.child(icon(`edit-${cardKey(task)}`, "✎", "Edit task", () => this.editTask(task.id))))
       .when(at.group === "todo", (el) => el.child(task.remote ? off(`ro-start-${cardKey(task)}`, "▶", offTip(task.remote?.machine)) : icon(`start-${cardKey(task)}`, "▶", "Start", () => pick(task.id))))
       .when(at.group === "review", (el) => el.child(task.remote ? off(`ro-proof-${cardKey(task)}`, "▤", "Proof reads this machine only") : icon(`proof-${cardKey(task)}`, "▤", "Proof", () => openProof(task))))
-      .when(at.group === "review", (el) => el.child(task.remote ? this.remoteDone(task, off, icon) : icon(`done-${cardKey(task)}`, "✓", "Done", (cx) => { save(update(load(), task.id, { column: "done" })); this.refreshNow(cx); })));
+      .when(at.group === "review", (el) => el.child(task.remote ? this.remoteDone(task, off, icon) : icon(`done-${cardKey(task)}`, "✓", "Accept: opens the proof and the Accept steps", () => this.acceptRow(task))));
 
     const group = ([id, name]) => {
       const items = rows.filter((r) => r.at.group === id);

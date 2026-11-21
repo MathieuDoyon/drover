@@ -1,5 +1,5 @@
 // B3a: the Accept proof dialog (hosted by drover-todos like the card editor) and the Proof icon on the Tasks panel's Review rows.
-// The dialog loads when it opens (init), never in render; render reads the loaded evidence only. Accept is disabled in every state.
+// The dialog loads when it opens (init), never in render; render reads the loaded evidence only. (B3b: Accept is live only when the gate passes; see accept-render.test.js.)
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -145,7 +145,7 @@ test("review file and proof artifact are links that open the path (spaces allowe
   assert.equal(calls.opened.length, 1, "only an absolute path opens");
 });
 
-test("Accept is disabled in every state, with the reason; Refresh and Close are live", async () => {
+test("Accept is disabled in every state that is not ready to accept, with a reason; Refresh and Close are live", async () => {
   const states = [];
   const a = await open([rev()], { noWait: true }); states.push(["reading", a]);
   await until(() => a.v.proof.state === "ready", "ready"); states.push(["ready", a]);
@@ -157,7 +157,8 @@ test("Accept is disabled in every state, with the reason; Refresh and Close are 
     const r = render(v, cx);
     assert.ok(r.ids.includes("proof-accept-off"), `${name}: Accept is the disabled control`);
     assert.ok(!r.ids.includes("proof-accept"), `${name}: no live Accept`);
-    assert.ok(has(r, "Accept ships in B3b"), `${name}: reason`);
+    assert.ok(!has(r, "ships in B3b"), `${name}: the B3a stub text is gone`);
+    assert.ok(r.texts.some((x) => /Reading|Card not found|unknown|NOT green|plan|review|Review|Stale/.test(x)), `${name}: a reason is shown`);
     assert.ok(r.ids.includes("proof-close"), name);
   }
   assert.ok(render(b.v, b.cx).ids.includes("proof-refresh"));
@@ -265,7 +266,7 @@ test("Tasks panel: a changed card shows after the cache refresh outside render (
 
 // ---- review round 1, finding 1: Refresh re-reads the card ----
 test("Refresh re-resolves the card from the local store: a changed verdict, source, summary and notes show; the old snapshot is never reused", async () => {
-  const { v, cx, raw, calls } = await open([rev({ title: "old summary", notes: [reviewNote(A)] })]);
+  const { v, cx, raw, calls } = await open([rev({ title: "old summary", notes: [reviewNote(A)] })], { gh: (g) => (g[0] === "pr" && g[1] === "view" ? ok(prJson({ url: g[2] })) : router()(g)) }); // gh answers about the PR it was asked about
   assert.ok(has(render(v, cx), "Pass on aaaaaaa") && has(render(v, cx), "old summary"));
   raw["drover.tasks"] = [rev({ title: "new summary", source: { kind: "github", id: "o/r#9", url: "https://github.com/o/r/pull/9" }, notes: [reviewNote(A, "adverse")] })];
   calls.log = [];

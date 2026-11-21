@@ -17,6 +17,8 @@ import { bind as bindCfg, load as loadCfg, ready as cfgReady, cfg, KEY as CONFIG
 import { soulHash } from "./herd-export.js";
 import { lessonPaths, boundText } from "./lessons.js";
 import { exportName } from "./herd-share.js";
+import { createLock, lockKey } from "./accept.js";
+import { linkedRun } from "./taskrun.js";
 import { classifyChecks, reviewOf, proofPathOf, buildEvidence, ghCall, ghProblem, repoOfUrl, ENV_BIN } from "./evidence.js";
 import { AGENTS_KEY, RUNS_KEY, config, plan, argv, leaderPrompt, createCardsPrompt, memberPrompt, worktreeOf, terminalName, startGuard, projectOfDrover, isLiveDrover, slotSnapshot, slotsOf, reconcile, runFolder, markEnded, orphanedWorkers, terminalRecord, agentKind, newUuid, withSessionFlag, withMarker, pickCodexSession, liveStatuses, memberStatus, resumeCandidates, resumeToken, resumeGuard, resumePrompt, resumedTerminal, resumedRun, linkResumed, sessionMarker, claimTtl, launchArgv, parseAgentEnv, envProblem, BIND_KEY, droverChoices, defaultDrover, maxRuns, keptRuns, pruneRuns } from "./runs.js";
 
@@ -1968,6 +1970,111 @@ export async function loadEvidence(task, run, current = () => true) {
   }
   return done({ repo, pr: { state: "found", number: p.number, url: p.url, prState: p.state }, base: p.baseRefName ?? null, baseSha, head, headSource: "pr", checks: classifyChecks(p.statusCheckRollup) }, { ...extra, changes });
 }
+
+// ---- B3b: the Accept chain's real deps ----
+// The only place that can merge, close an issue, move a card or write the accept record. accept.js never imports this file: it is handed `deps`.
+// gh runs through ghCall (the app's own login), as argv, never a shell. Every ref is validated before gh: a bad repo, number, head or URL never reaches exec.
+// Never --admin, --auto, --delete-branch, never a push. A gh failure becomes one bounded word; the raw text is never kept.
+export const ACCEPT_KEY = "drover.accept";
+export const acceptDir = () => `${appHome()}/data/drover-accept`;
+let acceptOverride = null;
+export const useAcceptDeps = (d) => { acceptOverride = d; }; // tests inject a fake; the app never calls it
+const goodRef = (r) => Boolean(r) && /^[\w.-]+\/[\w.-]+$/.test(r.repo ?? "") && Number.isInteger(r.number) && r.number > 0 && SHA40.test(r.head ?? "") && r.url === `https://github.com/${r.repo}/pull/${r.number}`;
+const goodIssue = (r) => Boolean(r) && /^[\w.-]+\/[\w.-]+$/.test(r.repo ?? "") && Number.isInteger(r.number) && r.number > 0;
+const goodLabels = (ls) => Array.isArray(ls) && ls.every((l) => typeof l === "string" && l.length > 0 && l.length <= 100 && !/[\r\n]/.test(l));
+const mergeWord = (stderr) => {
+  const s = String(stderr ?? "");
+  if (/not mergeable|conflict/i.test(s)) return "conflict";
+  if (/head branch was modified|expected head|head sha|match-head/i.test(s)) return "head-moved";
+  if (/required status check/i.test(s)) return "checks-required";
+  if (/approving review|review is required|reviews? required/i.test(s)) return "review-required";
+  if (/merge queue/i.test(s)) return "queue-rejected";
+  const w = ghProblem(s);
+  return w === "auth" || w === "offline" ? w : "unexpected";
+};
+const readWord = (stderr) => { const w = ghProblem(stderr); return w === "auth" || w === "offline" ? w : "unexpected"; };
+const lines1 = (s) => String(s).replace(/[\r\n]+/g, " ").trim();
+
+export const acceptRecords = () => ({
+  get: (key) => (shared(ACCEPT_KEY) ?? {})[key] ?? null,
+  set: (key, rec) => { const all = { ...(shared(ACCEPT_KEY) ?? {}) }; if (rec == null) delete all[key]; else all[key] = rec; setShared(ACCEPT_KEY, all); },
+});
+
+export function acceptDeps() {
+  if (acceptOverride) return acceptOverride;
+  const stored = (id, project) => load().find((x) => x.id === id && (x.project ?? null) === (project ?? null)) ?? null;
+  return {
+    now: () => Date.now(),
+    sleep: (ms) => sleep(ms),
+    token: () => newUuid().replace(/-/g, ""),
+    task: stored,
+    cards: () => load(),
+    readEvidence: (task) => loadEvidence(task, linkedRun(task, loadRuns())),
+    readPr: async (ref) => {
+      if (!goodRef(ref)) return { ok: false, word: "unexpected" };
+      const v = await ghRun(["pr", "view", ref.url, "--json=state,isDraft,mergeable,title,body,headRefOid"]);
+      if (v.code !== 0) return { ok: false, word: readWord(v.stderr) };
+      const pr = jsonOf(v);
+      if (!pr || typeof pr !== "object") return { ok: false, word: "unexpected" };
+      const list = await ghRun(["api", `repos/${ref.repo}/pulls/${ref.number}/commits`, "--paginate", "--jq=.[] | .commit.message | @json"]);
+      if (list.code !== 0) return { ok: false, word: readWord(list.stderr) };
+      let commits;
+      try { commits = String(list.stdout).split("\n").filter(Boolean).map((l) => JSON.parse(l)); } catch { return { ok: false, word: "unexpected" }; }
+      if (!commits.every((c) => typeof c === "string")) return { ok: false, word: "unexpected" };
+      const cnt = await ghRun(["api", `repos/${ref.repo}/pulls/${ref.number}`, "--jq=.commits"]);
+      if (cnt.code !== 0) return { ok: false, word: readWord(cnt.stderr) };
+      const commitCount = Number(String(cnt.stdout).trim());
+      return { ok: true, state: pr.state, isDraft: pr.isDraft === true, mergeable: pr.mergeable ?? null, title: String(pr.title ?? ""), body: String(pr.body ?? ""), headRefOid: pr.headRefOid ?? null, commits, commitCount };
+    },
+    // The one merge: the bound PR URL, squash, pinned to the bound head. Nothing else is ever added to this argv.
+    merge: async (ref) => {
+      if (!goodRef(ref)) return { ok: false, word: "unexpected" };
+      const r = await ghRun(["pr", "merge", ref.url, "--squash", "--match-head-commit", ref.head]);
+      return r.code === 0 ? { ok: true } : { ok: false, word: mergeWord(r.stderr) };
+    },
+    readBack: async (ref) => {
+      if (!goodRef(ref)) return { ok: false, word: "unexpected" };
+      const r = await ghRun(["pr", "view", ref.url, "--json=state,headRefOid"]);
+      if (r.code !== 0) return { ok: false, word: readWord(r.stderr) };
+      const p = jsonOf(r);
+      return p && typeof p.state === "string" && SHA40.test(p.headRefOid ?? "") ? { ok: true, state: p.state, head: p.headRefOid } : { ok: false, word: "unexpected" };
+    },
+    readIssue: async (ref) => {
+      if (!goodIssue(ref)) return { ok: false, word: "unexpected" };
+      const r = await ghRun(["issue", "view", String(ref.number), "-R", ref.repo, "--json=state,labels"]);
+      if (r.code !== 0) return { ok: false, word: readWord(r.stderr) };
+      const i = jsonOf(r);
+      return i && typeof i.state === "string" && Array.isArray(i.labels) ? { ok: true, state: i.state, labels: i.labels.map((l) => String(l?.name ?? "")).filter(Boolean) } : { ok: false, word: "unexpected" };
+    },
+    // An issue the PR already closed: only the status: labels go (one issue edit), never a second close or a comment.
+    removeLabels: async (a) => {
+      if (!goodIssue(a) || !goodLabels(a.labels) || !a.labels.length) return { ok: false, word: "unexpected" };
+      const e = await ghRun(["issue", "edit", String(a.number), "-R", a.repo, ...a.labels.flatMap((l) => ["--remove-label", l])]);
+      return e.code === 0 ? { ok: true } : { ok: false, word: readWord(e.stderr) };
+    },
+    // _herd.md section 7: close the linked issue with a one-line comment. ONE gh op: the status: labels are a separate dep (removeLabels), so the chain
+    // can judge eligibility again between the two writes.
+    closeIssue: async (a) => {
+      if (!goodIssue(a)) return { ok: false, word: "unexpected" };
+      const c = await ghRun(["issue", "close", String(a.number), "-R", a.repo, "-c", lines1(a.comment).slice(0, 200)]);
+      return c.code === 0 ? { ok: true } : { ok: false, word: readWord(c.stderr) };
+    },
+    // The owner's click is the owner's move. The card must still be in Review; the result of the store is what is saved.
+    moveDone: async (id, project) => {
+      const cur = stored(id, project);
+      if (!cur || cur.column !== "review") return false;
+      return Boolean(save(update(load(), id, { column: "done" })));
+    },
+    note: async (id, project, text, kind) => {
+      if (!stored(id, project)) return;
+      save(applyCommand(load(), { op: "note", id, text, kind: kind === "decision" ? "decision" : "log", by: "accept" }));
+    },
+    records: acceptRecords(),
+    lock: createLock(fs, acceptDir()),
+    onStep: () => {},
+  };
+}
+export { lockKey };
 
 // Keeps the last good part when a refresh fails it, with the error beside it.
 export function mergeContext(prev, next) {

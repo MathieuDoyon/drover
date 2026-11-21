@@ -23,8 +23,8 @@ const tmp = (p) => { const d = realpathSync(mkdtempSync(join(tmpdir(), p))); mad
 const SK = "sk" + "-live-0123456789";
 const GH = (tag) => "gh" + "p_" + tag + "X".repeat(36); // a 36+ char token after the prefix, like a real one
 const FAKE_SEC = "FAKE_SEC" + "RET";
-const DOCTOR_TOOLS = ["bash", "sh", "env", "cat", "cmp", "readlink", "dirname", "basename", "wc", "tr", "sed", "head", "tail", "grep", "ls", "cut", "expr", "test", "["];
-const INSTALL_TOOLS = [...DOCTOR_TOOLS, "git", "cp", "mv", "rm", "ln", "install", "mkdir", "awk", "sort", "date", "touch", "chmod", "uname"];
+const DOCTOR_TOOLS = ["bash", "sh", "env", "cat", "cmp", "readlink", "dirname", "basename", "wc", "tr", "sed", "head", "tail", "grep", "ls", "cut", "expr", "test", "[", "date"];
+const INSTALL_TOOLS = [...DOCTOR_TOOLS, "git", "cp", "mv", "rm", "ln", "install", "mkdir", "awk", "sort", "touch", "chmod", "uname"];
 const HASHERS = ["sha256sum", "shasum", "cksum"].filter(which);
 // A private bin dir with symlinks to only the named tools (hashers listed on purpose), plus optional extra entries { name: target }.
 function binDir(tools, hashers, extra = {}) {
@@ -65,17 +65,17 @@ const line = (r, check) => lines(r).find((l) => new RegExp(`^(ok|FAIL|WARN|skip)
 const status = (r, check) => line(r, check).split("  ")[0];
 const LINE = /^(ok|FAIL|WARN|skip)  [a-z-]+  .{0,100}$/;
 
-test("an installed fixture: 8 check lines in the shared grammar, a summary, exit 0, both hooks lines skipped (nothing installed)", () => {
+test("an installed fixture: 9 check lines in the shared grammar, a summary, exit 0, accept-locks ok, the hooks lines skipped (nothing installed)", () => {
   const f = fx();
   const r = doctor(f);
   assert.equal(r.status, 0, r.stdout + r.stderr);
   const ls = lines(r);
-  assert.equal(ls.length, 9, r.stdout);
-  for (const l of ls.slice(0, 8)) assert.match(l, LINE);
-  assert.deepEqual(ls.slice(0, 8).map((l) => l.split("  ")[1]), ["mods-linked", "lib-copies", "souls", "lib-stamp", "cli-path", "hooks-claude", "hooks-codex", "hooks-locks"]);
-  assert.match(ls[8], /^doctor: 5 ok, 0 warn, 0 fail$/);
+  assert.equal(ls.length, 10, r.stdout);
+  for (const l of ls.slice(0, 9)) assert.match(l, LINE);
+  assert.deepEqual(ls.slice(0, 9).map((l) => l.split("  ")[1]), ["mods-linked", "lib-copies", "souls", "lib-stamp", "cli-path", "accept-locks", "hooks-claude", "hooks-codex", "hooks-locks"]);
+  assert.match(ls[9], /^doctor: 6 ok, 0 warn, 0 fail$/);
   for (const c of ["hooks-claude", "hooks-codex", "hooks-locks"]) assert.equal(status(r, c), "skip", line(r, c));
-  for (const c of ["mods-linked", "lib-copies", "souls", "lib-stamp", "cli-path"]) assert.equal(status(r, c), "ok", line(r, c));
+  for (const c of ["mods-linked", "lib-copies", "souls", "lib-stamp", "cli-path", "accept-locks"]) assert.equal(status(r, c), "ok", line(r, c));
 });
 
 test("the usage names doctor, and an unknown doctor argument exits 2", () => {
@@ -195,7 +195,7 @@ test("a stale stamp alone never fails the run (copies kept equal)", () => {
   const r = doctor(f);
   assert.equal(status(r, "lib-stamp"), "WARN");
   assert.equal(r.status, 0, r.stdout);
-  assert.match(lines(r).at(-1), /^doctor: 4 ok, 1 warn, 0 fail$/);
+  assert.match(lines(r).at(-1), /^doctor: 5 ok, 1 warn, 0 fail$/);
 });
 
 test("links but no stamp (installed before the stamp existed): WARN lib-stamp", () => {
@@ -309,7 +309,7 @@ test("every output line of every failing fixture above matches the grammar (a br
 });
 
 // Inspector review findings 1-3
-test("an unreadable _lib/copies.txt: FAIL with a fixed detail, exit 1, empty stderr, all six lines and the summary", { skip: process.getuid?.() === 0 && "root reads a chmod 000 file" }, () => {
+test("an unreadable _lib/copies.txt: FAIL with a fixed detail, exit 1, empty stderr, every line and the summary", { skip: process.getuid?.() === 0 && "root reads a chmod 000 file" }, () => {
   const f = fx();
   chmodSync(join(f.repo, "mods", "_lib", "copies.txt"), 0);
   const r = doctor(f);
@@ -317,17 +317,17 @@ test("an unreadable _lib/copies.txt: FAIL with a fixed detail, exit 1, empty std
   assert.equal(r.status, 1, r.stdout);
   assert.equal(r.stderr, "", "a shell diagnostic leaked a path");
   assert.match(line(r, "lib-copies"), /^FAIL  lib-copies  _lib\/copies\.txt is missing or unreadable$/);
-  assert.equal(lines(r).length, 9, r.stdout);
+  assert.equal(lines(r).length, 10, r.stdout);
   assert.notEqual(status(r, "lib-stamp"), "ok"); // a manifest that cannot be read proves nothing
 });
 
-test("a shared file listed in copies.txt but missing in _lib: all six lines and the summary, lib-stamp skip, no early exit", () => {
+test("a shared file listed in copies.txt but missing in _lib: every line and the summary, lib-stamp skip, no early exit", () => {
   const f = fx();
   unlinkSync(join(f.repo, "mods", "_lib", "store.js"));
   const r = doctor(f);
   assert.equal(r.status, 1);
   assert.equal(r.stderr, "");
-  assert.equal(lines(r).length, 9, r.stdout);
+  assert.equal(lines(r).length, 10, r.stdout);
   assert.equal(status(r, "lib-stamp"), "skip", line(r, "lib-stamp"));
   for (const c of ["cli-path", "hooks-claude", "hooks-codex", "hooks-locks"]) assert.notEqual(line(r, c).startsWith("(no "), true, c);
   assert.match(lines(r).at(-1), /^doctor: \d+ ok, \d+ warn, \d+ fail$/);
@@ -494,4 +494,43 @@ test("hooks-locks: a symlinked or plain-file lock name is ignored; no node = ski
   lockDir(f, "t5.lock", 60_000);
   assert.match(line(doctor(f, { env: { HOME: f.root } }), "hooks-locks"), /^skip  hooks-locks  cannot read the folder \(no node\)$/);
   assert.deepEqual(readdirSync(d).sort(), ["t3.lock", "t4.lock", "t5.lock"]);
+});
+
+// ---- accept locks (B3b): a read-only WARN for a lock older than 15 minutes; never a removal ----
+const acceptLockDir = (f, name) => join(f.home, "data", "drover-accept", `${name}.lock`);
+const mkLock = (f, name, content) => { mkdirSync(acceptLockDir(f, name), { recursive: true }); writeFileSync(join(acceptLockDir(f, name), "token"), content); };
+const nowSec = () => Math.floor(Date.now() / 1000);
+
+test("an accept lock older than 15 minutes: WARN with a count and where to read more; exit 0; the lock and its token are untouched", () => {
+  const f = fx();
+  mkLock(f, "P-1__T-1", `secret-looking-token\n${nowSec() - 16 * 60}`);
+  const before = readFileSync(join(acceptLockDir(f, "P-1__T-1"), "token"), "utf8");
+  const r = doctor(f);
+  assert.equal(r.status, 0, "a WARN is not a failure");
+  assert.equal(status(r, "accept-locks"), "WARN", line(r, "accept-locks"));
+  assert.match(line(r, "accept-locks"), /1 accept lock.*older than 15 min/);
+  assert.match(lines(r).at(-1), /^doctor: 5 ok, 1 warn, 0 fail$/);
+  assert.ok(existsSync(acceptLockDir(f, "P-1__T-1")), "doctor removes nothing");
+  assert.equal(readFileSync(join(acceptLockDir(f, "P-1__T-1"), "token"), "utf8"), before);
+  assert.doesNotMatch(r.stdout + r.stderr, /secret-looking|P-1__T-1|drover-accept/, "no token, key or path is printed");
+});
+
+test("a fresh accept lock does not warn; two old ones are counted; an unreadable age counts as old", () => {
+  const f = fx();
+  mkLock(f, "P-1__T-1", `tk\n${nowSec() - 60}`);
+  assert.equal(status(doctor(f), "accept-locks"), "ok");
+  mkLock(f, "P-1__T-2", `tk\n${nowSec() - 3600}`);
+  mkLock(f, "P-1__T-3", "no timestamp here");
+  const r = doctor(f);
+  assert.equal(status(r, "accept-locks"), "WARN");
+  assert.match(line(r, "accept-locks"), /2 accept locks/);
+  assert.ok(["P-1__T-1", "P-1__T-2", "P-1__T-3"].every((n) => existsSync(acceptLockDir(f, n))), "nothing removed");
+});
+
+test("an unreadable or empty token file is an old lock, never a crash or a removal", () => {
+  const f = fx();
+  mkdirSync(acceptLockDir(f, "P-1__T-9"), { recursive: true });
+  const r = doctor(f);
+  assert.equal(status(r, "accept-locks"), "WARN");
+  assert.ok(existsSync(acceptLockDir(f, "P-1__T-9")));
 });

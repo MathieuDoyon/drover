@@ -366,7 +366,21 @@ doctor() {
   if [ -z "$cur" ] || [ ! -f "$cur" ]; then doctor_emit WARN cli-path "not on PATH (agents can still call it by full path)"
   elif [ "$(doctor_real "$cur")" = "$me" ]; then doctor_emit ok cli-path "on PATH"
   else doctor_emit WARN cli-path "PATH copy is another file"; fi
-  # 6. hooks: the asks hook of each agent CLI (B4a). Read-only: a node helper reads the one config file and answers a fixed code; no path, value or content is ever printed.
+  # 6. accept-locks (B3b): an Accept chain holds a lock directory while it runs and removes it when it ends. One older than 15 minutes means an Accept
+  # stopped without finishing. Read-only: counts only, never a key or a path, never a removal (clearing one is the owner's call, see docs/mods/tasks.md).
+  local adir="$dhome/data/drover-accept" nold=0 ld at tnow
+  tnow="$(date +%s 2>/dev/null)" || tnow=""
+  if [ -d "$adir" ]; then
+    for ld in "$adir"/*.lock; do
+      [ -d "$ld" ] || continue
+      at="$(sed -n 2p "$ld/token" 2>/dev/null)" || at=""
+      case "$at" in ''|*[!0-9]*|????????????????*) nold=$((nold + 1)); continue ;; esac   # no readable start time: treated as old
+      if [ -z "$tnow" ] || [ $((tnow - at)) -gt 900 ]; then nold=$((nold + 1)); fi
+    done
+  fi
+  if [ "$nold" -eq 0 ]; then doctor_emit ok accept-locks "no accept lock older than 15 min"
+  else doctor_emit WARN accept-locks "$nold accept lock$([ "$nold" -eq 1 ] || printf s) older than 15 min (a stopped Accept?); see docs/mods/tasks.md"; fi
+  # 7. hooks: the asks hook of each agent CLI (B4a). Read-only: a node helper reads the one config file and answers a fixed code; no path, value or content is ever printed.
   # Absent file or no Drover hook = skip (the install is opt-in); a hook that is incomplete, unknown or points nowhere = WARN, never FAIL.
   local node_bin="" kind file code
   node_bin="$(command -v "${DROVER_NODE:-node}" 2>/dev/null)" || node_bin=""
@@ -388,7 +402,7 @@ doctor() {
       *) doctor_emit WARN "hooks-$kind" "check could not run" ;;
     esac
   done
-  # 7. hooks-locks: a <t>.lock folder of the asks hook older than 10 s (LOCK_STALE_MS) = a hook stopped mid-write; the next hook reclaims it by age. Fixed text only.
+  # 8. hooks-locks: a <t>.lock folder of the asks hook older than 10 s (LOCK_STALE_MS) = a hook stopped mid-write; the next hook reclaims it by age. Fixed text only.
   if [ -z "$node_bin" ]; then doctor_emit skip hooks-locks "cannot read the folder (no node)"
   else
     code="$("$node_bin" "$here/drover-asks-check.mjs" locks "$dhome/data/drover-asks" 2>/dev/null </dev/null | head -n 1)" || code=""
