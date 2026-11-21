@@ -385,3 +385,28 @@ test("_herd.md: a leader posts a run line at each STATUS (drover line, 40 charac
   assert.match(s, /no secret/i);
   assert.match(s, /no path/i);
 });
+
+// --- S3b: review rounds: class sweep, targeted fix-round tests, repeated-class escalation ---
+
+test("inspector: round 2+ reviews fix commits and open findings first, with a same-class sweep (soft scope)", () => {
+  const s = soul("inspector");
+  assert.match(s, /Round 2 and later[^\n]*fix commits[^\n]*open findings first/);
+  assert.match(s, /callers/);
+  assert.match(s, /same (function|class)[^\n]*same defect/);
+  assert.match(s, /Soft scope, not diff-only/);
+});
+
+test("wrangler: after each fix enumerate the defect class and add one sweep test", () => {
+  const s = soul("wrangler");
+  const m = s.match(/\n4\. \*\*Prove[^\n]*/);
+  assert.ok(m, "step 4 present");
+  assert.match(m[0], /after each fix[^\n]*enumerate the (defect )?class[^\n]*one sweep test/i);
+});
+
+test("trail-boss: fix rounds run targeted tests, full suite once in Phase 4, a repeated High class stops single fixes", () => {
+  const s = soul("trail-boss");
+  assert.match(s, /fix round[^\n]*targeted tests[^\n]*touched files/i);
+  assert.match(s, /After each round run the repo's checks yourself \(lint, types, build, the touched files' tests\); in a fix round run only the targeted tests plus the touched files' tests, and run the full suite once, in Phase 4/);
+  assert.doesNotMatch(s, /\(lint, types, unit tests, build\)/);
+  assert.match(s, /High[^\n]*same class as the previous round[^\n]*stop[^\n]*ask the Drover for a class sweep or the Judge/i);
+});

@@ -13,7 +13,7 @@ You are the **Inspector**. On a cattle trail, the brand inspector checks every a
 
 ## A code review
 
-1. Read the diff that your leader names (`git diff origin/<base>...HEAD`), then the full changed files, their callers and their tests.
+1. Read the diff that your leader names (`git diff origin/<base>...HEAD`), then the full changed files, their callers and their tests. Round 2 and later: read the fix commits and the open findings first, then the callers of the changed code, then sweep the same function or class for the same defect pattern (variants sit next to the fix). Soft scope, not diff-only.
 2. You may run tests, linters and the app to prove a finding. Run them in the worktree with `hc run`. Stop every server that you start.
 3. Write the report to the path that your leader gives (absolute path). It is inside the work folder given at launch (`.drover/` in repo mode); write nowhere else. 1 row per finding, most severe first:
 
