@@ -2,9 +2,10 @@
 // Made for the "drover" layout (a copy of main with a right "drover" column). Based on the shipped tabs mod.
 import { View, div, svg, image } from "gpui-kit";
 import { h_flex, v_flex, ScrollHandle } from "gpui-base";
-import { spaces, panes, agents, run, openOverlay, closeOverlay, props, theme, window, layout, settings, shared } from "herdr";
+import { spaces, panes, agents, run, openOverlay, closeOverlay, props, theme, window, layout, settings, shared, setBadge } from "herdr";
 import { RUNS_KEY, openCommand } from "./runs.js";
-import { bind, isEnabled, load as loadCfg } from "./config.js";
+import { bind, isEnabled, load as loadCfg, cfg, ready as cfgReady } from "./config.js";
+import { createDockBadge } from "./dockbadge.js";
 import { modSettings, startNeeds } from "./io.js";
 import { runPage } from "./needsnav.js";
 
@@ -86,11 +87,27 @@ export default class DroverTabs extends View {
     bind({ shared, modSettings }); // the screens' on/off switches live in shared "drover.config"; read live on each render
     // Each screen's own mod.json `enabled` is the layer under that override: load them all, then repaint. Until then (or if a screen is still loading) its entry is not offered; a shared override decides at once.
     // Concurrently, each in its own task, with a repaint as each settles: one stuck read hides only its own screen.
-    for (const [, mod] of [...SCREENS, ["Tasks", "drover-tasks"]]) cx.spawn(async (cx) => { await loadCfg(mod); cx.notify(); });
+    for (const [, mod] of [...SCREENS, ["Tasks", "drover-tasks"], ["Tabs", "drover-tabs"]]) cx.spawn(async (cx) => { await loadCfg(mod); cx.notify(); });
     this.needs = startNeeds(cx); // the chip count: own cache and 1 s timer, read-only in render
+    // The Dock badge (T-MWO6FADBCH4): THIS bar copy is the only writer of setBadge. A popup copy of this mod (props.menu: the Drover and Agents menus) never
+    // writes or clears it. The write runs from this 1 s timer and from close(), never from render; it reads the cache's memory and the setting (it waits for the mod.json layer).
+    this.badge = null;
+    if (!props()?.menu) {
+      this.badge = createDockBadge({
+        count: () => this.needs.get().counts.needs,
+        enabled: () => cfg("drover-tabs", "dock_badge") !== false,
+        setBadge: (text) => setBadge(text),
+      });
+      const sync = () => { if (cfgReady("drover-tabs")) this.badge.sync(); }; // nothing is written before the mod.json layer is known
+      cx.timer.every(1000, sync);
+      sync();
+    }
     this.pressed = null; // index of the tab pressed; release on another tab moves it there
     this.scroll = ScrollHandle.new();
   }
+
+  // The host closes the bar copy at quit: clear the badge (a popup copy has none).
+  async close(_cx) { this.badge?.clear(); }
 
   render() {
     if (props()?.menu) return menu(props().menu);

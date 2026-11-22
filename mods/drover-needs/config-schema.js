@@ -73,6 +73,8 @@ export const SCHEMA = [
   { mod: "drover-config", key: "work_folder", title: "Work folder", type: "enum", enum: ["repo", "project"], default: "project", live: true, alias: { run: "project" }, // a saved "run" (removed mode) reads as project in every layer
     description: "Where agents write plans, scouts, reviews and lane logs. Applies to runs started after a change.\nproject — ~/.config/drover-herdr/work/<project>/, shared by all runs of a project; later runs read earlier plans and reviews.\nrepo — .drover/ in the repo or worktree." },
   ...TOGGLEABLE.map(enabled),
+  { mod: "drover-tabs", key: "dock_badge", title: "Dock badge", type: "boolean", default: true, live: true,
+    description: "Show how many cards wait for you (the Needs you count, all projects) as a red badge on the Dock icon, hidden at 0. macOS only. Off clears it." },
   { mod: "drover-tasks", key: "machine_polling", title: "Machine health", type: "boolean", default: false, live: true,
     description: "Show a load meter for each linked machine in the Tasks sidebar. On, it runs one short read per linked machine every 5 minutes through hc exec --on (a failed machine is retried after 10 minutes). Off by default: the machine list still shows, with no numbers and no read on any machine." },
   { mod: "drover-agents", key: "default_squad", title: "Default squad", type: "text", default: "", empty: true, live: true,

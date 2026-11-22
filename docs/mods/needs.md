@@ -34,7 +34,7 @@ Works alone: Only useful inside the `drover` layout.
 
 ## Limits
 
-Herdr has no tab or sidebar badge API (only the Dock icon text), so the count lives in the switch tab and the tab-bar chip. Whether the layout shows and hides the pages as designed needs a native check after install.
+Herdr has no tab or sidebar badge API (only the Dock icon text), so the count lives in the switch tab and the tab-bar chip, and also on the Dock icon (see [Tabs](tabs.md)). Whether the layout shows and hides the pages as designed needs a native check after install.
 
 Remote cards never count here: their agent is cleared on load, and a remote agent that asks is not observable from this machine. The page also delivers due wakeups itself (every 15 seconds), so a failed or expired one shows even when no other Drover view is open.
 

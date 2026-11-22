@@ -30,6 +30,8 @@ Works alone: Only useful inside the `drover` layout.
 
 A screen is listed only when its `enabled` is on. A missing mod's entry opens an empty tab. A chip with the number of cards that need you shows beside `Tasks` (hidden at 0); a click shows the `Needs you` page of the `drover` column (the column too, if hidden). Herdr has no tab or sidebar badge API, so the number lives in this chip and in the `drover-switch` tab.
 
+**Dock badge.** The same count (all projects, no filter) also shows as the red badge on the macOS Dock icon, hidden at 0 (`setBadge`). The tab bar is the only writer: it sets the badge from its 1 s timer when the count changes (never from render) and clears it when the window closes. The setting `Dock badge` (Drover Config, `drover-tabs.dock_badge`, on by default) turns it off and clears it. Other platforms ignore it. A changed setting default or code needs the Herdr window reopened to load.
+
 ## Rebuild it
 
 [`RECIPE.md`](../../mods/drover-tabs/RECIPE.md) is the brief another agent can build this mod from. Back to the [mods index](../README.md#the-mods).

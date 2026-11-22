@@ -34,3 +34,5 @@ export const layout = () => h().layout;
 export const settings = () => h().settings ?? { zoom: 1 };
 // Herdr's own bindings: a test sets __host.keys ([{ section, keys, action }]); none = an empty list.
 export const keys = () => h().keys ?? [];
+// The Dock badge: a test sets __host.setBadge to record each call (default: a no-op).
+export const setBadge = (...a) => h().setBadge?.(...a);

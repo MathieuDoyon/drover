@@ -35,3 +35,4 @@ jump.js
 accept.js
 loadhold.js
 asks.js
+dockbadge.js
