@@ -41,6 +41,7 @@ usage: drover tasks [tag|column] [--project <id|name>]   list tasks (id, column,
                                                   needs a card that is not Done or archived and an ended run. --cancel stops an attempt in flight;
                                                   after a crash the card stays claimed until you run --recover (kills what the attempt owns, adopts or releases)
                                                   or --cancel (abandons it). Nothing recovers by itself
+       drover asks-hook install|uninstall|status [--claude] [--codex] [--yes] [--claude-settings <file>] [--codex-hooks <file>]   opt-in: add (or remove) the asks hook in your Claude settings.json and Codex hooks.json; shows the exact diff and asks first, never overwrites, never automatic (see docs/mods/tasks.md)
        drover doctor [--home <dir>] [--claude-settings <file>] [--codex-hooks <file>]               read-only check of this install: mods linked, _lib copies, souls, stale loaded code hint, CLI on PATH, the asks hooks of Claude and Codex and their locks (one line each; exit 1 on a FAIL; fixes nothing)
        drover wake <terminal|T-…> <when> <message…>       once: now, 15m, 2h, 1d, 14:30, "tomorrow 9:00", "2026-11-12 09:00"
        drover wake <terminal|T-…> every <30m|2h|1d> <message…>   repeat (first time after one interval)
@@ -303,12 +304,12 @@ doctor_first() {  # "<first entry>[ (+N more)]" from a newline-separated list, w
 }
 doctor() {
   local dhome="$home" me rm m t name total=0 nbad=0 bad="" anymiss=0 f cur manifest_ok=0
-  local cfg_claude="${DROVER_CLAUDE_SETTINGS:-${HOME:-}/.claude/settings.json}" cfg_codex="${DROVER_CODEX_HOOKS:-${HOME:-}/.codex/hooks.json}"
+  local cfg_claude="${DROVER_CLAUDE_SETTINGS:-${HOME:-}/.claude/settings.json}" cfg_codex="${DROVER_CODEX_HOOKS:-${HOME:-}/.codex/hooks.json}" flag_claude="" flag_codex=""
   while [ $# -gt 0 ]; do
     case "$1" in
       --home) [ $# -ge 2 ] || usage; dhome="$2"; shift 2 ;;
-      --claude-settings) [ $# -ge 2 ] || usage; cfg_claude="$2"; shift 2 ;;
-      --codex-hooks) [ $# -ge 2 ] || usage; cfg_codex="$2"; shift 2 ;;
+      --claude-settings) [ $# -ge 2 ] || usage; cfg_claude="$2"; flag_claude="$2"; shift 2 ;;
+      --codex-hooks) [ $# -ge 2 ] || usage; cfg_codex="$2"; flag_codex="$2"; shift 2 ;;
       *) usage ;;
     esac
   done
@@ -392,10 +393,17 @@ doctor() {
   # Absent file or no Drover hook = skip (the install is opt-in); a hook that is incomplete, unknown or points nowhere = WARN, never FAIL.
   local node_bin="" kind file code
   node_bin="$(command -v "${DROVER_NODE:-node}" 2>/dev/null)" || node_bin=""
+  local installed=0 rcode
+  # one resolver for install, uninstall, status and doctor: flag, then DROVER_*, then CLAUDE_CONFIG_DIR / CODEX_HOME, then $HOME (drover-asks-install.mjs)
+  if [ -n "$node_bin" ]; then
+    rcode="$("$node_bin" "$here/drover-asks-install.mjs" resolve claude ${flag_claude:+--claude-settings "$flag_claude"} 2>/dev/null </dev/null | head -n 1)" && [ -n "$rcode" ] && cfg_claude="$rcode"
+    rcode="$("$node_bin" "$here/drover-asks-install.mjs" resolve codex ${flag_codex:+--codex-hooks "$flag_codex"} 2>/dev/null </dev/null | head -n 1)" && [ -n "$rcode" ] && cfg_codex="$rcode"
+  fi
   for kind in claude codex; do
     if [ "$kind" = claude ]; then file="$cfg_claude"; else file="$cfg_codex"; fi
     if [ -z "$node_bin" ]; then doctor_emit skip "hooks-$kind" "cannot read JSON (no node)"; continue; fi
     code="$("$node_bin" "$here/drover-asks-check.mjs" "$kind" "$file" 2>/dev/null </dev/null | head -n 1)" || code=""
+    case "$code" in ok:[0-9]*|unknown|missing|noscript|noexec|action|command) installed=1 ;; esac
     case "$code" in
       ok:[0-9]*) doctor_emit ok "hooks-$kind" "${code#ok:} events call an existing script" ;;
       absent) doctor_emit skip "hooks-$kind" "no config file (not installed)" ;;
@@ -410,6 +418,21 @@ doctor() {
       *) doctor_emit WARN "hooks-$kind" "check could not run" ;;
     esac
   done
+  # 7b. hooks-runtime: a registered hook needs node. The launcher uses node on the hook's PATH, else the absolute path in <home>/data/drover-asks-runtime (install writes it; uninstall never removes it).
+  if [ -z "$node_bin" ]; then doctor_emit skip hooks-runtime "cannot read the runtime file (no node)"
+  elif [ "$installed" = 0 ]; then doctor_emit skip hooks-runtime "no hook installed"
+  else
+    code="$("$node_bin" "$here/drover-asks-check.mjs" runtime "$dhome/data/drover-asks-runtime" 2>/dev/null </dev/null | head -n 1)" || code=""
+    if [ -n "$(command -v node 2>/dev/null)" ]; then doctor_emit ok hooks-runtime "node is on PATH"
+    else
+      case "$code" in
+        present) doctor_emit ok hooks-runtime "no node on PATH; the runtime file names an existing node" ;;
+        absent) doctor_emit WARN hooks-runtime "no node on PATH and no runtime file: the hooks do nothing (run drover asks-hook install again)" ;;
+        differs) doctor_emit WARN hooks-runtime "no node on PATH and the runtime file does not name an existing node: the hooks do nothing" ;;
+        *) doctor_emit WARN hooks-runtime "check could not run" ;;
+      esac
+    fi
+  fi
   # 8. hooks-locks: a <t>.lock folder of the asks hook older than 10 s (LOCK_STALE_MS) = a hook stopped mid-write; the next hook reclaims it by age. Fixed text only.
   if [ -z "$node_bin" ]; then doctor_emit skip hooks-locks "cannot read the folder (no node)"
   else
@@ -428,6 +451,7 @@ case "${1:-}" in
   agents) agents "${@:2}" ;;
   config) config "${@:2}" ;;
   doctor) doctor "${@:2}" ;;
+  asks-hook) exec "${DROVER_NODE:-node}" "$here/drover-asks-install.mjs" "${@:2}" ;;
   machines) exec "${DROVER_NODE:-node}" "$here/drover-machines.mjs" "${@:2}" ;;
   tasks) read_shared tasks "${@:2}" ;;
   task) [ $# -eq 2 ] || usage; read_shared task "$2" ;;

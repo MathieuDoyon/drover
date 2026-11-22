@@ -29,7 +29,7 @@ beforeEach(() => {
   host = globalThis.__host = { appHome: "/app", home: "/h", props: {}, notified: [], terminals: [], agents: [], spaces: [], panes: [], state: { "drover.tasks": [card("T-LOCAL1", "P-LOCAL")], "drover.projects": [{ id: "P-LOCAL", name: "mine", repos: [], folders: [], branch: "main" }, REMOTE_PROJECT()] } };
   host.closed = []; host.closeOverlay = (id) => host.closed.push(id);
   host.watchFolder = () => new Promise(() => {}); // the CLI inbox consumer has nothing to watch here
-  host.exec = async (cmd, args, opts) => { om.step1.push({ cmd, args, opts }); om.inbox[base(args[5])] = args[3]; return { code: 0, stdout: "", stderr: "" }; };
+  host.exec = async (cmd, args, opts) => { if (String(cmd).endsWith("drover-asks-read")) return { code: 1, stdout: "", stderr: "" }; /* the asks reader (B4b) is not a remote write */ om.step1.push({ cmd, args, opts }); om.inbox[base(args[5])] = args[3]; return { code: 0, stdout: "", stderr: "" }; };
   host.hc = async (args) => {
     if (args[0] === "machine") return { code: 0, stdout: JSON.stringify({ machines: [{ name: M }] }), stderr: "" };
     if (args[0] === "file" && args[1] === "read") {

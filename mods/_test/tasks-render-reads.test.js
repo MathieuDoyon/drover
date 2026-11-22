@@ -21,7 +21,7 @@ const card = (i, o = {}) => ({ id: `T-${i}`, title: `card ${i}`, column: COLS[i 
 function setup(n, { remote = false } = {}) {
   C.resetCache(); C.setSettings("drover-tasks", {}); C.setSettings("drover-runs", {}); C.setSettings("drover-wakeups", {});
   IO.resetRemoteWriter();
-  const calls = { exec: 0, hc: 0, read: 0, write: 0, watch: 0, every: 0, spawn: 0, set: 0, agents: 0, terminals: 0 };
+  const calls = { asks: 0, exec: 0, hc: 0, read: 0, write: 0, watch: 0, every: 0, spawn: 0, set: 0, agents: 0, terminals: 0 };
   const reads = {};
   const raw = { "drover.tasks": Array.from({ length: n }, (_, i) => card(i + 1)), "drover.projects": remote ? [P, PR] : [P], "drover.runs": [] };
   if (remote) raw["drover.remote.box1.P-9"] = { at: Date.now(), tasks: [card(901, { id: "T-R1", column: "review", project: "P-9" }), card(902, { id: "T-R2", column: "review", project: "P-9" })], picks: { assignees: [], projects: [] } };
@@ -32,7 +32,7 @@ function setup(n, { remote = false } = {}) {
   const agentsList = [], terminalsList = [];
   const host = {
     props: {}, notified: [], home: "/h", appHome: "/nowhere", state, focused: { terminal: "t1", cwd: "/x", space: null }, spaces: [], panes: [],
-    exec: async () => { calls.exec++; return { code: 1, stdout: "", stderr: "" }; },
+    exec: async (cmd) => { if (String(cmd).endsWith("drover-asks-read")) { calls.asks++; return { code: 1, stdout: "", stderr: "" }; } /* the asks reader (B4b) has its own counter */ calls.exec++; return { code: 1, stdout: "", stderr: "" }; },
     hc: async () => { calls.hc++; return { code: 1, stdout: "", stderr: "" }; },
     readTextFile: async () => { calls.read++; return null; },
     writeTextFile: async () => { calls.write++; },
@@ -50,7 +50,7 @@ function setup(n, { remote = false } = {}) {
   return { t, cx, raw, calls, reads, agentsList, terminalsList, tick, timers };
 }
 const render = (t, cx) => { globalThis.__rec = { ids: [], texts: [] }; try { t.render(cx); return { ...globalThis.__rec }; } finally { globalThis.__rec = undefined; } };
-const SIDE = ["exec", "hc", "read", "write", "watch", "every", "spawn", "set", "agents", "terminals"];
+const SIDE = ["asks", "exec", "hc", "read", "write", "watch", "every", "spawn", "set", "agents", "terminals"];
 const delta = (calls, fn) => { const b = { ...calls }; const out = fn(); return { out, d: Object.fromEntries(SIDE.map((k) => [k, (calls[k] ?? 0) - (b[k] ?? 0)])) }; };
 const none = Object.fromEntries(SIDE.map((k) => [k, 0]));
 

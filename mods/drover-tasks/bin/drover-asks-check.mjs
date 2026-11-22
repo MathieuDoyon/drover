@@ -2,13 +2,20 @@
 //   node drover-asks-check.mjs <claude|codex> <config file>   ->  ok:<n> | absent | none | unreadable | unknown | missing | noscript | noexec | action | command
 //   node drover-asks-check.mjs locks <asks dir>               ->  nodir | ok | stale | unreadable   (stale: a <t>.lock directory older than LOCK_STALE_MS; read-only, no follow)
 // Exit status is always 0. The doctor maps each code to its fixed phrase.
-import { openSync, fstatSync, readSync, closeSync, statSync, accessSync, readdirSync, lstatSync, constants as C } from "node:fs";
+import { openSync, fstatSync, readSync, closeSync, statSync, accessSync, readdirSync, lstatSync, realpathSync, constants as C } from "node:fs";
 import { KNOWN_EVENTS, EVENT_ACTION, LOCK_STALE_MS } from "./asks-lib.mjs";
 
 const out = (code) => { process.stdout.write(code + "\n"); process.exit(0); };
 const [cli, file] = process.argv.slice(2);
+// Test mode (DROVER_TEST=1 + DROVER_TEST_ROOT): a path that resolves outside the scratch root is never opened (a symlink out of the scratch tree reads as unreadable).
+function outsideScratch(p) {
+  if (process.env.DROVER_TEST !== "1") return false;
+  if (!process.env.DROVER_TEST_ROOT) return true; // test mode without a scratch root fails closed
+  try { const root = realpathSync(process.env.DROVER_TEST_ROOT); let q = p; for (;;) { try { q = realpathSync(q) + p.slice(q.length); break; } catch (e) { const up = q.replace(/\/[^/]*$/, ""); if (!up || up === q) return true; q = up; } } return !(q === root || q.startsWith(root + "/")); } catch { return true; }
+}
 function locks() {
   let names;
+  if (outsideScratch(file)) return "unreadable";
   try { names = readdirSync(file); } catch (e) { return e && e.code === "ENOENT" ? "nodir" : "unreadable"; }
   for (const n of names) {
     if (!n.endsWith(".lock")) continue;
@@ -17,8 +24,22 @@ function locks() {
   }
   return "ok";
 }
+// runtime <leaf file>: present (one line, an absolute path to an executable regular file) | absent | differs. Read-only; never prints the path.
+function runtime() {
+  let text;
+  if (outsideScratch(file)) return "differs";
+  try {
+    const fd = openSync(file, C.O_RDONLY | C.O_NONBLOCK | C.O_NOFOLLOW);
+    try { const s = fstatSync(fd); if (!s.isFile() || s.size > 4096) return "differs"; const b = Buffer.alloc(s.size); readSync(fd, b, 0, s.size, 0); text = b.toString("utf8"); } finally { closeSync(fd); }
+  } catch (e) { return e && e.code === "ENOENT" ? "absent" : "differs"; }
+  const line = text.replace(/\n$/, "");
+  if (!line.startsWith("/") || line.includes("\n")) return "differs";
+  try { if (!statSync(line).isFile()) return "differs"; accessSync(line, C.X_OK); } catch { return "differs"; }
+  return "present";
+}
 function check() {
   if (!KNOWN_EVENTS[cli] || !file) return "unreadable";
+  if (outsideScratch(file)) return "unreadable";
   let text;
   try {
     const fd = openSync(file, C.O_RDONLY | C.O_NONBLOCK); // a symlinked dotfile is followed on purpose: read-only. NONBLOCK: a FIFO with no writer must not hang the open; fstat then rejects it
@@ -50,5 +71,5 @@ function check() {
   return `ok:${entries.length}`;
 }
 let code = "unreadable";
-try { code = cli === "locks" ? locks() : check(); } catch {}
+try { code = cli === "locks" ? locks() : cli === "runtime" ? runtime() : check(); } catch {}
 out(code);

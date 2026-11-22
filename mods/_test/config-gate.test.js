@@ -389,7 +389,7 @@ test("tasks off: draws nothing (an empty div, no stub text, no rows); keeps the 
   const { rec } = withRec(() => view.render(cx));
   assert.deepEqual(rec.ids, [], "no elements with ids");
   await idle();
-  quiet([30000, 15000, 1000, 1000, 1000]); // the three 1 s timers (needs cache refresh, remote watch, machines watch) are idle while off;
+  quiet([30000, 15000, 1000, 1000, 1000, 1000]); // the four 1 s timers (needs cache refresh, remote watch, asks reader, machines watch) are idle while off;
 });
 
 test("tasks off -> on -> off -> on", async () => {
@@ -628,7 +628,7 @@ test("jira: a JQL typed while the first-enable settings load is pending is kept"
 
 // Inherited enabled (mod.json settings) with no shared override: every gate loads its own settings first.
 const SCREENS_CFG = [
-  ["drover-github", [], {}], ["drover-jira", [], {}], ["drover-room", [15000], roomHost], ["drover-board", [30000], {}], ["drover-todos", [], {}], ["drover-tasks", [30000, 15000, 1000, 1000, 1000], {}],
+  ["drover-github", [], {}], ["drover-jira", [], {}], ["drover-room", [15000], roomHost], ["drover-board", [30000], {}], ["drover-todos", [], {}], ["drover-tasks", [30000, 15000, 1000, 1000, 1000, 1000], {}],
   ["drover-agents", [], {}], ["drover-runs", [1000], {}], ["drover-wakeups", [30000, 15000], {}], ["drover-projects", [], {}], ["drover-reader", [], readerHost],
 ];
 const inheritedHost = (mod, settings) => ({ readTextFile: async (p) => { log.read.push(p); return new RegExp(`mods/${mod}/mod\\.json$`).test(p) ? JSON.stringify({ settings }) : null; } });

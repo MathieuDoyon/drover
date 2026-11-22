@@ -69,6 +69,7 @@ A new home has an empty board. See [Getting started](getting-started.md).
 Path: `~/.config/herdr-app/mods/drover-tasks/bin/drover` (no arguments prints help).
 
 - Read commands (`tasks`, `task`, `squads`, `projects`) work at all times.
+- `drover asks-hook install|uninstall|status` is the one opt-in step that touches your Claude and Codex hook files (diff first, asks first, never overwrites; see [Asks hook install](mods/tasks.md#asks-hook-install)). `install.sh` never runs it.
 - Write commands go to `~/.config/herdr-app/data/drover-inbox`. An open Tasks, Board or Wakeups mod applies them. If none is open the CLI prints `queued: …`.
 
 ## Update

@@ -34,3 +34,4 @@ evidence.js
 jump.js
 accept.js
 loadhold.js
+asks.js

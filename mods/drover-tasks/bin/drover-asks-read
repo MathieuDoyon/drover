@@ -1,0 +1,18 @@
+#!/bin/sh
+# drover-asks-read <asks dir>: finds node (PATH, the runtime the hook install recorded, then the common places) and runs drover-asks-read.mjs next to this file.
+# Read-only. No node: prints nothing, exit 1 (the reader treats that as an unknown scan, never as "no asks").
+exec 2>/dev/null
+src="$0"
+while [ -L "$src" ]; do
+  ldir="$(cd -P "$(dirname "$src")" && pwd)"; src="$(readlink "$src")"
+  case "$src" in /*) ;; *) src="$ldir/$src" ;; esac
+done
+here="$(cd -P "$(dirname "$src")" && pwd)"
+node="$(command -v node)" || node=""
+if [ -z "$node" ]; then
+  rt="${HERDR_APP_HOME:-${HOME:-/nonexistent}/.config/herdr-app}/data/drover-asks-runtime"
+  if [ -f "$rt" ]; then read -r node < "$rt" || :; fi
+  { [ -n "$node" ] && [ -f "$node" ] && [ -x "$node" ]; } || node="$(sh "$here/find-runtime.sh" --node-only "" 2>/dev/null)" || node=""
+fi
+[ -n "$node" ] || exit 1
+exec "$node" "$here/drover-asks-read.mjs" "$@"

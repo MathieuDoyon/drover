@@ -75,16 +75,16 @@ test("a source mods/ holding .install.lock and .install-backups does not break t
   for (const n of [".install.lock", ".install-backups"]) assert.ok(!existsSync(join(f.repo, "mods", n)), n);
 });
 
-test("an installed fixture: 9 check lines in the shared grammar, a summary, exit 0, accept-locks ok, the hooks lines skipped (nothing installed)", () => {
+test("an installed fixture: 10 check lines in the shared grammar, a summary, exit 0, accept-locks ok, the hooks lines skipped (nothing installed)", () => {
   const f = fx();
   const r = doctor(f);
   assert.equal(r.status, 0, r.stdout + r.stderr);
   const ls = lines(r);
-  assert.equal(ls.length, 10, r.stdout);
-  for (const l of ls.slice(0, 9)) assert.match(l, LINE);
-  assert.deepEqual(ls.slice(0, 9).map((l) => l.split("  ")[1]), ["mods-linked", "lib-copies", "souls", "lib-stamp", "cli-path", "accept-locks", "hooks-claude", "hooks-codex", "hooks-locks"]);
-  assert.match(ls[9], /^doctor: 6 ok, 0 warn, 0 fail$/);
-  for (const c of ["hooks-claude", "hooks-codex", "hooks-locks"]) assert.equal(status(r, c), "skip", line(r, c));
+  assert.equal(ls.length, 11, r.stdout);
+  for (const l of ls.slice(0, 10)) assert.match(l, LINE);
+  assert.deepEqual(ls.slice(0, 10).map((l) => l.split("  ")[1]), ["mods-linked", "lib-copies", "souls", "lib-stamp", "cli-path", "accept-locks", "hooks-claude", "hooks-codex", "hooks-runtime", "hooks-locks"]);
+  assert.match(ls[10], /^doctor: 6 ok, 0 warn, 0 fail$/);
+  for (const c of ["hooks-claude", "hooks-codex", "hooks-runtime", "hooks-locks"]) assert.equal(status(r, c), "skip", line(r, c));
   for (const c of ["mods-linked", "lib-copies", "souls", "lib-stamp", "cli-path", "accept-locks"]) assert.equal(status(r, c), "ok", line(r, c));
 });
 
@@ -327,7 +327,7 @@ test("an unreadable _lib/copies.txt: FAIL with a fixed detail, exit 1, empty std
   assert.equal(r.status, 1, r.stdout);
   assert.equal(r.stderr, "", "a shell diagnostic leaked a path");
   assert.match(line(r, "lib-copies"), /^FAIL  lib-copies  _lib\/copies\.txt is missing or unreadable$/);
-  assert.equal(lines(r).length, 10, r.stdout);
+  assert.equal(lines(r).length, 11, r.stdout);
   assert.notEqual(status(r, "lib-stamp"), "ok"); // a manifest that cannot be read proves nothing
 });
 
@@ -337,7 +337,7 @@ test("a shared file listed in copies.txt but missing in _lib: every line and the
   const r = doctor(f);
   assert.equal(r.status, 1);
   assert.equal(r.stderr, "");
-  assert.equal(lines(r).length, 10, r.stdout);
+  assert.equal(lines(r).length, 11, r.stdout);
   assert.equal(status(r, "lib-stamp"), "skip", line(r, "lib-stamp"));
   for (const c of ["cli-path", "hooks-claude", "hooks-codex", "hooks-locks"]) assert.notEqual(line(r, c).startsWith("(no "), true, c);
   assert.match(lines(r).at(-1), /^doctor: \d+ ok, \d+ warn, \d+ fail$/);

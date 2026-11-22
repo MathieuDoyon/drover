@@ -5,7 +5,7 @@ import { v_flex, h_flex, InputState, Input, Popover } from "gpui-base";
 import { agents, terminals, run, theme, shared, setShared } from "herdr";
 import { bind, isEnabled, whenLoaded, ready as cfgReady } from "./config.js";
 import { GROUPS, projectOf, add, update, matches, menuChange, FILTER_FIELDS, toggleFilter, clearFilters, matchesFilter, filterValues, searchFilters, filterChips } from "./store.js";
-import { load, loadRuns, loadProjects, loadConfig, spaceProject, sidebarSpace, save, edit, pick, openProof, openBoard, watchInbox, watchWakes, modSettings, needsWorld, startNeeds, retryRemote, remoteSend, remoteWriteState, takeRemoteOutcomes, watchMachines, machineView } from "./io.js";
+import { load, loadRuns, loadProjects, loadConfig, spaceProject, sidebarSpace, save, edit, pick, openProof, openBoard, watchInbox, watchWakes, modSettings, needsWorld, startNeeds, retryRemote, remoteSend, remoteWriteState, takeRemoteOutcomes, watchMachines, machineView, startAsks } from "./io.js";
 import { cardKey } from "./needs.js";
 import { lineLabel } from "./runline.js";
 import { queryResetKey } from "./jump.js";
@@ -39,6 +39,8 @@ export default class Tasks extends View {
     this.lastReset = Date.now();
     this.resetSeen = new Map(); // reset key -> the last token seen there (a space first met adopts its token without applying it)
     this.cache = startNeeds(cx, { read: () => this.world(), gate: () => isEnabled("drover-tasks"), remote: true }); // remote: reads each remote-bound project every 15 s while the panel is on
+    // The asks reader (B4b) belongs to Tasks: it scans <home>/data/drover-asks every second (read-only helper) and, when the scan changed, refreshes the cache. Render never starts it.
+    startAsks(cx, { gate: () => isEnabled("drover-tasks"), onChange: () => { if (this.cache.refresh()) cx.notify(); } });
     // Machines: its own 1 s timer ticks the health poller (a list read, and a read per linked machine only when machine_polling is on); render reads machineView() only.
     watchMachines(cx, () => isEnabled("drover-tasks"));
     this.pop = null; // "filter" while the filter popover is open

@@ -39,7 +39,7 @@ const TASKS = join(REPO, "mods/drover-tasks");
 const FINDER = join(TASKS, "bin/find-runtime.sh");
 const CLI = join(TASKS, "bin/drover");
 const M = () => import("../_lib/machines.js"); // loaded inside each test, so a missing module fails that test, not the whole file
-const SHIPPED = ["bin/drover", "bin/drover-export.mjs", "bin/drover-machines.mjs", "bin/find-runtime.sh", "bin/drover-headless", "bin/drover-headless.mjs", "bin/drover-asks-check.mjs", "bin/asks-lib.mjs", "headless-board.js", "remote.js", "machines.js", "herd-export.js", "runs.js", "store.js", "config.js", "config-schema.js", "lessons.js", "workfolder.js", "sources.js", "hold.js", "publish.js", "bin/drover-health.py", "bin/drover-line.mjs", "runline.js", "evidence.js"];
+const SHIPPED = ["bin/drover", "bin/drover-export.mjs", "bin/drover-machines.mjs", "bin/find-runtime.sh", "bin/drover-headless", "bin/drover-headless.mjs", "bin/drover-asks-check.mjs", "bin/drover-asks-install.mjs", "bin/asks-lib.mjs", "headless-board.js", "remote.js", "machines.js", "herd-export.js", "runs.js", "store.js", "config.js", "config-schema.js", "lessons.js", "workfolder.js", "sources.js", "hold.js", "publish.js", "bin/drover-health.py", "bin/drover-line.mjs", "runline.js", "evidence.js"];
 const T_OLD = Date.UTC(2026, 0, 1), T_NEW = Date.UTC(2026, 0, 2), T_LATER = Date.UTC(2026, 0, 3);
 const cleanup = [];
 // Children a test spawned (own process group each). A test that throws never reaches its own release/kill, and the temp dirs below hold the PATH the child's `sleep` needs:

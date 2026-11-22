@@ -7,6 +7,7 @@ import { base64, httpProblem, jiraIssue, jiraKey, githubIssue, prItems } from ".
 import { ownerError, createRemote, bindings as remoteBindings, mergeRemote, cacheKey } from "./remote.js";
 import { createWriter } from "./remote-write.js";
 import { createNeedsCache } from "./needs.js";
+import { cleanAsk, terminalIdOk } from "./asks.js";
 import { createHealth, HEALTH_PY, readResult } from "./health.js";
 import { LOCAL, createLocalRead, judge, limitsFor, sampleOfRow, reservedWarning } from "./loadhold.js";
 import { validate as validateLine, activeFor } from "./runline.js";
@@ -232,8 +233,60 @@ async function startGate() {
 // What the Needs-you cache reads, once: every card (local and remote), runs, and the live agents and terminals. Called by a cache refresh only, never by render.
 export function needsWorld() {
   const m = loadMerged();
-  return { tasks: m.tasks, remotes: m.remotes, runs: loadRuns(), agents: agents(), terminals: terminals(), wakes: loadWakes() };
+  return { tasks: m.tasks, remotes: m.remotes, runs: loadRuns(), agents: agents(), terminals: terminals(), wakes: loadWakes(), asksScan };
 }
+// ---- The asks reader (T-MWO3FDT7NKL, B4b): WHY a blocked agent waits. Owned by the Tasks mod (started at its init, not by Runs, not by render). ----
+// A 1 s timer starts one scan of <appHome>/data/drover-asks through the read-only helper (host exec, 2 s deadline, one in flight; a scan older than the
+// reader's own guard is abandoned and its late answer ignored). The last confirmed scan lives in memory (asksScan); an unknown scan (error, timeout,
+// bad output) changes nothing. needsWorld() hands the memory to the cache, which decides what still holds. The reader only reads: it writes, deletes and answers nothing.
+const ASKS_DEADLINE_MS = 2000, ASKS_ABANDON_MS = 5000;
+let asksScan = null, asksSig = "", asksFlight = null, asksGen = 0;
+const asksListeners = new Set();
+export const asksSnapshot = () => asksScan;
+export const resetAsks = () => { asksScan = null; asksSig = ""; asksFlight = null; asksGen++; asksListeners.clear(); };
+const asksDir = () => `${appHome()}/data/drover-asks`;
+const asksHelper = () => `${appHome()}/mods/drover-tasks/bin/drover-asks-read`;
+// -> { ok: true, files: Map } for a confirmed scan, else null (unknown). Every entry goes through the allowlist again.
+function readAsksScan(r) {
+  if (!r || r.code !== 0) return null;
+  let o;
+  try { o = JSON.parse(String(r.stdout ?? "").trim()); } catch { return null; }
+  if (!o || o.ok !== true || !Array.isArray(o.asks)) return null;
+  const files = new Map();
+  for (const a of o.asks) {
+    const ask = a && terminalIdOk(a.terminal) ? cleanAsk(a) : null;
+    if (!ask || files.has(a.terminal)) return null; // an entry we cannot accept is a scan we cannot trust: unknown, never a dropped ask read as a clear
+    files.set(a.terminal, ask);
+  }
+  return { ok: true, files };
+}
+function askScanNow() {
+  const gen = ++asksGen;
+  asksFlight = { gen, at: Date.now() };
+  Promise.resolve().then(() => exec(asksHelper(), [asksDir()], { timeout: ASKS_DEADLINE_MS })).catch(() => null).then((r) => {
+    if (gen !== asksGen) return; // abandoned: a late answer counts for nothing
+    asksFlight = null;
+    const next = readAsksScan(r);
+    if (!next) return; // unknown: nothing changes
+    const sig = JSON.stringify([...next.files].sort(([a], [b]) => (a < b ? -1 : 1)));
+    asksScan = next;
+    if (sig === asksSig) return;
+    asksSig = sig;
+    for (const f of [...asksListeners]) try { f(); } catch {}
+  });
+}
+// onChange: called when a confirmed scan differs from the last one (the screen refreshes its cache and repaints). gate(): the screen's switch.
+export function startAsks(cx, { gate = () => true, onChange = () => {} } = {}) {
+  asksListeners.add(onChange);
+  const tick = () => {
+    if (!gate()) return;
+    if (asksFlight) { if (Date.now() - asksFlight.at <= ASKS_ABANDON_MS) return; asksGen++; asksFlight = null; }
+    askScanNow();
+  };
+  cx.timer?.every?.(1000, tick);
+  tick();
+}
+// ---- end asks reader
 // What the Runs screen's cache reads (one read of each). resume: also the resume state of every run (a few shared keys per run), asked only while ended runs are shown.
 export function runsWorld({ resume = false } = {}) {
   return { runs: loadRuns(), tasks: load(), projects: loadProjects(), agents: agents(), terminals: terminals(),

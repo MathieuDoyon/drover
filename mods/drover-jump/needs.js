@@ -3,6 +3,7 @@
 import { attention, sorted } from "./store.js";
 import { liveAgents, reviewLive, dotKind, runStatus } from "./runs.js";
 import { lineOf } from "./runline.js";
+import { createAsksState, askReason } from "./asks.js";
 
 export const GROUP_IDS = ["needs", "review", "working", "todo", "blocked"];
 
@@ -27,7 +28,9 @@ export function wakeAttention(wakes, now) {
 // runs: the run records (for the review-live dot). wakes + now: the wakeup records and the clock (failed automation joins Needs you).
 // Returns { rows: Map key -> { group, reason, dot }, byGroup: { group: [key] } (cards only), attention: [{ kind: "card"|"wake", key, at, reason }] oldest first,
 // counts, lines: Map key -> { text, progress, ageMin, stale } of each LOCAL card's live run line (see lineViews) } (key: cardKey). counts.needs is the length of `attention`: what the page, the switch and the chip show.
-export function needsCounts(tasks, live, alive, runs = [], wakes = [], now = Date.now()) {
+// asks: Map terminal -> { id, kind, tool } (the asks reader, B4b). It only replaces the REASON of a card that is in Needs you because its live agent is blocked:
+// no ask (no hooks, an unknown scan) keeps the fallback reason, and no group or count ever depends on it.
+export function needsCounts(tasks, live, alive, runs = [], wakes = [], now = Date.now(), asks = new Map()) {
   const statuses = new Map([...live].map(([k, v]) => [k, v?.status]).filter(([, s]) => s));
   const rows = new Map();
   const byGroup = Object.fromEntries(GROUP_IDS.map((g) => [g, []]));
@@ -36,7 +39,8 @@ export function needsCounts(tasks, live, alive, runs = [], wakes = [], now = Dat
     const at = attention(task, live, alive);
     if (!at) continue;
     // A remote card has no run or terminal on this machine: never match it to a local run that happens to share its bare id.
-    rows.set(cardKey(task), { group: at.group, reason: at.reason, dot: dotKind(at.group, !task.remote && reviewLive(task, runs, statuses, alive)) });
+    const ask = at.group === "needs" && !task.remote && task.agent && alive.has(task.agent) && live.get(task.agent)?.status === "blocked" ? asks.get(task.agent) : null;
+    rows.set(cardKey(task), { group: at.group, reason: (ask && askReason(ask)) || at.reason, dot: dotKind(at.group, !task.remote && reviewLive(task, runs, statuses, alive)) });
     placed.push(task);
   }
   for (const t of sorted(placed)) byGroup[rows.get(cardKey(t)).group].push(t);
@@ -87,19 +91,22 @@ const fingerprintOf = (v) => [
 ].join("\u0001");
 
 // read() returns { tasks, runs, agents, terminals, wakes } (one read of each), plus optional { remotes, controls: { projectId: { on, tip } } } for a
-// screen with remote cards. refresh() recomputes and returns true when the result really changed.
+// screen with remote cards, and optional { asksScan } (the asks reader's last result held in memory: { ok: true, files: Map } or unknown; none = no hooks).
+// The asks state (which ask is still valid) is updated HERE, once per refresh, where the live statuses are known. refresh() recomputes and returns true when the result really changed.
 // get() returns the stored value and never computes; each refresh stores a NEW value, so a reader holding the old one is safe.
 export function createNeedsCache({ read, now = () => Date.now() }) {
   let value = { ...EMPTY, at: 0 };
   let sig = signatureOf(value) + fingerprintOf(value);
+  const asksState = createAsksState();
   return {
     get: () => value,
     signature: () => sig,
     refresh() {
-      const { tasks = [], runs = [], agents = [], terminals = [], remotes = [], controls = {}, wakes = [] } = read();
+      const { tasks = [], runs = [], agents = [], terminals = [], remotes = [], controls = {}, wakes = [], asksScan = null } = read();
       const alive = new Set(terminals.map((x) => x.address));
       const live = liveAgents(agents, terminals);
-      const next = { ...needsCounts(tasks, live, alive, runs, wakes, now()), tasks, byId: new Map(tasks.map((t) => [cardKey(t), t])), remotes, controls, agentAddrs: new Set(agents.map((a) => a.address)), live };
+      const asks = asksState.update({ scan: asksScan, statuses: new Map([...live].map(([k, v]) => [k, v?.status])), alive, now: now() });
+      const next = { ...needsCounts(tasks, live, alive, runs, wakes, now(), asks), tasks, byId: new Map(tasks.map((t) => [cardKey(t), t])), remotes, controls, agentAddrs: new Set(agents.map((a) => a.address)), live };
       const nextSig = signatureOf(next) + fingerprintOf(next);
       const changed = nextSig !== sig;
       value = { ...next, at: now() };

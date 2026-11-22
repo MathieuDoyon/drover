@@ -6,7 +6,8 @@
 // (counter + 1, written before anything is published). `set` publishes id = ticket unless a newer ask is there; `clear` removes the ask
 // only if ask.id < its ticket. Limit, stated: this is the order in which the hooks took the lock, not the order the agent emitted
 // them (the CLIs give no correlation id). The reader (B4b) heals the rest: it shows a reason only while Herdr reports the agent
-// blocked, and ignores an ask older than ASK_TTL_MS.
+// blocked, follows the ids (an older read never revives or replaces a newer ask), and drops an ask older than ASK_TTL_MS only
+// when its terminal is gone (an alive terminal's ask has no age limit).
 import { openSync, closeSync, fstatSync, readSync, writeSync, renameSync, unlinkSync, mkdirSync, lstatSync, statSync, rmdirSync, rmSync, fchmodSync, constants as C } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
@@ -31,7 +32,7 @@ export const EVENT_ACTION = {
   codex: { PermissionRequest: "set", PostToolUse: "clear", UserPromptSubmit: "clear", Stop: "clear" },
 };
 
-const TOOLS = new Set(["Bash", "Edit", "Write", "Read", "Grep", "Glob", "WebFetch", "WebSearch", "Task", "Agent", "NotebookEdit", "PowerShell", "apply_patch", "AskUserQuestion", "ExitPlanMode"]);
+export const TOOLS = new Set(["Bash", "Edit", "Write", "Read", "Grep", "Glob", "WebFetch", "WebSearch", "Task", "Agent", "NotebookEdit", "PowerShell", "apply_patch", "AskUserQuestion", "ExitPlanMode"]);
 const ID_RE = /^[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}$/;
 export const terminalIdOk = (id) => typeof id === "string" && ID_RE.test(id) && !id.includes("..");
 
@@ -106,7 +107,7 @@ function prepareDir(home, create) {
 // A lock older than LOCK_STALE_MS is reclaimed BY AGE ALONE: no pid, no guard. Because a hook cannot outlive HOOK_KILL_MS, a lock that old
 // was left by a hook that died. Residual, stated plainly: a system suspend or a clock jump in the middle of a critical section can make a live
 // holder look stale, so two holders may overlap; the worst case is one wrong or lost reason, covered by the reader (B4b: a reason is shown only while Herdr
-// reports the agent blocked, and an ask older than ASK_TTL_MS is ignored). The lock is a directory <t>.lock (0700) holding `owner` = "<pid> <token>";
+// reports the agent blocked; an ask of a gone terminal older than ASK_TTL_MS is dropped). The lock is a directory <t>.lock (0700) holding `owner` = "<pid> <token>";
 // a live holder is waited for up to lockWaitMs, then the invoker skips (fail open). The holder re-checks its token before each publish or delete.
 export const HOOK_KILL_MS = 3000;
 export const LOCK_STALE_MS = 10000;
