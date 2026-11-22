@@ -42,7 +42,21 @@ const M = () => import("../_lib/machines.js"); // loaded inside each test, so a 
 const SHIPPED = ["bin/drover", "bin/drover-export.mjs", "bin/drover-machines.mjs", "bin/find-runtime.sh", "bin/drover-headless", "bin/drover-headless.mjs", "bin/drover-asks-check.mjs", "bin/asks-lib.mjs", "headless-board.js", "remote.js", "machines.js", "herd-export.js", "runs.js", "store.js", "config.js", "config-schema.js", "lessons.js", "workfolder.js", "sources.js", "hold.js", "publish.js", "bin/drover-health.py", "bin/drover-line.mjs", "runline.js", "evidence.js"];
 const T_OLD = Date.UTC(2026, 0, 1), T_NEW = Date.UTC(2026, 0, 2), T_LATER = Date.UTC(2026, 0, 3);
 const cleanup = [];
-afterEach(() => { for (const p of cleanup.splice(0)) rmSync(p, { recursive: true, force: true }); });
+// Children a test spawned (own process group each). A test that throws never reaches its own release/kill, and the temp dirs below hold the PATH the child's `sleep` needs:
+// removed first, a polling shim would spin. So afterEach kills the groups and waits for every close BEFORE it removes the dirs.
+const children = [];
+function spawnTracked(cmd, args, opts = {}) {
+  const child = spawn(cmd, args, { ...opts, detached: true });
+  const closed = new Promise((r) => { child.once("close", r); child.once("error", r); });
+  children.push({ child, closed });
+  return child;
+}
+async function reapChildren() {
+  const list = children.splice(0);
+  for (const { child } of list) { try { process.kill(-child.pid, "SIGKILL"); } catch {} } // ESRCH: already gone; no pid: it never started
+  await Promise.all(list.map(({ closed }) => closed));
+}
+afterEach(async () => { await reapChildren(); for (const p of cleanup.splice(0)) rmSync(p, { recursive: true, force: true }); });
 const machine = (o) => { const m = RT.makeMachine(o); cleanup.push(m.root); return m; };
 const clone = (m) => { const c = RT.cloneMachine(m); cleanup.push(c.root); return c; };
 const source = () => { const s = RT.copySource(TASKS); cleanup.push(s); return s; };
@@ -122,4 +136,4 @@ const DEAD = { alive: () => false }; // the owner of the hold is gone (a killed 
 const fileStates = (res) => Object.fromEntries(res.files.map((f) => [f.path, f.state]));
 const stampOf = (m, path) => manifestOf(m).files.find((f) => f.path === path);
 
-export { until, RT, GENERIC_LEAKS, privateWords, wholeWord, runtimePrivateWords, SHARE, GEN, CURRENT, ENTRY, REPO, TASKS, FINDER, CLI, M, SHIPPED, T_OLD, T_NEW, T_LATER, cleanup, machine, clone, source, redate, dateAll, edit, o, H, holdDir, holdOf, holdFiles, states, noWrites, noTilde, manifestOf, curId, sha, sha256, fresh, finder, line, forEachPoint, deferred, drainTicks, killSet, killPoints, assertSane, newest, DEAD, fileStates, stampOf };
+export { spawnTracked, reapChildren, until, RT, GENERIC_LEAKS, privateWords, wholeWord, runtimePrivateWords, SHARE, GEN, CURRENT, ENTRY, REPO, TASKS, FINDER, CLI, M, SHIPPED, T_OLD, T_NEW, T_LATER, cleanup, machine, clone, source, redate, dateAll, edit, o, H, holdDir, holdOf, holdFiles, states, noWrites, noTilde, manifestOf, curId, sha, sha256, fresh, finder, line, forEachPoint, deferred, drainTicks, killSet, killPoints, assertSane, newest, DEAD, fileStates, stampOf };

@@ -2,7 +2,7 @@
 // The herdr side of the store: tasks persist in shared state (shared.json, written atomically).
 import { shared, setShared, openOverlay, exec, hc, readTextFile, writeTextFile, notify, focused, appHome, home, watchFolder, spaces, panes, agents, terminals, keys as hostKeys } from "herdr";
 import * as fs from "fs/promises";
-import { KEY, SEEN_KEY, PROJECTS_KEY, firstSight, list, add, update, bySource, addCommand, applyCommand, columnName, repoOf, projectOf, projectKey, projectAddRequest, projectDiff, PROTOCOL, inboxGate, arrivalOf, addProject, projectNamed, nextReport, claim, release, editSize, CLAIMING, clearClaimToken } from "./store.js";
+import { KEY, SEEN_KEY, PROJECTS_KEY, firstSight, list, add, update, bySource, addCommand, addProjectKey, applyCommand, columnName, repoOf, projectOf, projectKey, projectAddRequest, projectDiff, PROTOCOL, inboxGate, arrivalOf, addProject, projectNamed, nextReport, claim, release, editSize, CLAIMING, clearClaimToken } from "./store.js";
 import { base64, httpProblem, jiraIssue, jiraKey, githubIssue, prItems } from "./sources.js";
 import { ownerError, createRemote, bindings as remoteBindings, mergeRemote, cacheKey } from "./remote.js";
 import { createWriter } from "./remote-write.js";
@@ -734,6 +734,23 @@ async function freshStatus(address) {
     return typeof rec.status === "string" && rec.status ? rec.status : "running";
   } catch { return "unknown"; }
 }
+// Codex's Hooks trust screen ("plugin contents changed; hook approval required"): Herdr gives such a terminal no agent status, so the barrier would only time out.
+// The message AND an active control of the screen are both needed: the bare phrase may be quoted in a resumed transcript. Pure; case and spacing do not matter.
+export function trustScreen(text) {
+  if (typeof text !== "string") return false;
+  const t = text.toLowerCase().replace(/\s+/g, " ");
+  const message = t.includes("hook approval required") || /\bhooks? needs? review\b/.test(t);
+  const control = t.includes("esc close") || (t.includes("esc back") && t.includes("t trust"));
+  return message && control;
+}
+export const TRUST_ERROR = "Codex is waiting on its hooks trust screen (hook approval required). Trust the hooks once in a normal Codex session, then resume again";
+// The terminal's own screen, read-only (no history, no keys). A failed or unreadable read is no evidence.
+async function onTrustScreen(address) {
+  try {
+    const r = await hc(["read", address, "--lines", "0"]);
+    return r?.code === 0 && trustScreen(String(r.stdout ?? ""));
+  } catch { return false; }
+}
 async function barrier(address, token, beat) {
   let ok = 0, sent = false;
   for (let i = 0; i < resumeSettle.tries; i++) {
@@ -741,6 +758,7 @@ async function barrier(address, token, beat) {
     const st = await freshStatus(address);
     if (st === "gone") return { error: "the terminal exited" };
     if (st === "blocked") return { error: "the terminal is blocked on a dialog (answer it by hand)" };
+    if (!READY.has(st) && await onTrustScreen(address)) return { error: TRUST_ERROR, dialog: true }; // no agent status: is it the trust screen?
     ok = READY.has(st) ? ok + 1 : 0;
     if (ok >= 2) {
       sent = await delivered(address, token);
@@ -816,6 +834,7 @@ export async function resumeTerminal(run, terminal, o) {
     if (!(await killConfirmed(address))) return { error: `${who}: terminal ${address} may still be alive (kill not confirmed), so no second one was opened; ${errors.join("; ")}`, killed, failClosed: true, address };
     killed.push(address);
     if (why) return { error: `${who}: ${why}`, killed, cancelled: true };
+    if (r.dialog) break; // the frozen command would stop at the same screen
   }
   return { error: `${who} (${terminal.address}) did not resume: ${errors.join("; ")}`, killed };
 }
@@ -1574,7 +1593,7 @@ async function drain() {
     } else if (cmd?.op === "project-add") {
       reply = await projectAdd(cmd);
     } else if (cmd?.op === "add") {
-      const pk = projectKey(loadProjects(), cmd.project);
+      const pk = addProjectKey(load(), loadProjects(), cmd);
       const owned = pk.error ? null : ownerError(loadProjects(), pk.id);
       const r = pk.error ? pk : owned ? { error: owned } : addCommand(load(), cmd, pk.id, undefined, assigneeCtx());
       if (!r.error) setShared(KEY, r.tasks);

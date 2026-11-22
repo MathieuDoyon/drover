@@ -30,7 +30,7 @@ usage: drover tasks [tag|column] [--project <id|name>]   list tasks (id, column,
        drover config                              list the settings an agent may change on the owner's request, with the value in force (needs protocol 5)
        drover config max-parallel [<n>]           show / set drover-runs.max_parallel (1-10, squad runs active at once for each project; applies at once).
                                                   RAISE IT ONLY WHEN THE OWNER ASKS in plain text in your terminal, never to unblock yourself. The change is announced to the owner
-       drover add "<title>" [--desc "<text>"] [--tag <t>]… [--column backlog|ready] [--priority P0-P3] [--project <id|name>] [--assignee <agent|squad>:<id>] [--parent <T-…>]
+       drover add "<title>" [--desc "<text>"] [--tag <t>]… [--column backlog|ready] [--priority P0-P3] [--project <id|name>] [--assignee <agent|squad>:<id>] [--parent <T-…>]   (--parent alone puts the card in the parent's project)
        drover move <T-…> <backlog|ready|in-progress|review|blocked|done>   (an agent cannot move to done: the owner does)
        drover next                                queue mode: free slots + Ready cards of your project (starts nothing)
        drover archive <T-…>                               archive a task (like the editor's Archive button)
@@ -56,7 +56,8 @@ import json, sys
 path, what, *args = sys.argv[1:]
 try: d = json.load(open(path))
 except FileNotFoundError: d = {}
-tasks = [t for t in d.get("drover.tasks", []) if not t.get("archived")]
+all_tasks = d.get("drover.tasks", [])
+tasks = [t for t in all_tasks if not t.get("archived")]
 # Same names as the board (store.js COLUMNS: label lowercased, spaces -> hyphens). Stored ids (todo, doing) stay valid input; mods/_test/drover-cli-columns.test.js checks this table against store.js.
 COLUMNS = [("backlog", "Backlog"), ("todo", "Ready"), ("doing", "In progress"), ("review", "Review"), ("blocked", "Blocked"), ("done", "Done")]
 def cname(i): return next((l.lower().replace(" ", "-") for c, l in COLUMNS if c == i), i)
@@ -98,6 +99,9 @@ elif what == "task":
     if t.get("tags"): print("tags: " + ", ".join(t["tags"]))
     pr = find(t["project"]) if t.get("project") else None
     if pr: print(f'project: {pr["name"]} ({pr["id"]}) repo {repo(pr)}')
+    if t.get("parent"):  # an archived parent still shows; only a deleted one is not found
+        pc = next((x for x in all_tasks if x["id"] == t["parent"]), None)
+        print(f'parent: {t["parent"]} {pc["title"]}' if pc else f'parent: {t["parent"]} (not found)')
     a = t.get("assignee")
     if isinstance(a, dict) and a.get("kind") and a.get("id"): print(f'assignee: {a["kind"]}:{a["id"]}')
     if t.get("source"): print("source: " + t["source"].get("url", ""))

@@ -210,3 +210,53 @@ test("add validates supplied priority, tags and parent strictly: bad => error, n
   assert.match(await send({ op: "add", title: "good", project: "alpha", priority: "P0", tags: ["#X"], parent: id.p }), /^ok: /);
   assert.deepEqual([tasks().at(-1).priority, tasks().at(-1).tags, tasks().at(-1).parent], ["P0", ["x"], id.p]);
 });
+
+// T-MWO3AW7QXPA: `add --parent` without --project takes the parent's project; an explicit project is never overridden.
+test("add with a parent and no project lands in the parent's project (omitted, '' and null alike)", async () => {
+  const id = world();
+  for (const project of [undefined, "", null]) {
+    const r = await send({ op: "add", title: `kid-${String(project)}`, parent: id.p, ...(project === undefined ? {} : { project }) });
+    assert.match(r, /^ok: /, r);
+    const kid = tasks().find((t) => t.title === `kid-${String(project)}`);
+    assert.equal(kid.project, "P-A"); assert.equal(kid.parent, id.p);
+  }
+});
+test("add with a project-less parent and no project stays project-less", async () => {
+  const id = world();
+  host.state[KEY] = [...tasks(), ...S.add([], { title: "loose", column: "todo" }).tasks];
+  const loose = tasks().find((t) => t.title === "loose").id;
+  assert.match(await send({ op: "add", title: "kid", parent: loose }), /^ok: /);
+  assert.equal(tasks().find((t) => t.title === "kid").project ?? null, null);
+});
+test("add: an explicit project that differs from the parent's is refused, with the reason and the way out", async () => {
+  const id = world(); const n = tasks().length;
+  const r = await send({ op: "add", title: "kid", parent: id.p, project: "beta" });
+  assert.match(r, /^error: .*Parent .* is in project alpha.*beta/s, r);
+  assert.match(r, /--project/);
+  assert.match(await send({ op: "add", title: "kid2", parent: id.p, project: "none" }), /^error: .*alpha.*no project.*--project none|^error: .*alpha.*no project/s);
+  assert.equal(tasks().length, n);
+});
+test("add: a parent that does not exist still says so, and nothing is added", async () => {
+  world(); const n = tasks().length;
+  assert.match(await send({ op: "add", title: "kid", parent: "T-NOPE" }), /^error: Parent T-NOPE not found/);
+  assert.equal(tasks().length, n);
+});
+test("add: inference does not bypass the remote-owner guard", async () => {
+  const id = world();
+  host.state[KEY] = tasks().map((t) => (t.id === id.p ? { ...t, project: "P-R" } : t)); const n = tasks().length;
+  assert.match(await send({ op: "add", title: "kid", parent: id.p }), /^error: .*lives on box1/);
+  assert.equal(tasks().length, n);
+});
+test("store.addProjectKey: infers only when the project is omitted and the parent exists", () => {
+  const ts = [{ id: "T-P", project: "P-A" }, { id: "T-L" }];
+  const ps = projects;
+  assert.deepEqual(S.addProjectKey(ts, ps, { parent: "T-P" }), { id: "P-A" });
+  assert.deepEqual(S.addProjectKey(ts, ps, { parent: "T-P", project: "" }), { id: "P-A" });
+  assert.deepEqual(S.addProjectKey(ts, ps, { parent: "T-L" }), { id: null });
+  assert.match(S.addProjectKey(ts, ps, { parent: "T-P", project: "beta" }).error, /in project alpha .* project beta.*--project alpha/);
+  assert.match(S.addProjectKey(ts, ps, { parent: "T-P", project: "none" }).error, /in project alpha .* no project/);
+  assert.deepEqual(S.addProjectKey(ts, ps, { parent: "T-P", project: "alpha" }), { id: "P-A" });
+  assert.match(S.addProjectKey(ts, ps, { parent: "T-L", project: "alpha" }).error, /in no project .*drop --project/);
+  assert.deepEqual(S.addProjectKey(ts, ps, { parent: "T-X" }), { id: null });
+  assert.deepEqual(S.addProjectKey(ts, ps, { title: "x" }), { id: null });
+});

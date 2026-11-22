@@ -41,6 +41,12 @@ beforeEach(async () => {
         if (dead) t.sawDead = true;
         return { code: 0, stdout: JSON.stringify({ address: args[1], state: dead ? "exited" : "live", status: dead || real === "running" ? null : real, argv: [...t.argv, t.task], ...(t.b.noRecord ? {} : { first_message: { sent: t.b.delivered(t.reads) } }) }), stderr: "" };
       }
+      if (args[0] === "read") { // the screen of an opened terminal (read-only); a behavior may script it, fail it or throw
+        const t = sim.terms.get(args[1]);
+        if (t?.b.readThrows) throw new Error("hc read crashed");
+        if (t?.b.readFails) return { code: 1, stdout: "", stderr: "no screen" };
+        return { code: 0, stdout: t?.b.screen?.(t.reads) ?? "", stderr: "" };
+      }
       return { code: 0, stdout: "", stderr: "" };
     },
     exec: async (cmd, args) => {
@@ -372,4 +378,98 @@ test("T-MWM5CE02H07: when hc cannot answer, a kill is not confirmed (fail closed
   const r = await go();
   assert.equal(r.failClosed, true);
   assert.equal(opened().length, 1);
+});
+
+// ---- T-MWQGKMUG8R3: Codex waits on its Hooks trust screen. The barrier says so at once instead of timing out "not ready". Nothing is ever typed.
+const OVERVIEW = ["  plugin contents changed; hook approval required", "", "  ⚠ 6 hooks need review before they can run", "", "  t trust all · enter review · esc close"].join("\n");
+const DETAIL = ["  PreToolUse hooks", "  1 hook needs review before it can run", "  Trust  Modified since last trusted - review required", "", "  t trust · esc back"].join("\n");
+const BANNER = ["  >_ OpenAI Codex (v0.9)", "  model: gpt-6.1-sol   /model to change", "  directory: /wt", "", "  ⠋ Starting…"].join("\n");
+const QUOTED = ["  assistant: the old bug said: plugin contents changed; hook approval required", "  and: 6 hooks need review before they can run", "  (that was fixed last week)"].join("\n");
+const TRUST_MSG = /hooks trust screen/i;
+const reads = () => sim.hc.filter((a) => a[0] === "read");
+const typed = () => sim.hc.filter((a) => ["send", "keys", "key", "type"].includes(a[0]));
+
+test("T-MWQGKMUG8R3: trustScreen accepts the overview and the detail screen, and nothing weaker", () => {
+  assert.equal(io.trustScreen(OVERVIEW), true);
+  assert.equal(io.trustScreen(DETAIL), true);
+  assert.equal(io.trustScreen(OVERVIEW.toUpperCase()), true, "case does not matter");
+  assert.equal(io.trustScreen("plugin contents changed; hook approval required"), false, "the phrase alone");
+  assert.equal(io.trustScreen("1 hook needs review before it can run"), false, "the phrase alone (detail)");
+  assert.equal(io.trustScreen(QUOTED), false, "quoted in transcript text without controls");
+  assert.equal(io.trustScreen("hook approval required\n t trust · esc back"), true, "detail controls need the 'esc back' + 't trust' pair");
+  assert.equal(io.trustScreen("hook approval required\n esc back"), false, "'esc back' alone is not the pair");
+  assert.equal(io.trustScreen("esc close  t trust all"), false, "controls alone");
+  assert.equal(io.trustScreen(BANNER), false);
+  for (const x of [null, undefined, "", 5, {}]) assert.equal(io.trustScreen(x), false);
+});
+
+for (const [label, screen] of [["overview", OVERVIEW], ["detail", DETAIL]]) {
+  test(`T-MWQGKMUG8R3: a terminal with no agent status that shows the Hooks ${label} screen fails at once, naming the dialog; one kill, no fallback, nothing typed`, async () => {
+    sim.plan.push({ status: () => "running", delivered: () => false, screen: () => screen });
+    const r = await go();
+    assert.match(r.error, TRUST_MSG);
+    assert.match(r.error, /hook approval required/i);
+    assert.match(r.error, /Lead \(t1\) did not resume/, "names the member and its old address");
+    assert.equal(opened().length, 1, "the frozen command would hit the same screen: no second open");
+    assert.deepEqual(killed(), opened());
+    assert.deepEqual(typed(), [], "no key or text is ever sent");
+    assert.ok(sim.terms.get(opened()[0]).reads <= 2, "returned on the first poll, not after the 6 tries");
+    assert.ok(reads().every((a) => a.join(" ") === `read ${opened()[0]} --lines 0`), JSON.stringify(reads()));
+  });
+}
+
+test("T-MWQGKMUG8R3: a slow start whose screen is the ordinary Codex banner still resumes", async () => {
+  sim.plan.push({ status: (n) => (n < 4 ? "running" : "idle"), delivered: (n) => n >= 5, screen: () => BANNER });
+  const r = await go();
+  assert.equal(r.error, undefined, r.error);
+  assert.deepEqual(killed(), []);
+  assert.ok(reads().length >= 1, "the screen was looked at while there was no agent status");
+});
+
+test("T-MWQGKMUG8R3: the phrase quoted in transcript text (no controls) is not a dialog: the normal readiness outcome stays", async () => {
+  sim.plan.push({ status: (n) => (n < 3 ? "running" : "idle"), delivered: () => true, screen: () => QUOTED });
+  const r = await go();
+  assert.equal(r.error, undefined, r.error);
+  assert.deepEqual(killed(), []);
+});
+
+test("T-MWQGKMUG8R3: a failed or throwing hc read is no evidence: the normal timeout error and the fallback stay", async () => {
+  sim.plan.push({ status: () => "running", delivered: () => false, readFails: true }, { status: () => "running", delivered: () => false, readThrows: true });
+  const r = await go();
+  assert.match(r.error, /not ready/);
+  assert.doesNotMatch(r.error, TRUST_MSG);
+  assert.equal(opened().length, 2, "both commands were tried");
+  assert.deepEqual(killed().sort(), opened().sort());
+});
+
+test("T-MWQGKMUG8R3: the screen is not read when the status is an agent status, gone or reported blocked", async () => {
+  sim.plan.push({ status: () => "idle", delivered: () => true, screen: () => OVERVIEW });
+  assert.equal((await go()).error, undefined);
+  assert.deepEqual(reads(), [], "READY");
+  sim.plan.push({ status: () => "blocked", delivered: () => false, screen: () => OVERVIEW }, { status: () => "gone", delivered: () => false, screen: () => OVERVIEW });
+  const r = await go();
+  assert.equal(r.source, undefined, "both failed");
+  assert.deepEqual(reads(), [], "blocked and gone are decided by the status alone");
+});
+
+test("T-MWQGKMUG8R3: the trust screen ends the candidate loop: the killed terminal is the only one, and it is reported as killed", async () => {
+  sim.plan.push({ status: () => "running", delivered: () => false, screen: () => OVERVIEW }, OK);
+  const r = await go();
+  assert.match(r.error, TRUST_MSG);
+  assert.equal(opened().length, 1);
+  assert.equal(r.failClosed, undefined);
+  assert.deepEqual(r.killed, opened());
+});
+
+test("T-MWQGKMUG8R3: the Hooks list screen ('N hooks need review', event table, esc close; no 'hook approval required' line) is the trust screen too", async () => {
+  const LIST = ["  Hooks", "  Lifecycle hooks from config and enabled plugins.", "", "  ⚠ 3 hooks need review before they can run.", "",
+    "  Event           Source        Status", "  PreToolUse      plugin:a      needs review", "  PostToolUse     plugin:a      needs review", "  SessionStart    config        needs review", "",
+    "  t trust all · enter review · esc close"].join("\n");
+  assert.equal(io.trustScreen(LIST), true);
+  sim.plan.push({ status: () => "running", delivered: () => false, screen: () => LIST });
+  const r = await go();
+  assert.ok(r.error.includes(io.TRUST_ERROR), r.error);
+  assert.equal(opened().length, 1);
+  assert.deepEqual(killed(), opened());
+  assert.deepEqual(typed(), []);
 });

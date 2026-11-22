@@ -5,7 +5,7 @@ import { readFileSync, writeFileSync, appendFileSync, existsSync, readdirSync, r
 import { spawnSync, spawn } from "node:child_process";
 import { join, posix } from "node:path";
 import { tmpdir } from "node:os";
-import { until, RT, privateWords, wholeWord, GEN, CURRENT, ENTRY, TASKS, CLI, M, SHIPPED, T_OLD, T_NEW, T_LATER, cleanup, machine, clone, source, redate, dateAll, edit, o, holdFiles, states, noWrites, noTilde, manifestOf, curId, sha, sha256, fresh, finder, line, forEachPoint, deferred, drainTicks, killSet, killPoints, assertSane, newest, DEAD } from "./machines-install-fixture.js";
+import { spawnTracked, until, RT, privateWords, wholeWord, GEN, CURRENT, ENTRY, TASKS, CLI, M, SHIPPED, T_OLD, T_NEW, T_LATER, cleanup, machine, clone, source, redate, dateAll, edit, o, holdFiles, states, noWrites, noTilde, manifestOf, curId, sha, sha256, fresh, finder, line, forEachPoint, deferred, drainTicks, killSet, killPoints, assertSane, newest, DEAD } from "./machines-install-fixture.js";
 
 // ---------------------------------------------------------------------------------------------------------- 2. the finder
 test("finder: node on PATH wins (tier path); exit status is 0; home= is the physical home", () => {
@@ -270,10 +270,10 @@ test("launcher: an invocation that started on an old generation keeps using that
   const { m, s, install } = await fresh();
   const a = curId(m);
   const shim = join(m.root, "node-shim"), rec = join(m.root, "node-argv1"), started = join(m.root, "started"), release = join(m.root, "release");
-  writeFileSync(shim, `#!/bin/sh\necho "$1" > "${rec}"\n: > "${started}"\nwhile [ ! -e "${release}" ]; do sleep 0.01; done\nexec ${process.execPath} "$@"\n`);
+  writeFileSync(shim, `#!/bin/sh\necho "$1" > "${rec}"\n: > "${started}"\nn=0; while [ ! -e "${release}" ]; do sleep 0.01 || exit 1; n=$((n+1)); [ $n -lt 6000 ] || exit 1; done\nexec ${process.execPath} "$@"\n`);
   chmodSync(shim, 0o755);
   mkdirSync(m.appHome, { recursive: true });
-  const child = spawn(join(m.home, ENTRY), ["agents", "export"], { cwd: m.home, env: { ...m.env, HERDR_APP_HOME: m.appHome, DROVER_NODE: shim }, stdio: "ignore" });
+  const child = spawnTracked(join(m.home, ENTRY), ["agents", "export"], { cwd: m.home, env: { ...m.env, HERDR_APP_HOME: m.appHome, DROVER_NODE: shim }, stdio: "ignore" });
   const exited = new Promise((r) => child.on("close", r));
   await until(() => existsSync(started), "the old invocation reached its node call");
   edit(s, "store.js", T_LATER);

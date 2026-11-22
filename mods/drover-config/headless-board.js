@@ -11,7 +11,7 @@ import os from "node:os";
 import path from "node:path";
 import { createHash, randomBytes } from "node:crypto";
 import { ownerError } from "./remote.js";
-import { addCommand, update, applyCommand, protocolFields, inboxGate, projectKey, projectAddRequest, addProject, noteIds, list as normTasks, NOTE_KINDS, reviewTextError, revOf } from "./store.js";
+import { addCommand, addProjectKey, update, applyCommand, protocolFields, inboxGate, projectKey, projectAddRequest, addProject, noteIds, list as normTasks, NOTE_KINDS, reviewTextError, revOf } from "./store.js";
 
 export const SCHEMA = 1;
 export const CLI = "drover-headless";
@@ -199,7 +199,7 @@ function dispatch(env, state, t) {
   const withProjects = (projects, result) => ({ state: { ...state, projects }, result });
   switch (env.op) {
     case "add": {
-      const pk = projectKey(state.projects, env.project);
+      const pk = addProjectKey(state.tasks, state.projects, env);
       if (pk.error) return { error: pk.error };
       const r = addCommand(state.tasks, env, pk.id, t, assigneeCtx(state));
       return r.error ? { error: r.error } : withTasks(r.tasks, cardResult(r.task));

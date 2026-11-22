@@ -166,3 +166,18 @@ test("REVIEW-1 F1: a reply larger than the pipe buffer arrives whole (the entry 
   const j = json(r);
   assert.equal(j.tasks[0].desc.length, 300000);
 });
+
+// T-MWO3AW7QXPA: the headless writer infers the parent's project too.
+test("add with a parent and no project takes the parent's project; an explicit other project is refused", () => {
+  const dir = tmp();
+  const a = good(run(dir, ["project", "add"], payload({ name: "Alpha", repo: "/some/repo", branch: "main" }))).result.id;
+  good(run(dir, ["project", "add"], payload({ name: "Beta", repo: "/other/repo", branch: "main" })));
+  const parent = good(run(dir, ["add"], payload({ title: "parent", project: "Alpha" }))).result.id;
+  const kid = good(run(dir, ["add"], payload({ title: "kid", parent }))).result.id;
+  const tasks = json(run(dir, ["tasks", "--json"])).tasks;
+  assert.equal(tasks.find((t) => t.id === kid).project, a);
+  assert.equal(tasks.find((t) => t.id === kid).parent, parent);
+  const bad = run(dir, ["add"], payload({ title: "kid2", parent, project: "Beta" }));
+  assert.equal(bad.status, 1);
+  assert.match(json(bad).error, /Parent .* is in project Alpha/);
+});

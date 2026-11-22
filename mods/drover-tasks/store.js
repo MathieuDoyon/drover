@@ -627,6 +627,21 @@ export function projectKey(projects, key) {
   return p ? { id: p.id } : { error: `no project ${key} (see: drover projects)` };
 }
 
+// `drover add`: the project a new card goes to. No project given + a parent that exists -> the parent's project. A project given is never overridden;
+// when it differs from the parent's, say both and the way out (a parent and its children share one project).
+export function addProjectKey(tasks, projects, cmd) {
+  const pk = projectKey(projects, cmd.project);
+  if (pk.error) return pk;
+  const given = !(cmd.project == null || cmd.project === "");
+  const parent = typeof cmd.parent === "string" && cmd.parent && cmd.parent !== "none" ? tasks.find((t) => t.id === cmd.parent) : null;
+  if (!parent) return pk;
+  const pp = parent.project ?? null;
+  if (!given) return { id: pp };
+  if (pk.id === pp) return pk;
+  const name = (id) => (id ? `project ${projects.find((x) => x.id === id)?.name ?? id}` : "no project");
+  return { error: `Parent ${parent.id} is in ${name(pp)} but this card would be in ${name(pk.id)}: a parent and its children share one project; ${pp ? `use --project ${projects.find((x) => x.id === pp)?.name ?? pp} or drop --project` : "drop --project (or pass --project none)"}` };
+}
+
 // Assignee choices for the create modal: squads, then agents. Names match the ▶ picker.
 export function runnerChoices(cfg) {
   const name = (id) => cfg.agents.find((a) => a.id === id)?.name ?? id;

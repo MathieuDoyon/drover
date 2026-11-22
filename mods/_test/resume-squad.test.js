@@ -171,6 +171,17 @@ test("a blocked resumed terminal is a failed attempt that notifies the person an
   assert.ok(sim.hc.every((a) => a[0] === "get" || a[0] === "label"));
 });
 
+test("T-MWQGKMUG8R3: a member on Codex's Hooks trust screen fails the resume at once with that member and its old address named; nothing is typed", async () => {
+  const SCREEN = "plugin contents changed; hook approval required\n6 hooks need review before they can run\nt trust all · enter review · esc close";
+  sim.plan.push({ status: () => "running", delivered: () => false, screen: () => SCREEN });
+  const r = await io.resumeSquad("R-OLD");
+  assert.match(r.error, /Inspector \(t2\) did not resume: .*hooks trust screen/i);
+  assert.equal(sim.opened().length, 1, "no fallback, no other member opened");
+  assert.deepEqual(sim.killed(), sim.opened());
+  assert.deepEqual(sim.hc.filter((a) => ["send", "keys", "key", "type"].includes(a[0])), []);
+  assert.equal(io.attemptOf("R-OLD"), null, "rolled back as before");
+});
+
 test("the leader fails: every member is killed too, the claim is released, no run is saved", async () => {
   sim.plan.push(OK, OK, { status: () => "gone", delivered: () => false }, { status: () => "gone", delivered: () => false });
   const r = await io.resumeSquad("R-OLD");

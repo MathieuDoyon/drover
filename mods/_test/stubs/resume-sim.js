@@ -18,6 +18,7 @@ export function makeSim(host, { first = 100 } = {}) {
       return { code: 0, stdout: JSON.stringify({ address: args[1], state: dead ? "exited" : "live", status: dead || real === "running" ? null : real, argv: [...t.argv, t.task],
         ...(t.b.noRecord ? {} : { first_message: { sent: t.b.delivered(t.reads) } }) }), stderr: "" };
     }
+    if (args[0] === "read") { const t = sim.terms.get(args[1]); return { code: 0, stdout: t?.b.screen?.(t.reads) ?? "", stderr: "" }; } // the screen of an opened terminal; a behavior may script it
     return { code: 0, stdout: "", stderr: "" };
   };
   host.exec = async (cmd, args, opts) => {
