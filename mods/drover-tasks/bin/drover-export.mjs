@@ -1,4 +1,4 @@
-// Headless `drover agents export`: reads <home>/shared.json and the soul files (read-only) and runs the SAME core as the mods
+// Headless `drover agents export`: reads <home>/shared.json and the soul files (read-only; a missing saved herd means the default herd, as in the mods) and runs the SAME core as the mods
 // (../herd-export.js). It never opens an environment file (agents/*.json) and never writes. The shell script is only a transport.
 // Usage: node drover-export.mjs --home <dir> [--agent <id>]... [--squad <id>]...
 // Output (stdout): "ok: exported …" header lines, "---", then the file; or a line starting "error:" and exit 1.
@@ -18,12 +18,15 @@ if (!home) fail("error: --home is required");
 
 // The core is plain ESM with two small imports (runs.js, store.js chain), none of them Herdr-only. A Node that cannot load it (too old to
 // run a .js file as ESM) exits 3, and the shell falls back to an open Drover mod.
-let HE;
-try { HE = await import("../herd-export.js"); } catch { fail("error: this node cannot load the export core", 3); }
+let HE, RUNS;
+try { HE = await import("../herd-export.js"); RUNS = await import("../runs.js"); } catch { fail("error: this node cannot load the export core", 3); }
 
-let cfg;
-try { cfg = JSON.parse(readFileSync(`${home}/shared.json`, "utf8"))["drover.agents"]; } catch { cfg = undefined; }
-if (!cfg || !Array.isArray(cfg.agents) || !Array.isArray(cfg.squads)) fail("error: no saved agents on this machine (open the Squads screen once to save them)");
+// Same rule as the mods (loadConfig): no saved herd (no file, no key, a malformed value) exports the shipped defaults, from the same runs.js.
+// A shared.json that exists but cannot be read or parsed is an error: defaults must not stand in for a damaged board.
+let raw;
+try { raw = JSON.parse(readFileSync(`${home}/shared.json`, "utf8"))["drover.agents"]; }
+catch (e) { if (e?.code !== "ENOENT") fail("error: cannot read shared.json"); }
+const cfg = RUNS.config(raw);
 
 const souls = {};
 try {

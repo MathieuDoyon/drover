@@ -240,13 +240,16 @@ agents() {
       # Headless first: when node is installed, the read-only export script runs the same JS core on shared.json (no mod needed, no env file opened).
       # Otherwise the export goes through an open Drover mod (the inbox op). Either way the shell validates nothing.
       node_bin="${DROVER_NODE:-node}" # `here` (this script's physical folder, helpers and core next to it) is resolved once, at the top
-      res=""; nrc=9   # 9: node not used; 3: this node cannot load the core (use the inbox); else the script's own exit code
+      skipnote=""; res=""; nrc=9   # 9: node not used; 3: this node cannot load the core (use the inbox); else the script's own exit code
       if command -v "$node_bin" >/dev/null 2>&1 && [ -f "$here/drover-export.mjs" ] && [ -f "$here/../herd-export.js" ]; then
         nargs=(--home "$home")
         while IFS= read -r x; do [ -z "$x" ] || nargs+=(--agent "$x"); done <<<"$ag"
         while IFS= read -r x; do [ -z "$x" ] || nargs+=(--squad "$x"); done <<<"$sq"
         nrc=0; res="$("$node_bin" "$here/drover-export.mjs" "${nargs[@]}")" || nrc=$?
         if [ "$nrc" -ne 0 ] && [ "$nrc" -ne 3 ]; then printf '%s\n' "$res" >&2; exit 1; fi
+        [ "$nrc" -ne 3 ] || skipnote="note: this node cannot load the export core; exported through an open Drover mod instead of the headless route"
+      else
+        skipnote="note: node not found ($node_bin) or the export helper is missing; exported through an open Drover mod instead of the headless route (put node on PATH or set DROVER_NODE)"
       fi
       if [ "$nrc" -ne 0 ]; then
         body="$(agents_cmd export "$ag" "$sq")" || exit 1
@@ -257,6 +260,7 @@ agents() {
       fi
       case "$res" in ok:*) ;; *) printf '%s\n' "$res" >&2; exit 1 ;; esac
       printf '%s\n' "$res" | sed '/^---$/,$d' >&2   # header and warnings
+      [ -z "$skipnote" ] || echo "$skipnote" >&2
       payload="$(printf '%s\n' "$res" | sed '1,/^---$/d')"
       if [ -n "$out" ]; then
         # Created exclusively with mode 0600 at the final write: an existing file or link (also one made while we waited) is never touched.

@@ -120,10 +120,7 @@ test("headless export: no mod open, node reads shared.json through the core; sam
   assert.deepEqual(viaNode.agents, viaMod.agents);
 });
 
-test("headless export: filters, a missing config, a secret and a bad id are errors from the core", async () => {
-  const none = await cli(["agents", "export"], { DROVER_AGENTS_WAIT: "1" });
-  assert.notEqual(none.code, 0);
-  assert.match(none.stderr, /^error:/);
+test("headless export: filters, a secret and a bad id are errors from the core", async () => {
   const GHP = "gh" + "p_" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8";
   writeFileSync(join(home, "shared.json"), JSON.stringify({ "drover.agents": { ...base(), agents: [...base().agents, agent("leaky", { instructions: `k ${GHP}` })] } }));
   const leak = await cli(["agents", "export"], { DROVER_AGENTS_WAIT: "1" });
@@ -263,4 +260,62 @@ test("agents export passes the protocol gate at 4 and at 5 (a minimum, not an eq
     assert.equal(r.stdout.trim(), '{"a":1}');
     clearInterval(responder); responder = null;
   }
+});
+
+// ---- T-MWKX53UF8OI: a machine with no saved agents exports the default herd, like the mod does
+const RUNS = await import("../_lib/runs.js");
+const DEF_IDS = { agents: RUNS.DEFAULT_AGENTS.map((a) => a.id), squads: RUNS.DEFAULT_SQUADS.map((q) => q.id) };
+for (const [label, shared] of [
+  ["no shared.json", null],
+  ["no drover.agents key", { "drover.tasks": [] }],
+  ["null config", { "drover.agents": null }],
+  ["agents not an array", { "drover.agents": { agents: "x", squads: [] } }],
+  ["squads not an array", { "drover.agents": { agents: [], squads: {} } }],
+]) {
+  test(`headless export, ${label}: the default herd, nothing sent to the inbox`, async () => {
+    if (shared) writeFileSync(join(home, "shared.json"), JSON.stringify(shared));
+    for (const n of ["_herd", ...RUNS.DEFAULT_AGENTS.map((a) => a.soul).filter(Boolean)]) writeFileSync(join(home, `mods/drover-agents/souls/${n}.md`), n);
+    const r = await cli(["agents", "export"], { DROVER_AGENTS_WAIT: "1" });
+    assert.equal(r.code, 0, r.stderr);
+    const f = JSON.parse(r.stdout);
+    assert.deepEqual(f.agents.map((a) => a.id), DEF_IDS.agents);
+    assert.deepEqual(f.squads.map((q) => q.id), DEF_IDS.squads);
+    assert.deepEqual(readdirSync(inbox), []);
+  });
+}
+
+test("headless export: an intentionally empty saved herd stays empty; a corrupt shared.json is an error, not the defaults", async () => {
+  writeFileSync(join(home, "shared.json"), JSON.stringify({ "drover.agents": { agents: [], squads: [] } }));
+  const empty = await cli(["agents", "export"], { DROVER_AGENTS_WAIT: "1" });
+  assert.notEqual(empty.code, 0, "the core refuses an empty herd; the defaults do not replace it");
+  assert.match(empty.stderr, /^error:/);
+  assert.ok(!empty.stderr.includes("trail-boss") && !empty.stdout.includes("trail-boss"));
+  writeFileSync(join(home, "shared.json"), "{not json");
+  const bad = await cli(["agents", "export"], { DROVER_AGENTS_WAIT: "1" });
+  assert.notEqual(bad.code, 0);
+  assert.match(bad.stderr, /^error: cannot read shared\.json/);
+  assert.equal(bad.stdout.trim(), "");
+});
+
+test("headless export, no saved agents: same herd as the consumer's export (parity)", async () => {
+  for (const n of ["_herd", ...RUNS.DEFAULT_AGENTS.map((a) => a.soul).filter(Boolean)]) writeFileSync(join(home, `mods/drover-agents/souls/${n}.md`), n);
+  const viaNode = JSON.parse((await cli(["agents", "export"], { DROVER_AGENTS_WAIT: "1" })).stdout);
+  delete host.state[CFG];
+  startConsumer();
+  const viaMod = JSON.parse((await cli(["agents", "export"], NO_NODE)).stdout);
+  assert.deepEqual(viaNode.agents, viaMod.agents);
+  assert.deepEqual(viaNode.squads, viaMod.squads);
+});
+
+test("no node: the export through the mod says the headless route was skipped (stderr only; stdout stays the file)", async () => {
+  startConsumer();
+  const r = await cli(["agents", "export", "--agent", "scout"], NO_NODE);
+  assert.equal(r.code, 0, r.stderr);
+  assert.match(r.stderr, /^ok: exported 1 agent[^\n]*\n(.*\n)*note: node not found \(\/nonexistent\/node\)/);
+  assert.deepEqual(JSON.parse(r.stdout).agents.map((a) => a.id), ["scout"]);
+  const fake = join(work, "node-3"); writeFileSync(fake, "#!/bin/sh\nexit 3\n"); chmodSync(fake, 0o755);
+  const r3 = await cli(["agents", "export", "--agent", "scout"], { DROVER_NODE: fake });
+  assert.match(r3.stderr, /note: this node cannot load the export core/);
+  const ok = await cli(["agents", "export", "--agent", "scout"], { DROVER_AGENTS_WAIT: "1" });
+  assert.doesNotMatch(ok.stderr, /note:/);
 });
