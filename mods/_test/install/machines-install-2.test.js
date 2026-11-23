@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { readFileSync, writeFileSync, appendFileSync, existsSync, rmSync, chmodSync, statSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { join } from "node:path";
-import { RT, GEN, CURRENT, ENTRY, FINDER, CLI, M, SHIPPED, T_NEW, T_LATER, cleanup, machine, clone, source, redate, dateAll, edit, o, H, holdOf, states, noWrites, noTilde, manifestOf, curId, sha, sha256, fresh, finder, line, forEachPoint, assertSane, newest, DEAD, fileStates, stampOf } from "./machines-install-fixture.js";
+import { RT, GEN, CURRENT, ENTRY, FINDER, CLI, M, SHIPPED, T_NEW, T_LATER, cleanup, machine, clone, source, redate, dateAll, edit, o, H, holdOf, states, noWrites, noTilde, manifestOf, curId, sha, sha256, fresh, finder, line, forEachPoint, assertSane, newest, DEAD, fileStates, stampOf } from "../machines-install-fixture.js";
 
 test("finder: inside the manager tier the newest version wins (24 over 22 over 9, numerically)", () => {
   const m = machine({ managerNode: "nvm" });

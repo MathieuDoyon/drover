@@ -2,6 +2,7 @@
 # Copy the shared library into each drover-* mod (before the tests: the copies are tested), run the tests, link the mods into Herdr, check them.
 # Never replaces a real folder in the Herdr home: only its own symlinks.
 # DROVER_SKIP_TESTS=1 skips the node test stage. The stage runs every test file (the glob below), never a hand list.
+# The glob does not recurse: the slow install tests live in _test/install/ and are run by hand (docs/development.md).
 # DROVER_SKIP_MODS="drover-jira drover-github" (space list) leaves those mods out and removes their symlink; default empty = all mods.
 # Herdr hot-reloads a mod when any of its files is saved, and a symlink that points at a deleted worktree breaks the mod.
 # So a run changes only what differs (a file with equal bytes keeps its mtime, a link already right is left alone), and a run

@@ -26,7 +26,7 @@ import { tmpdir, availableParallelism } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const SRC = join(dirname(fileURLToPath(import.meta.url)), "..");
+const SRC = join(dirname(fileURLToPath(import.meta.url)), "../..");
 const INSTALL = process.env.SWEEP_INSTALL_SH || join(SRC, "install.sh");
 const made = [];
 after(() => { for (const d of made) rmSync(d, { recursive: true, force: true }); });

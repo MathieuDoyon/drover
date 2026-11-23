@@ -5,7 +5,7 @@ import { readFileSync, writeFileSync, existsSync, chmodSync, mkdirSync, symlinkS
 import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { RT, GENERIC_LEAKS, wholeWord, runtimePrivateWords, SHARE, GEN, CURRENT, REPO, TASKS, FINDER, CLI, M, T_NEW, T_LATER, cleanup, machine, clone, source, dateAll, edit, o, holdDir, holdFiles, noWrites, noTilde, manifestOf, curId, fresh, finder, line, forEachPoint, killSet, newest, DEAD } from "./machines-install-fixture.js";
+import { RT, GENERIC_LEAKS, wholeWord, runtimePrivateWords, SHARE, GEN, CURRENT, REPO, TASKS, FINDER, CLI, M, T_NEW, T_LATER, cleanup, machine, clone, source, dateAll, edit, o, holdDir, holdFiles, noWrites, noTilde, manifestOf, curId, fresh, finder, line, forEachPoint, killSet, newest, DEAD } from "../machines-install-fixture.js";
 
 test("finder: platform fixtures. No hasher at all, no timeout(1): exit 0 and no hasher line; shasum only: hasher=shasum; sha256sum only: hasher=sha256sum", () => {
   const none = finder(machine({ hasher: "none", timeout: false }));
@@ -223,7 +223,7 @@ test("review 5: doctor on an offline machine (no finder output) returns FAIL che
   assert.ok(d.checks.length >= 4 && d.checks.every((c) => ["ok", "FAIL", "WARN", "skip"].includes(c.status)));
   assert.equal(d.checks.find((c) => c.id === "link").status, "FAIL");
   assert.match(formatDoctor(d, { machine: "m1" }), /^doctor: \d+ ok, \d+ warn, [1-9]\d* fail$/m);
-  const { main } = await import("../drover-tasks/bin/drover-machines.mjs");
+  const { main } = await import("../../drover-tasks/bin/drover-machines.mjs");
   const app = machine().appHome;
   const prev = process.env.HERDR_APP_HOME;
   process.env.HERDR_APP_HOME = app;

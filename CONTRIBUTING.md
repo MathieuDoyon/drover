@@ -11,7 +11,7 @@ Thanks for helping. Drover is a set of Herdr mods (plain JavaScript) plus a smal
 ## Rules
 
 - Edit the shared library only in `mods/_lib`. `install.sh` copies it into every `drover-*` mod; never edit the copies.
-- Tests first: a behaviour change needs a test that fails on the old code and passes on the new. Tests live in `mods/_lib/*.test.js` and `mods/_test/`; add new files to the list in `mods/install.sh`.
+- Tests first: a behaviour change needs a test that fails on the old code and passes on the new. Tests live in `mods/_lib/*.test.js` and `mods/_test/`; a new `*.test.js` file there is picked up by the glob in `mods/install.sh` and CI. The slow install tests live in `mods/_test/install/` and are run by hand; see `docs/development.md`.
 - Keep changes small and in the style of the code around them. No new dependencies without a reason.
 - Never commit credentials, tokens, runtime data or private logs.
 

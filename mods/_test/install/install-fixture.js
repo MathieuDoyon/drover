@@ -10,7 +10,7 @@ import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const SRC = join(dirname(fileURLToPath(import.meta.url)), "..");
+const SRC = join(dirname(fileURLToPath(import.meta.url)), "../..");
 const sh = (cwd, cmd, args, env = {}) => spawnSync(cmd, args, { cwd, encoding: "utf8", env: { ...process.env, ...env } });
 const git = (cwd, ...a) => { const r = sh(cwd, "git", ["-c", "user.email=t@t", "-c", "user.name=t", ...a]); assert.equal(r.status, 0, r.stderr); return r.stdout; };
 // install.sh runs `herdr-app check` per mod; CI has no Herdr, so a fake that always passes goes first on PATH.

@@ -18,13 +18,17 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      # The full glob, never a hand list: a new test file runs without touching this file.
+      # The full glob, never a hand list: a new test file runs without touching this file. The glob does not recurse, so the slow
+      # install tests in mods/_test/install/ are left out on purpose: they run by hand (conv/10-testing.md).
       #
       # Two tests used to be flaky (T-MWGRU7ZWLBE s8.test.js, T-MWGS1RD5PNU config-gate.test.js) and are fixed:
       # neither has a timing budget now (one counts hash calls, the other waits for the condition, with a 10 s hang guard).
-      # Nothing is skipped: if a test fails, read the failure; do not edit it out silently.
+      # No other test is skipped: if a test fails, read the failure; do not edit it out silently.
+      # --test-concurrency: node's default is availableParallelism()-1, which is 1 on the 2-vCPU runner (files ran one at a time).
       - name: Test
-        run: node --test mods/_lib/*.test.js mods/_test/*.test.js
+        run: |
+          echo "nproc=$(nproc)"
+          node --test --test-concurrency=4 mods/_lib/*.test.js mods/_test/*.test.js
       - name: Public sync script
         run: scripts/public-sync.test.sh
       - name: Pre-PR gate script
