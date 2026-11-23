@@ -20,14 +20,14 @@ beforeEach(() => {
   v = new Runs(); v.init({}, cx);
 });
 
-test("live run: coordinator row, leader, member rows from lineageOf; model chip and duration shown", () => {
+test("live run: coordinator row, leader, member rows from lineageOf; duration shown, no model chip", () => {
   H.state["drover.runs"] = [{ id: "R", started: T0, reportTo: "t0", task: "T-1", terminals: [term("t1", "Wrangler", { model: "m-w" }), term("t2", "leader", { model: "m-l" })] },
     { id: "D", started: T0, terminals: [term("t0", "leader", { name: "Drover" })] }];
   H.terminals = [{ address: "t0" }, { address: "t1" }, { address: "t2" }];
   const r = render(v);
   assert.ok(r.ids.includes("m-R-t0") && r.ids.includes("m-R-t1") && r.ids.includes("m-R-t2"));
   assert.ok(r.ids.indexOf("m-R-t0") < r.ids.indexOf("m-R-t2") && r.ids.indexOf("m-R-t2") < r.ids.indexOf("m-R-t1"), "coordinator, leader, then members");
-  assert.ok(r.texts.includes("req: m-w") && r.texts.includes("req: m-l") && r.texts.includes("1h 30m"));
+  assert.ok(r.texts.includes("1h 30m") && !r.texts.some((x) => String(x).startsWith("req:")));
   assert.ok(r.ids.includes("stop-R"));
 });
 
@@ -35,7 +35,7 @@ test("old run without model/started renders dashes, no errors", () => {
   H.state["drover.runs"] = [{ id: "O", terminals: [{ address: "t5", name: "old", role: "leader" }] }];
   H.terminals = [{ address: "t5" }];
   const r = render(v);
-  assert.ok(r.texts.includes("req: —") && r.texts.includes("—"));
+  assert.ok(r.texts.includes("—") && !r.texts.some((x) => String(x).startsWith("req:")));
 });
 
 test("ended run under Show ended: frozen duration, Forget, no Stop", () => {

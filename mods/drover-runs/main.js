@@ -91,7 +91,6 @@ export default class Runs extends View {
             .child(div().w(6).h(6).rounded(3).flex_none().bg(color[m.status] ?? t.idle))
             .child(div().text_size(12).flex_none().child(m.name))
             .child(div().flex_1().truncate().text_size(11).text_color(t.dim).child([m.role, m.address].filter(Boolean).join(" · ")))
-            .child(div().px(5).rounded(4).flex_none().bg(t.raised).text_size(11).text_color(t.muted).child(`req: ${m.modelText}`))
             .child(div().text_size(11).flex_none().text_color(color[m.status] ?? t.muted).child(m.status))
             .child(div().w(44).flex_none().text_size(11).text_color(t.dim).child(m.durationText));
         }))

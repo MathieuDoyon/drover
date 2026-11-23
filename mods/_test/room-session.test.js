@@ -1,4 +1,4 @@
-// T-MWLGPRPU53A: the Room Squad row shows the session id and a copyable resume command; the click copies and stops there.
+// T-MWSLVHRJN4A: the Room Squad row shows no model chip and no session/resume row.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { register } from "node:module";
@@ -37,32 +37,19 @@ const T = [
   { address: "t2", agent: "old", name: "Old", role: "Wrangler", started: 1 },
 ];
 
-test("Squad rows: a recorded session shows the short id and the resume command; a legacy row shows none", async () => {
-  const { rec } = await rendered(T);
-  assert.ok(rec.ids.includes("resume-t3") && rec.ids.includes("resume-t1"));
-  assert.equal(rec.ids.includes("resume-t2"), false, "legacy record renders unchanged");
-  assert.ok(rec.texts.includes(`claude --resume ${ID}`));
-  assert.ok(rec.texts.includes(`codex resume ${ID2}`));
-  assert.ok(rec.texts.includes(`session ${ID.slice(0, 8)}`));
+test("Squad rows: no model chip, no session id, no resume command or copy row; name, role · address, status and age stay", async () => {
+  const { rec, root } = await rendered(T);
+  assert.equal(rec.ids.some((id) => /^resume-t\d/.test(id)), false, "no per-member resume row");
+  assert.equal(rec.texts.some((x) => /^(req:|session )/.test(String(x)) || /--resume|codex resume|Copy/.test(String(x))), false);
+  assert.ok(rec.texts.includes("Lead") && rec.texts.includes("leader · t3"));
+  assert.equal(rec.texts.filter((x) => x === "running").length, 3, "status stays on each row");
+  assert.equal(rec.texts.filter((x) => /^\d+h \d+m$/.test(x)).length, 3, "age stays on each row");
+  for (const a of ["t1", "t2", "t3"]) assert.ok(nodeOf(root, `m-${a}`), `row ${a} stays`);
 });
 
-test("copy: the rendered resume control's own click copies the command and stops there (no focus, no peek), live or gone", async () => {
+test("Squad rows: only a live row focuses (live or gone)", async () => {
   for (const live of [["t1", "t2", "t3"], []]) {
-    const { root, clips, stops, calls, cx } = await rendered(T, live);
-    const ctl = nodeOf(root, "resume-t3");
-    assert.ok(ctl?.args.on_click, "the resume control has a click handler");
-    ctl.args.on_click[0]({}, cx);
-    assert.deepEqual(clips, [`claude --resume ${ID}`]);
-    assert.equal(stops.length, 1);
-    assert.deepEqual(calls, [], "no agent.focus or terminal.peek");
-    assert.equal(Boolean(nodeOf(root, "m-t3").args.on_click), live.length > 0, "only a live row focuses");
+    const { root } = await rendered(T, live);
+    assert.equal(Boolean(nodeOf(root, "m-t3").args.on_click), live.length > 0);
   }
-});
-
-test("copy: the Copied hint clears itself", async () => {
-  const { room, cx, timers } = await rendered(T);
-  room.copyResume("t3", "x", cx);
-  assert.equal(room.copied, "t3");
-  timers.forEach((f) => f(cx));
-  assert.equal(room.copied, null);
 });
