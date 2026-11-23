@@ -578,11 +578,12 @@ export function lineageOf(run, allRuns, live, alive, now) {
   return rows;
 }
 
-// Duration rounded to the minute: "—" unknown, "<1m", "5m", "1h 05m".
+// Duration rounded to the minute: "—" unknown, "<1m", "5m", "1h 05m"; from 24h on "<d>d <h>h" (hours floored, no minutes).
 export function durationText(ms) {
   if (typeof ms !== "number" || !Number.isFinite(ms)) return "—";
   const m = Math.round(Math.max(0, ms) / 60000);
   if (m < 1) return "<1m";
+  if (m >= 1440) return `${Math.floor(m / 1440)}d ${Math.floor((m % 1440) / 60)}h`;
   return m < 60 ? `${m}m` : `${Math.floor(m / 60)}h ${String(m % 60).padStart(2, "0")}m`;
 }
 

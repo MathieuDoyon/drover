@@ -258,6 +258,22 @@ test("durationText: '—' when unknown, '<1m', minutes, hours padded", () => {
   assert.equal(durationText(3 * 3600000 + 11 * 60000), "3h 11m");
 });
 
+test("durationText: 24h and more is '<d>d <h>h' (hours floored from rounded minutes, no minutes)", () => {
+  const M = 60000, H = 60 * M;
+  assert.equal(durationText(23 * H + 59 * M), "23h 59m");
+  assert.equal(durationText(23 * H + 59 * M + 29000), "23h 59m");
+  assert.equal(durationText(23 * H + 59 * M + 30000), "1d 0h");
+  assert.equal(durationText(24 * H), "1d 0h");
+  assert.equal(durationText(24 * H + 59 * M), "1d 0h");
+  assert.equal(durationText(25 * H), "1d 1h");
+  assert.equal(durationText(47 * H + 59 * M), "1d 23h");
+  assert.equal(durationText(48 * H), "2d 0h");
+  assert.equal(durationText(166 * H + 17 * M), "6d 22h");
+  assert.equal(durationText(NaN), "—");
+  assert.equal(durationText(Infinity), "—");
+  assert.equal(durationText(-5 * H), "<1m");
+});
+
 const squad = (extra = {}, alive = ["t1", "t2", "t3"], now = 600000) => squadRows(lineageOf(
   { id: "R", terminals: [T("t1", { role: "member", model: "sonnet", started: 0 }), T("t2", { role: "member", started: 0 }), T("t3", { role: "leader", model: "opus", started: 0 })], worktree: { branch: "feat/x" }, ...extra },
   [], new Map(), new Set(alive), now));

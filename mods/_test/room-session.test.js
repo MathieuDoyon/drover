@@ -43,7 +43,7 @@ test("Squad rows: no model chip, no session id, no resume command or copy row; n
   assert.equal(rec.texts.some((x) => /^(req:|session )/.test(String(x)) || /--resume|codex resume|Copy/.test(String(x))), false);
   assert.ok(rec.texts.includes("Lead") && rec.texts.includes("leader · t3"));
   assert.equal(rec.texts.filter((x) => x === "running").length, 3, "status stays on each row");
-  assert.equal(rec.texts.filter((x) => /^\d+h \d+m$/.test(x)).length, 3, "age stays on each row");
+  assert.equal(rec.texts.filter((x) => /^\d+d \d+h$/.test(x)).length, 3, "age stays on each row (started: 1 is far past, so the day format)");
   for (const a of ["t1", "t2", "t3"]) assert.ok(nodeOf(root, `m-${a}`), `row ${a} stays`);
 });
 
