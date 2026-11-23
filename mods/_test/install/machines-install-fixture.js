@@ -30,15 +30,15 @@ import { join, dirname, posix } from "node:path";
 import { fileURLToPath } from "node:url";
 import { tmpdir, userInfo, hostname } from "node:os";
 
-const { until } = await import(new URL("./stubs/until.js", import.meta.url).href);
+const { until } = await import(new URL("../stubs/until.js", import.meta.url).href);
 const RT = await import(new URL("./stubs/machine-rt.js", import.meta.url).href);
-const { GENERIC_LEAKS, privateWords, wholeWord, runtimePrivateWords } = await import(new URL("./private-words.js", import.meta.url).href); // shared with shipped-generic.test.js
+const { GENERIC_LEAKS, privateWords, wholeWord, runtimePrivateWords } = await import(new URL("../private-words.js", import.meta.url).href); // shared with shipped-generic.test.js
 const { SHARE, GEN, CURRENT, ENTRY } = RT;
-const REPO = join(dirname(fileURLToPath(import.meta.url)), "../..");
+const REPO = join(dirname(fileURLToPath(import.meta.url)), "../../..");
 const TASKS = join(REPO, "mods/drover-tasks");
 const FINDER = join(TASKS, "bin/find-runtime.sh");
 const CLI = join(TASKS, "bin/drover");
-const M = () => import("../_lib/machines.js"); // loaded inside each test, so a missing module fails that test, not the whole file
+const M = () => import("../../_lib/machines.js"); // loaded inside each test, so a missing module fails that test, not the whole file
 const SHIPPED = ["bin/drover", "bin/drover-export.mjs", "bin/drover-machines.mjs", "bin/find-runtime.sh", "bin/drover-headless", "bin/drover-headless.mjs", "bin/drover-asks-check.mjs", "bin/drover-asks-install.mjs", "bin/asks-lib.mjs", "headless-board.js", "remote.js", "machines.js", "herd-export.js", "runs.js", "store.js", "config.js", "config-schema.js", "lessons.js", "workfolder.js", "sources.js", "hold.js", "publish.js", "bin/drover-health.py", "bin/drover-line.mjs", "runline.js", "evidence.js"];
 const T_OLD = Date.UTC(2026, 0, 1), T_NEW = Date.UTC(2026, 0, 2), T_LATER = Date.UTC(2026, 0, 3);
 const cleanup = [];
@@ -64,7 +64,7 @@ const redate = (root, rel, ms) => utimesSync(join(root, rel), ms / 1000, ms / 10
 const dateAll = (root, ms) => { for (const rel of SHIPPED) if (existsSync(join(root, rel))) redate(root, rel, ms); };
 const edit = (root, rel, ms) => { appendFileSync(join(root, rel), `\n// edited ${ms}\n`); redate(root, rel, ms); };
 const o = (m, srcRoot, extra = {}) => ({ machine: m.name, srcRoot, appHome: m.appHome, ...extra }); // the one place install options are built (the laptop app home holds the sync hold)
-const H = () => import("../_lib/hold.js");
+const H = () => import("../../_lib/hold.js");
 const holdDir = (m) => join(m.appHome, "data/drover-sync-hold");
 const holdOf = async (m, env = {}) => (await H()).createHold({ dir: holdDir(m), ...env });
 const holdFiles = (m) => (existsSync(holdDir(m)) ? readdirSync(holdDir(m)).sort() : []);

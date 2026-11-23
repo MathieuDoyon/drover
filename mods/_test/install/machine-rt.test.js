@@ -1,4 +1,4 @@
-// The fake remote runner's exec (mods/_test/stubs/machine-rt.js): async, but one call behaves like the spawnSync it replaced.
+// The fake remote runner's exec (mods/_test/install/stubs/machine-rt.js): async, but one call behaves like the spawnSync it replaced.
 import { test, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { writeFileSync, chmodSync } from "node:fs";

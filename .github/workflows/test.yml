@@ -19,7 +19,7 @@ jobs:
         with:
           node-version: 22
       # The full glob, never a hand list: a new test file runs without touching this file. The glob does not recurse, so the slow
-      # install tests in mods/_test/install/ are left out on purpose: they run by hand (conv/10-testing.md).
+      # install and fake remote-machine harness tests in mods/_test/install/ are left out on purpose: they run by hand (conv/10-testing.md).
       #
       # Two tests used to be flaky (T-MWGRU7ZWLBE s8.test.js, T-MWGS1RD5PNU config-gate.test.js) and are fixed:
       # neither has a timing budget now (one counts hash calls, the other waits for the condition, with a 10 s hang guard).

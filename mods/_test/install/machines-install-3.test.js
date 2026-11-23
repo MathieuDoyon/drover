@@ -5,7 +5,7 @@ import { readFileSync, writeFileSync, existsSync, chmodSync, mkdirSync, symlinkS
 import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { RT, GENERIC_LEAKS, wholeWord, runtimePrivateWords, SHARE, GEN, CURRENT, REPO, TASKS, FINDER, CLI, M, T_NEW, T_LATER, cleanup, machine, clone, source, dateAll, edit, o, holdDir, holdFiles, noWrites, noTilde, manifestOf, curId, fresh, finder, line, forEachPoint, killSet, newest, DEAD } from "../machines-install-fixture.js";
+import { RT, GENERIC_LEAKS, wholeWord, runtimePrivateWords, SHARE, GEN, CURRENT, REPO, TASKS, FINDER, CLI, M, T_NEW, T_LATER, cleanup, machine, clone, source, dateAll, edit, o, holdDir, holdFiles, noWrites, noTilde, manifestOf, curId, fresh, finder, line, forEachPoint, killSet, newest, DEAD } from "./machines-install-fixture.js";
 
 test("finder: platform fixtures. No hasher at all, no timeout(1): exit 0 and no hasher line; shasum only: hasher=shasum; sha256sum only: hasher=sha256sum", () => {
   const none = finder(machine({ hasher: "none", timeout: false }));

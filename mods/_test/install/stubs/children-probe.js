@@ -4,7 +4,7 @@ import { test } from "node:test";
 import { writeFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { spawnTracked } from "../machines-install-fixture.js";
-import { until } from "./until.js";
+import { until } from "../../stubs/until.js";
 
 test("probe: throws after spawning a tracked child", async () => {
   const dir = process.env.PROBE_DIR;

@@ -5,7 +5,7 @@ import { readFileSync, writeFileSync, appendFileSync, existsSync, readdirSync, r
 import { spawnSync, spawn } from "node:child_process";
 import { join, posix } from "node:path";
 import { tmpdir } from "node:os";
-import { spawnTracked, until, RT, privateWords, wholeWord, GEN, CURRENT, ENTRY, TASKS, CLI, M, SHIPPED, T_OLD, T_NEW, T_LATER, cleanup, machine, clone, source, redate, dateAll, edit, o, holdFiles, states, noWrites, noTilde, manifestOf, curId, sha, sha256, fresh, finder, line, forEachPoint, deferred, drainTicks, killSet, killPoints, assertSane, newest, DEAD } from "../machines-install-fixture.js";
+import { spawnTracked, until, RT, privateWords, wholeWord, GEN, CURRENT, ENTRY, TASKS, CLI, M, SHIPPED, T_OLD, T_NEW, T_LATER, cleanup, machine, clone, source, redate, dateAll, edit, o, holdFiles, states, noWrites, noTilde, manifestOf, curId, sha, sha256, fresh, finder, line, forEachPoint, deferred, drainTicks, killSet, killPoints, assertSane, newest, DEAD } from "./machines-install-fixture.js";
 
 // ---------------------------------------------------------------------------------------------------------- 2. the finder
 test("finder: node on PATH wins (tier path); exit status is 0; home= is the physical home", () => {

@@ -36,7 +36,7 @@ It runs the tests, copies the shared library into each mod, links the 17 `drover
 Variables:
 
 - `HERDR_APP_HOME`: install into another home (default `~/.config/herdr-app`).
-- `DROVER_SKIP_TESTS=1`: skip the test stage. The stage leaves out the slow install tests (`mods/_test/install/`); see [development](development.md#tests) for how to run them by hand.
+- `DROVER_SKIP_TESTS=1`: skip the test stage. The stage leaves out the slow install and fake remote-machine harness tests (`mods/_test/install/`); see [development](development.md#tests) for how to run them by hand.
 - `DROVER_SKIP_MODS="drover-jira drover-github"`: leave those mods out and remove their symlink.
 
 ## 5. Check
