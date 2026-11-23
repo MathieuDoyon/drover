@@ -290,22 +290,21 @@ test("squadRows: gone coordinator is not focusable", () => {
   assert.equal(c.focusable, false);
 });
 
-test("squadRows: modelText and durationText; legacy record gives '—' without throwing", () => {
+test("squadRows: durationText; legacy record gives '—' without throwing", () => {
   const rows = squad({}, ["t1", "t2", "t3"], 5 * 60000);
-  assert.deepEqual(rows.map((r) => [r.modelText, r.durationText]), [["opus", "5m"], ["sonnet", "5m"], ["—", "5m"]]);
+  assert.deepEqual(rows.map((r) => r.durationText), ["5m", "5m", "5m"]);
   const old = squadRows(lineageOf({ id: "O", terminals: [{ address: "t1", agent: "a", name: "A", role: "leader" }] }, [], new Map(), new Set(["t1"]), 5000));
-  assert.deepEqual([old[0].modelText, old[0].durationText], ["—", "—"]);
+  assert.equal(old[0].durationText, "—");
   const coord = squadRows(lineageOf({ id: "O", reportTo: "t88", terminals: [] }, [], new Map(), new Set(), 0));
-  assert.deepEqual([coord[0].modelText, coord[0].durationText], ["—", "—"]);
+  assert.equal(coord[0].durationText, "—");
 });
 
-test("squadRows: a resolved coordinator with a stored model still shows '—'", () => {
+test("squadRows: a resolved coordinator row keeps its stored model", () => {
   const other = { id: "D", terminals: [T("t88", { role: "member", model: "opus", started: 0 })] };
   const rows = squadRows(lineageOf({ id: "R", reportTo: "t88", terminals: [T("t1", { role: "leader", model: "sonnet" })] }, [other], new Map(), new Set(["t88", "t1"]), 0));
   assert.equal(rows[0].role, "coordinator");
   assert.equal(rows[0].model, "opus");
-  assert.equal(rows[0].modelText, "—");
-  assert.equal(rows[1].modelText, "sonnet");
+  assert.equal(rows[1].model, "sonnet");
 });
 
 // stopTargets (Runs card Stop)
@@ -552,7 +551,7 @@ test("defaultDrover: the sidebar's space wins over a newer Drover elsewhere; els
 });
 
 // ---- session record (T-MWLGPRPU53A)
-import { agentKind, withSessionFlag, sessionMarker, withMarker, pickCodexSession, resumeCommand, newUuid } from "./runs.js";
+import { agentKind, withSessionFlag, sessionMarker, withMarker, pickCodexSession, newUuid } from "./runs.js";
 const UUID = "0b9f6c2e-5d1a-4c3b-8e7f-123456789abc", UUID2 = "1c0a7d3f-6e2b-4d4c-9f80-23456789abcd";
 const rollout = (id, day = "2026/11/17") => `/h/.codex/sessions/${day}/rollout-2026-11-17T10-00-00-${id}.jsonl`;
 
@@ -619,14 +618,6 @@ test("pickCodexSession: exactly one rollout gives its uuid; 0, 2+ and non-rollou
   assert.equal(pickCodexSession(["/x/notes.txt", rollout(UUID)]), UUID, "noise lines are ignored");
 });
 
-test("resumeCommand: claude --resume / codex resume; unknown kind or bad id gives null", () => {
-  assert.equal(resumeCommand("claude", UUID), `claude --resume ${UUID}`);
-  assert.equal(resumeCommand("codex", UUID), `codex resume ${UUID}`);
-  assert.equal(resumeCommand(null, UUID), null);
-  assert.equal(resumeCommand("claude", "x; rm -rf /"), null);
-  assert.equal(resumeCommand("claude", null), null);
-});
-
 test("terminalRecord: session, kind and an absolute cwd are kept; unknown ones are omitted", () => {
   const agent = { id: "w", name: "W", role: "Wrangler", command: "claude --model m" };
   assert.deepEqual(terminalRecord("t1", agent, 5, undefined, { session: UUID, kind: "claude", cwd: "/r/wt" }),
@@ -638,17 +629,18 @@ test("terminalRecord: session, kind and an absolute cwd are kept; unknown ones a
   assert.deepEqual(terminalRecord("t1", agent, 5), terminalRecord("t1", agent, 5, undefined, {}));
 });
 
-test("lineageOf / squadRows: session, cwd and resumeText; a legacy record has none and renders as before", () => {
+test("lineageOf / squadRows: session, kind and cwd; a legacy record has none and renders as before", () => {
   const run = lineRun({ terminals: [T("t2", { kind: "codex", session: UUID2, cwd: "/r" }), T("t3", { role: "leader", kind: "claude", session: UUID }), T("t4")] });
   const rows = squadRows(lineageOf(run, [], new Map(), new Set(["t2", "t3", "t4"]), 0));
   const by = Object.fromEntries(rows.map((r) => [r.address, r]));
   assert.equal(by.t3.session, UUID);
-  assert.equal(by.t3.resumeText, `claude --resume ${UUID}`);
-  assert.equal(by.t2.resumeText, `codex resume ${UUID2}`);
+  assert.equal(by.t3.kind, "claude");
+  assert.equal(by.t2.session, UUID2);
+  assert.equal(by.t2.kind, "codex");
   assert.equal(by.t2.cwd, "/r");
   assert.equal("session" in by.t4, false);
   assert.equal("cwd" in by.t4, false);
-  assert.equal(by.t4.resumeText, null);
+  assert.equal("kind" in by.t4, false);
 });
 
 test("markEnded: drops the live line from a run it ends, and only that run", () => {

@@ -405,8 +405,6 @@ export function pickCodexSession(paths) {
   const id = hits.length === 1 ? hits[0].match(/-([0-9a-f-]{36})\.jsonl$/)?.[1] : null;
   return id && UUID.test(id) ? id : null;
 }
-// The command that reopens a session by hand. null = unknown kind or id.
-export const resumeCommand = (kind, id) => (UUID.test(String(id)) ? { claude: `claude --resume ${id}`, codex: `codex resume ${id}` }[kind] ?? null : null);
 
 // ---- Resume a gone squad (T-MWLGPS2QJQL). All pure: io.js opens the terminals, these decide what to open and what to say.
 // A session flag the profile already carries: never overridden, so that attempt is skipped.
@@ -588,15 +586,14 @@ export function durationText(ms) {
   return m < 60 ? `${m}m` : `${Math.floor(m / 60)}h ${String(m % 60).padStart(2, "0")}m`;
 }
 
-// View model for the Room Squad tree: lineageOf rows plus depth, leader, modelText, durationText, focusable, dim.
+// View model for the Room Squad tree: lineageOf rows plus depth, leader, durationText, focusable, dim.
 // Coordinator depth 0 (when present), leader next, members one deeper. A live coordinator focuses its agent; a gone one is not clickable.
 export function squadRows(rows) {
   const hasCoord = rows[0]?.role === "coordinator";
   return rows.map((r, i) => {
     const coord = r.role === "coordinator";
     const leader = i === (hasCoord ? 1 : 0);
-    return { ...r, leader, depth: coord ? 0 : (hasCoord ? 1 : 0) + (leader ? 0 : 1), modelText: coord ? "—" : r.model ?? "—",
-      durationText: durationText(r.durationMs), focusable: !r.gone, dim: r.gone && !coord, resumeText: resumeCommand(r.kind, r.session) };
+    return { ...r, leader, depth: coord ? 0 : (hasCoord ? 1 : 0) + (leader ? 0 : 1), durationText: durationText(r.durationMs), focusable: !r.gone, dim: r.gone && !coord };
   });
 }
 
