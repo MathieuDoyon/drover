@@ -108,8 +108,7 @@ mkdir -p "$app_home/mods" "$app_home/layouts"; wrote "$app_home"
 if [ -n "${HC_SESSION:-}" ]; then
   ( umask 077; printf 'HC_SESSION=%s\n' "$HC_SESSION" > "$envfile" ); chmod 600 "$envfile"; wrote "$envfile"
 fi
-echo "node tests skipped on the remote (dev-time gate; each mod is still checked with herdr-app check)"
-( cd "$share/src/mods" && PATH="$HOME/.local/bin:$PATH" HERDR_APP_HOME="$app_home" DROVER_SKIP_TESTS=1 DROVER_SKIP_MODS="drover-jira drover-github" ./install.sh )
+( cd "$share/src/mods" && PATH="$HOME/.local/bin:$PATH" HERDR_APP_HOME="$app_home" DROVER_SKIP_MODS="drover-jira drover-github" ./install.sh )
 echo "mods: drover-* symlinks in $app_home/mods -> $share/src/mods, layout $app_home/layouts/drover.json"
 echo "drover CLI: $share/src/mods/drover-tasks/bin/drover (not on PATH; the runbook uses the full path)"
 

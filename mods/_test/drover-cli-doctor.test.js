@@ -57,7 +57,7 @@ function fixture({ install = true, hashers = HASHERS, src = SRC } = {}) {
 // the installer needs its own tools and a fake herdr-app; doctor never gets them
 const installIn = (f) => {
   const path = `${fakeHerdr()}:${binDir(INSTALL_TOOLS, f.hashers)}`;
-  const r = sh(join(f.repo, "mods"), BASH, ["install.sh"], { PATH: path, HOME: f.root, HERDR_APP_HOME: f.home, DROVER_SKIP_TESTS: "1" });
+  const r = sh(join(f.repo, "mods"), BASH, ["install.sh"], { PATH: path, HOME: f.root, HERDR_APP_HOME: f.home });
   assert.equal(r.status, 0, r.stderr + r.stdout);
 };
 const fx = fixture;

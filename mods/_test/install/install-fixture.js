@@ -32,7 +32,7 @@ function fixture() {
   mkdirSync(join(home, "mods"), { recursive: true }); mkdirSync(join(home, "layouts"));
   return { root, repo, home };
 }
-const install = (dir, home, ...args) => sh(join(dir, "mods"), "bash", ["install.sh", ...args], { HERDR_APP_HOME: home, DROVER_SKIP_TESTS: "1", PATH: `${BIN}:${process.env.PATH}` });
+const install = (dir, home, ...args) => sh(join(dir, "mods"), "bash", ["install.sh", ...args], { HERDR_APP_HOME: home, PATH: `${BIN}:${process.env.PATH}` });
 const mtimes = (dir) => {
   const out = {};
   for (const m of readdirSync(dir).filter((n) => n.startsWith("drover-")))
@@ -42,7 +42,7 @@ const mtimes = (dir) => {
 // the reopen note: shared _lib code that changed since the last good install (Herdr may keep the old imports)
 const NOTE = /NOTE: shared _lib code changed/;
 const mainJs = (repo) => Object.fromEntries(readdirSync(join(repo, "mods")).filter((n) => n.startsWith("drover-")).map((m) => [m, statSync(join(repo, "mods", m, "main.js")).mtimeMs]));
-const run = (repo, home, env = {}) => sh(join(repo, "mods"), "bash", ["install.sh"], { HERDR_APP_HOME: home, DROVER_SKIP_TESTS: "1", PATH: `${BIN}:${process.env.PATH}`, ...env });
+const run = (repo, home, env = {}) => sh(join(repo, "mods"), "bash", ["install.sh"], { HERDR_APP_HOME: home, PATH: `${BIN}:${process.env.PATH}`, ...env });
 // box1 (Arch) runs this script too: no shasum there, and the GitHub mod may be skipped. Never a false alarm, never a failed install.
 // A private bin dir with symlinks to only the tools install.sh needs, found on the real PATH. Hiding the hashers by editing PATH cannot work:
 // on Linux they sit in /usr/bin with every other tool. The dir is checked by listing it, not by running anything.
@@ -61,7 +61,7 @@ function noHasherPath(keepCksum = false) {
   return dir;
 }
 const CANNOT = /fingerprint could not be checked/;
-const runIn = (repo, home, path, env = {}) => sh(join(repo, "mods"), join(path.split(":")[1], "bash"), ["install.sh"], { HERDR_APP_HOME: home, DROVER_SKIP_TESTS: "1", PATH: path, ...env });
+const runIn = (repo, home, path, env = {}) => sh(join(repo, "mods"), join(path.split(":")[1], "bash"), ["install.sh"], { HERDR_APP_HOME: home, PATH: path, ...env });
 // ---- T-MWO2HH3HOAU (B6): safe updates. Owner-changed managed files are never overwritten; the incoming copy lands beside them as <file>.new.
 const rd = (p) => readFileSync(p, "utf8");
 const mp = (repo, ...a) => join(repo, "mods", ...a);
@@ -71,7 +71,7 @@ const ageAll = (repo) => { const old = new Date(Date.now() - 3600_000); for (con
 const commitAll = (repo, msg = "y") => { git(repo, "add", "-A"); git(repo, "commit", "-q", "-m", msg); };
 const owner = "\n// owner edit\n";
 const installed = () => { const f = fixture(); assert.equal(run(f.repo, f.home).status, 0); return f; };
-const spawnTimed = (repo, home, env) => spawnSync("bash", ["install.sh"], { cwd: mp(repo), encoding: "utf8", timeout: 30000, env: { ...process.env, HERDR_APP_HOME: home, DROVER_SKIP_TESTS: "1", PATH: `${BIN}:${process.env.PATH}`, ...env } }); // timeout: a hang guard only
+const spawnTimed = (repo, home, env) => spawnSync("bash", ["install.sh"], { cwd: mp(repo), encoding: "utf8", timeout: 30000, env: { ...process.env, HERDR_APP_HOME: home, PATH: `${BIN}:${process.env.PATH}`, ...env } }); // timeout: a hang guard only
 const backups = (repo) => { const d = mp(repo, ".install-backups"); return existsSync(d) ? readdirSync(d).map((s) => join(d, s)) : []; };
 // race hooks (DROVER_INSTALL_TEST_HOOK is test-only): the hook runs at four points of one file's publish and edits the file as an owner would.
 const hookScript = (root, body) => { const p = join(root, "hook.sh"); writeFileSync(p, `#!/bin/bash\n[ "$2" = drover-tasks/store.js ] || exit 0\n${body}\n`, { mode: 0o755 }); return p; };
@@ -82,14 +82,14 @@ const blDir = (repo, home) => join(home, ".drover-baseline", mp(repo));
 // ---- review round 2 fixes (equal path reference, failed record update, staging ownership)
 const realTool = (n) => { const r = spawnSync("sh", ["-c", `command -v ${n}`], { encoding: "utf8" }); return r.stdout.trim(); };
 const shimDir = (root, name, body) => { const d = join(root, `shim-${name}`); mkdirSync(d); writeFileSync(join(d, name), `#!/bin/bash\n${body}\n`, { mode: 0o755 }); return d; };
-const withShim = (repo, home, dir, env = {}) => spawnSync("bash", ["install.sh"], { cwd: mp(repo), encoding: "utf8", env: { ...process.env, HERDR_APP_HOME: home, DROVER_SKIP_TESTS: "1", PATH: `${dir}:${BIN}:${process.env.PATH}`, ...env } });
+const withShim = (repo, home, dir, env = {}) => spawnSync("bash", ["install.sh"], { cwd: mp(repo), encoding: "utf8", env: { ...process.env, HERDR_APP_HOME: home, PATH: `${dir}:${BIN}:${process.env.PATH}`, ...env } });
 const forget = (repo, home, f) => { for (const n of [f, `${f}.head`]) rmSync(join(blDir(repo, home), "drover-tasks", n), { force: true }); };
 // the installer's pid is predictable and its clock is pinned by a date shim shared with the wrapper: the planted names are exact, not a guess
 const FIXED = "20260101T000000Z";
 let dateShim;
 const plant = (repo, home, script) => {
   dateShim ??= (() => { const d = mkdtempSync(join(tmpdir(), "install-test-date-")); made.push(d); writeFileSync(join(d, "date"), `#!/bin/bash\nif [ "$*" = "-u +%Y%m%dT%H%M%SZ" ]; then echo ${FIXED}; else exec ${realTool("date")} "$@"; fi\n`, { mode: 0o755 }); return d; })();
-  return spawnSync("sh", ["-c", `S="${FIXED}"; ${script}; exec bash install.sh`], { cwd: mp(repo), encoding: "utf8", env: { ...process.env, HERDR_APP_HOME: home, DROVER_SKIP_TESTS: "1", PATH: `${dateShim}:${BIN}:${process.env.PATH}` } });
+  return spawnSync("sh", ["-c", `S="${FIXED}"; ${script}; exec bash install.sh`], { cwd: mp(repo), encoding: "utf8", env: { ...process.env, HERDR_APP_HOME: home, PATH: `${dateShim}:${BIN}:${process.env.PATH}` } });
 };
 // ---- review round 3: a record or marker that cannot be written means no change for that file
 const mvFault = (root, glob) => shimDir(root, "mv", `case "\${@: -1}" in ${glob}) exit 1;; esac; exec ${realTool("mv")} "$@"`);
@@ -106,7 +106,7 @@ function aliasScenario(patch) {
   if (patch) writeFileSync(mp(repo, "install.sh"), patch(rd(mp(repo, "install.sh"))));
   writeFileSync(mp(repo, "drover-tasks", "store.js"), A); // the owner restores the committed copy
   appendFileSync(mp(repo, "_lib", "store.js"), "\n// C\n");
-  const r = spawnSync("sh", ["-c", `cd ${JSON.stringify(join(alias, "mods"))} && [ "$PWD" = ${JSON.stringify(join(alias, "mods"))} ] && exec bash install.sh`], { encoding: "utf8", env: { ...process.env, HERDR_APP_HOME: home, DROVER_SKIP_TESTS: "1", PATH: `${BIN}:${process.env.PATH}` } });
+  const r = spawnSync("sh", ["-c", `cd ${JSON.stringify(join(alias, "mods"))} && [ "$PWD" = ${JSON.stringify(join(alias, "mods"))} ] && exec bash install.sh`], { encoding: "utf8", env: { ...process.env, HERDR_APP_HOME: home, PATH: `${BIN}:${process.env.PATH}` } });
   return { r, A, repo };
 }
 

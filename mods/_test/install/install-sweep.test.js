@@ -68,7 +68,7 @@ function install(fx, { cwd = fx.mods, args = [], env = {}, fault = null } = {}) 
   const id = ++seq, cnt = join(fx.root, `cnt-${id}`), pid = join(fx.root, `pid-${id}`);
   return new Promise((resolve) => {
     const p = spawn("sh", ["-c", `echo $$ > "${pid}"; exec bash install.sh "$@"`, "sh", ...args], {
-      cwd, env: { ...process.env, HERDR_APP_HOME: fx.home, DROVER_SKIP_TESTS: "1", PATH: `${SHIMS}:${BIN}:${process.env.PATH}`, SWEEP_CNT: cnt, SWEEP_PID: pid, FAULT_AT: fault ? String(fault.at) : "0", FAULT_MODE: fault ? fault.mode : "", ...env },
+      cwd, env: { ...process.env, HERDR_APP_HOME: fx.home, PATH: `${SHIMS}:${BIN}:${process.env.PATH}`, SWEEP_CNT: cnt, SWEEP_PID: pid, FAULT_AT: fault ? String(fault.at) : "0", FAULT_MODE: fault ? fault.mode : "", ...env },
     });
     let out = ""; p.stdout.on("data", (d) => (out += d)); p.stderr.on("data", (d) => (out += d));
     p.on("close", (status, signal) => {

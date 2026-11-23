@@ -1,8 +1,6 @@
 #!/usr/bin/env bash
-# Copy the shared library into each drover-* mod (before the tests: the copies are tested), run the tests, link the mods into Herdr, check them.
+# Copy the shared library into each drover-* mod, link the mods into Herdr, check them. It runs no tests (CI and docs/development.md run them).
 # Never replaces a real folder in the Herdr home: only its own symlinks.
-# DROVER_SKIP_TESTS=1 skips the node test stage. The stage runs every test file (the glob below), never a hand list.
-# The glob does not recurse: the slow install tests live in _test/install/ and are run by hand (docs/development.md).
 # DROVER_SKIP_MODS="drover-jira drover-github" (space list) leaves those mods out and removes their symlink; default empty = all mods.
 # Herdr hot-reloads a mod when any of its files is saved, and a symlink that points at a deleted worktree breaks the mod.
 # So a run changes only what differs (a file with equal bytes keeps its mtime, a link already right is left alone), and a run
@@ -215,7 +213,7 @@ sync_managed() {
   if unchanged "$key" "$inc" "$key" "$hrel"; then publish "$inc" "$key" "$hrel"; return 0; fi
   keep_file "$inc" "$key" "$(why "$key")" "$hrel"
 }
-# Refresh the generated copies first: after an edit in _lib the tests (byte-equal copies) must see the new files.
+# Refresh the generated copies first (byte-equal copies of _lib).
 # The list of shared files is _lib/copies.txt (the self-contained test reads it too).
 [ ! -f drover-github/query.js ] || sync_managed drover-github/query.js drover-config/query.js drover-github/query.js # the dialog checks the default query with the GitHub parser
 for mod in drover-*/; do
@@ -225,7 +223,7 @@ done
 # Does a running Herdr hold older shared code than the disk now? Herdr is not known to re-import a changed _lib file on its in-place reload
 # (the card's incident: PROTOCOL 5 on disk, protocol 4 answered until the window was reopened). So: a hash of the shared set, kept in a hidden
 # stamp at the home root (outside mods/, so no mod file changes and nothing reloads). A new hash, or no stamp beside existing links, prints a
-# note BEFORE the test and check gates (a failed run may already have changed the linked files). The stamp is written only at the end of a good run.
+# note BEFORE the check gate (a failed run may already have changed the linked files). The stamp is written only at the end of a good run.
 stamp="$home/.drover-lib-stamp"
 # No hasher (sha256sum on Linux, shasum on macOS, else cksum) or a missing _lib file: lib_hash stays empty: no stamp, never a failed install. query.js is optional (the GitHub mod may be absent).
 if command -v sha256sum >/dev/null 2>&1; then hasher="sha256sum"; elif command -v shasum >/dev/null 2>&1; then hasher="shasum -a 256"; elif command -v cksum >/dev/null 2>&1; then hasher="cksum"; else hasher=""; fi # cksum (POSIX, always there) only detects change, which is all the stamp needs
@@ -242,15 +240,6 @@ if [ -z "$lib_hash" ]; then
   fi
 elif { { [ -f "$stamp" ] && [ "$(cat "$stamp")" != "$lib_hash" ]; } || { [ ! -f "$stamp" ] && [ "$have_links" = 1 ]; }; }; then
   echo "NOTE: shared _lib code changed since the last install. A running Herdr may keep the old imported code: probe it (drover config max-parallel shows the limit, or the inbox protocol answer); if it is stale, quit and reopen the Herdr window (terminals survive: they live in herdr-core)."
-fi
-if [ "${DROVER_SKIP_TESTS:-}" != 1 ]; then
-  # A failing test is shown (the last lines of the output), never hidden.
-  if ! tests_out="$(node --test _lib/*.test.js _test/*.test.js 2>&1)"; then
-    echo "node tests FAILED (set DROVER_SKIP_TESTS=1 to skip this stage). Failing tests, then the last lines:" >&2
-    printf '%s\n' "$tests_out" | grep -A20 '^ *not ok' | head -80 >&2 || true
-    printf '%s\n' "$tests_out" | tail -8 >&2
-    exit 1
-  fi
 fi
 # Links. A link install made is recorded (name<TAB>target). It is repointed or removed only while it still equals the record: a link the owner
 # changed, or one nothing recorded, is kept and reported. No guessing from the shape of the path.

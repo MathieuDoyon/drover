@@ -17,11 +17,11 @@ test("the copy list matches install.sh", () => {
   assert.match(fs.readFileSync(path.join(mods, "install.sh"), "utf8"), /_lib\/copies\.txt/);
 });
 
-test("install.sh refreshes the copies before the test gate", () => {
+test("install.sh refreshes the copies and runs no node tests", () => {
   const sh = fs.readFileSync(path.join(mods, "install.sh"), "utf8");
-  const loop = sh.indexOf("done < _lib/copies.txt");
-  assert.ok(loop !== -1 && loop < sh.indexOf("node --test"), "copies are made before node --test runs");
-  assert.ok(sh.indexOf("query.js drover-config/query.js") < sh.indexOf("node --test"), "the query.js copy is made before node --test runs");
+  assert.ok(sh.includes("done < _lib/copies.txt"), "the shared copies are made");
+  assert.ok(sh.includes("query.js drover-config/query.js"), "the query.js copy is made");
+  assert.ok(!sh.includes("node --test"), "install.sh must not run the node tests (CI and hand runs do)");
 });
 
 test("install.sh never overwrites a managed copy in place: it publishes through a captured link and a rename, and keeps a lock", () => {

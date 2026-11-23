@@ -80,7 +80,7 @@ test("B6-F3 a staging name planted as a symlink is never opened: the external fi
   const before = rd(mp(repo, "drover-tasks", "store.js"));
   // same pid as the installer: the wrapper plants the predictable names, then becomes install.sh
   const plant = `for n in store.js; do ln -s ${JSON.stringify(ext)} drover-tasks/.drover-tmp.$$.$n; ln -s ${JSON.stringify(ext)} drover-tasks/.drover-aside.$$.$n; done; exec bash install.sh`;
-  const r = spawnSync("sh", ["-c", plant], { cwd: mp(repo), encoding: "utf8", env: { ...process.env, HERDR_APP_HOME: home, DROVER_SKIP_TESTS: "1", PATH: `${BIN}:${process.env.PATH}` } });
+  const r = spawnSync("sh", ["-c", plant], { cwd: mp(repo), encoding: "utf8", env: { ...process.env, HERDR_APP_HOME: home, PATH: `${BIN}:${process.env.PATH}` } });
   assert.equal(r.status, 1, r.stdout + r.stderr);
   assert.equal(rd(ext), "owner bytes\n");
   assert.equal(rd(mp(repo, "drover-tasks", "store.js")), before);
@@ -111,7 +111,7 @@ test("B6-H3 a link is not repointed or removed when its record cannot be put out
   const wt = join(root, "wt"); git(repo, "worktree", "add", "-q", "-b", "feat", wt);
   const link = join(home, "mods", "drover-tasks"), before = readlinkSync(link);
   const shim = mvFault(root, "*/.drover-baseline/links");
-  const r = spawnSync("bash", ["install.sh", "--from-worktree"], { cwd: join(wt, "mods"), encoding: "utf8", env: { ...process.env, HERDR_APP_HOME: home, DROVER_SKIP_TESTS: "1", PATH: `${shim}:${BIN}:${process.env.PATH}` } });
+  const r = spawnSync("bash", ["install.sh", "--from-worktree"], { cwd: join(wt, "mods"), encoding: "utf8", env: { ...process.env, HERDR_APP_HOME: home, PATH: `${shim}:${BIN}:${process.env.PATH}` } });
   assert.equal(r.status, 1, r.stdout + r.stderr);
   assert.equal(readlinkSync(link), before, "the link moved without a record");
   const s = withShim(repo, home, shim, { DROVER_SKIP_MODS: "drover-jira" });

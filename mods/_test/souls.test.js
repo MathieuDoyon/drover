@@ -316,21 +316,21 @@ test("drover soul: the chain proves the tree and runs install, main CI and publi
   assert.ok(at("once per run") < at("(4)"), "tail announced before step 4");
   // fresh fetch, proof against the FETCHED tip of the last card's head
   for (const s of ["`git fetch origin main`", "fast-forward local `main`", "`git diff --quiet <last card's PR head SHA> origin/main`", "FETCHED", "never local `main`"]) assert.ok(c.includes(s), s);
-  // exit 0 + one card = tree equal: skip tests; exit 1 or several cards = plain install; anything else = HOLD and HELP
-  for (const s of ["exit 0", "one-card run", "`DROVER_SKIP_TESTS=1 mods/install.sh`", "exit 1", "plain `mods/install.sh`", "any other exit (diff error, unknown SHA) = HOLD and HELP", "fetch failure, invalid ref or failed fast-forward = refused command: HOLD and HELP, no install"]) assert.ok(c.includes(s), s);
+  // exit 0 + one card = tree equal; exit 1 or several cards = tree differs; either way the same install; anything else = HOLD and HELP
+  for (const s of ["exit 0", "one-card run", "exit 1", "tree differs", "`bash mods/install.sh`", "any other exit (diff error, unknown SHA) = HOLD and HELP", "fetch failure, invalid ref or failed fast-forward = refused command: HOLD and HELP, no install"]) assert.ok(c.includes(s), s);
   // equal tree: no main CI wait, logged n/a; otherwise wait on the exact tip
   for (const s of ["skip the `main` CI wait", "`n/a tree-proof <sha>`", "green on the exact tip commit"]) assert.ok(c.includes(s), s);
   // one public sync and one public CI wait on the final tip
   for (const s of ["`--push`, once per run, on the final tip", "public CI to be green on the pushed commit, once"]) assert.ok(c.includes(s), s);
   // install and sync are not in the per-card steps: exactly one install clause group in the tail, after (3)
   assert.ok(at("(4)") > at("(3)"));
-  assert.equal(c.split("`DROVER_SKIP_TESTS=1 mods/install.sh`").length - 1, 1, "one skip-tests install");
-  // neither install form (plain or skip-tests) before the tail step (4); both only inside step (4), before (5)
+  assert.equal(c.split("`bash mods/install.sh`").length - 1, 1, "one install");
+  assert.ok(!c.includes("DROVER_SKIP_TESTS"), "no skip-tests variable in the chain");
+  // no install before the tail step (4); only inside step (4), before (5)
   assert.ok(!/install/.test(c.slice(0, at("(4)"))), "no install before the tail step (4)");
   const installs = [...c.matchAll(/mods\/install\.sh/g)].map((m) => m.index);
-  assert.equal(installs.length, 2, "exactly two install forms: skip-tests and plain");
+  assert.equal(installs.length, 1, "exactly one install form");
   for (const i of installs) assert.ok(i > at("(4)") && i < at("(5)"), "install only inside step (4)");
-  assert.equal(c.split("plain `mods/install.sh`").length - 1, 1, "one plain install");
   // the error case is stated before the multi-card alternative
   assert.ok(at("any other exit (diff error, unknown SHA) = HOLD and HELP") < at("a several-card run"), "HOLD and HELP before the several-card alternative");
   // completion waits for the tail

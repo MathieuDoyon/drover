@@ -7,7 +7,7 @@ Drover is a set of Herdr mods. You install them into your Herdr home (`~/.config
 | Tool | Check | Needed for |
 | --- | --- | --- |
 | Herdr app + core | `herdr-app --version` (0.1.15 or later), `hc --help` | Everything |
-| Node | `node -v` (22 or later) | `install.sh` runs the tests |
+| Node | `node -v` (22 or later) | Runs the mods |
 | git | `git --version` | Everything |
 | [Claude Code](https://claude.com/claude-code), logged in | `claude --version` | Agents and squads |
 | Codex, logged in | `codex --version` | Only the Inspector agent |
@@ -31,12 +31,11 @@ Clone this repository (the command is in the [README](../README.md#install)) and
 cd mods && ./install.sh
 ```
 
-It runs the tests, copies the shared library into each mod, links the 17 `drover-*` mods and the `drover` layout into the Herdr home, and checks each mod with `herdr-app check`. Expected output: 17 lines `ok   drover-…`, then `ok   layout drover`. On `FAIL <mod>` it prints the `herdr-app check` errors and stops.
+It runs no tests (CI and [development](development.md#tests) do). It copies the shared library into each mod, links the 17 `drover-*` mods and the `drover` layout into the Herdr home, and checks each mod with `herdr-app check`. Expected output: 17 lines `ok   drover-…`, then `ok   layout drover`. On `FAIL <mod>` it prints the `herdr-app check` errors and stops.
 
 Variables:
 
 - `HERDR_APP_HOME`: install into another home (default `~/.config/herdr-app`).
-- `DROVER_SKIP_TESTS=1`: skip the test stage. The stage leaves out the slow install and fake remote-machine harness tests (`mods/_test/install/`); see [development](development.md#tests) for how to run them by hand.
 - `DROVER_SKIP_MODS="drover-jira drover-github"`: leave those mods out and remove their symlink.
 
 ## 5. Check

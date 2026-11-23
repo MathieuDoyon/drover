@@ -35,7 +35,7 @@ ssh omarchy 'bash -lc "~/.local/share/herdr-app/checkout/deploy/omarchy/install.
 ```
 
 
-The script reads `https://releases.herdr.dev/app/latest.json`, requires version 0.1.15 (`--version X` to accept another), downloads the `linux-x86_64` archive to a temp folder and **verifies its sha256 before extracting**; on a mismatch it stops and writes nothing. It prints each path as `WRITE <path>`. The Jira and GitHub mods are never installed (`DROVER_SKIP_MODS`). The mods installer's node test stage is skipped on the remote (`DROVER_SKIP_TESTS=1`; it is a dev-time gate and has timing-sensitive tests); every mod is still checked with `herdr-app check`. Without the skip, a failing node test stops the installer and prints the failing test. Needs `curl`, `tar`, `node`.
+The script reads `https://releases.herdr.dev/app/latest.json`, requires version 0.1.15 (`--version X` to accept another), downloads the `linux-x86_64` archive to a temp folder and **verifies its sha256 before extracting**; on a mismatch it stops and writes nothing. It prints each path as `WRITE <path>`. The Jira and GitHub mods are never installed (`DROVER_SKIP_MODS`). The mods installer runs no node tests (they are a dev-time gate: CI and hand runs); every mod is still checked with `herdr-app check`. Needs `curl`, `tar`, `node`.
 
 Optional isolated core (the app does not see omarchy's other terminals): set `HC_SESSION=drover-omarchy` in the installer's environment.
 

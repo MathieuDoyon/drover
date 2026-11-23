@@ -43,7 +43,7 @@ mk_manifest "$fx/newer.json" 0.1.16 "$good"
 # stub mods/install.sh: records its cwd/env and links one "mod" into the home
 cat > "$fx/repo/mods/install.sh" <<'EOS'
 #!/usr/bin/env bash
-echo "home=$HERDR_APP_HOME cwd=$PWD skip=${DROVER_SKIP_MODS:-} tests=${DROVER_SKIP_TESTS:-}" > "$HERDR_APP_HOME/stub-mods-install.log"
+echo "home=$HERDR_APP_HOME cwd=$PWD skip=${DROVER_SKIP_MODS:-}" > "$HERDR_APP_HOME/stub-mods-install.log"
 mkdir -p "$HERDR_APP_HOME/mods"; ln -sfn "$PWD" "$HERDR_APP_HOME/mods/drover-stub"
 EOS
 chmod +x "$fx/repo/mods/install.sh"
@@ -114,8 +114,8 @@ run_install t4 "$fx/good.json" "$fx/repo"
 S="$H/.local/share/herdr-app"
 if [ "$rc" -eq 0 ] && [ -x "$S/releases/0.1.15/herdr-app" ] && [ "$(readlink "$S/current")" = "$S/releases/0.1.15" ] \
    && [ -L "$H/.local/bin/herdr-app" ] && [ "$("$H/.local/bin/herdr-app" --version)" = "herdr-app 0.1.15" ] \
-   && grep -q "home=$H/.config/herdr-app cwd=$S/src/mods .* tests=1" "$H/.config/herdr-app/stub-mods-install.log" \
-   && grep -q '^node tests skipped on the remote (dev-time gate; each mod is still checked with herdr-app check)$' "$out" \
+   && grep -q "home=$H/.config/herdr-app cwd=$S/src/mods skip=drover-jira drover-github$" "$H/.config/herdr-app/stub-mods-install.log" \
+   && ! grep -q 'node tests' "$out" \
    && [ ! -e "$H/.config/systemd" ] && [ ! -e "$H/.config/herdr-app/service.env" ] && empty_dir "$T" \
    && [ ! -e "$S.new" ] && [ ! -e "$S.old" ]; then ok "install: releases/<ver> + current, src copy, mods installer runs from src, tmp clean"
 else bad "install: releases/<ver> + current, src copy, mods installer runs from src, tmp clean" "rc=$rc"; fi
@@ -171,28 +171,24 @@ else bad "real mods installer: Jira/GitHub absent, query.js copied, layout linke
 [ "$before" = "$(snap "$fx/real")" ] && ok "real mods installer: the repo checkout is not modified" || bad "real mods installer: the repo checkout is not modified"
 all_writes_printed "$H" "$out" && only_approved_roots "$H" && ok "real mods installer: every write printed, inside the approved roots" || bad "real mods installer: every write printed, inside the approved roots"
 
-# 9. mods/install.sh on its own (a copy of the real tree, herdr-app stubbed). DROVER_SKIP_TESTS=1 keeps the fixtures
-#    independent of the wall-clock node tests; the default must still run (and be stopped by) that stage.
+# 9. mods/install.sh on its own (a copy of the real tree, herdr-app stubbed). The installer runs no node tests.
 mkdir -p "$work/t9/home/mods" "$work/t9/home/layouts" "$work/t9/bin"
 cp -R "$repo_root/mods" "$work/t9/mods"; cp "$fx/pkg/herdr-app/herdr-app" "$work/t9/bin/"
 mods_install() { # <outfile> [env...]: run the copy's install.sh
   local o="$1"; shift; last_out="$o"
   ( cd "$work/t9/mods" && env PATH="$work/t9/bin:$PATH" HERDR_APP_HOME="$work/t9/home" "$@" ./install.sh >"$o" 2>&1 )
 }
-if mods_install "$work/t9/out" DROVER_SKIP_TESTS=1 \
+if mods_install "$work/t9/out" \
    && [ -L "$work/t9/home/mods/drover-jira" ] && [ -L "$work/t9/home/mods/drover-github" ] && [ -L "$work/t9/home/mods/drover-tasks" ]; then ok "mods/install.sh default installs every mod (unchanged)"
 else bad "mods/install.sh default installs every mod (unchanged)"; fi
-if mods_install "$work/t9/out2" DROVER_SKIP_TESTS=1 DROVER_SKIP_MODS='drover-jira drover-github' \
+if mods_install "$work/t9/out2" DROVER_SKIP_MODS='drover-jira drover-github' \
    && [ ! -e "$work/t9/home/mods/drover-jira" ] && [ ! -e "$work/t9/home/mods/drover-github" ] && [ -L "$work/t9/home/mods/drover-tasks" ]; then ok "DROVER_SKIP_MODS skips the listed mods"
 else bad "DROVER_SKIP_MODS skips the listed mods"; fi
-# the test stage: a failing test stops the installer by default, and DROVER_SKIP_TESTS=1 bypasses exactly that stage
+# no test stage: a failing test file in the tree does not stop the installer, and nothing runs it
 printf 'import test from "node:test";\ntest("boom", () => { throw new Error("boom"); });\n' > "$work/t9/mods/_lib/store.test.js"
 rm -f "$work/t9/home/mods/drover-tasks"
-if ! mods_install "$work/t9/out3" && [ ! -e "$work/t9/home/mods/drover-tasks" ] \
-   && grep -q 'node tests FAILED' "$work/t9/out3" && grep -q 'boom' "$work/t9/out3"; then ok "mods/install.sh default runs the node test stage; a failing test stops it and is shown"
-else last_out="$work/t9/out3"; bad "mods/install.sh default still runs the node test stage"; fi
-if mods_install "$work/t9/out4" DROVER_SKIP_TESTS=1 && [ -L "$work/t9/home/mods/drover-tasks" ]; then ok "DROVER_SKIP_TESTS=1 skips the node test stage"
-else bad "DROVER_SKIP_TESTS=1 skips the node test stage"; fi
+if mods_install "$work/t9/out3" && [ -L "$work/t9/home/mods/drover-tasks" ] && ! grep -q 'node tests' "$work/t9/out3"; then ok "mods/install.sh runs no node tests (a failing test file does not stop it)"
+else last_out="$work/t9/out3"; bad "mods/install.sh runs no node tests"; fi
 
 # 11. bootstrap-agents.sh: PATH + HERDR_APP_HOME for agents (fake HOME; nothing is touched outside it)
 boot_sh="$here/bootstrap-agents.sh"

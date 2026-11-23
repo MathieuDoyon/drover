@@ -95,7 +95,7 @@ cd ~/Developer/drover/mods && ./install.sh
 herdr-app do layout.switch '{"name":"drover"}'
 ```
 
-`install.sh` runs the tests, links the 17 `drover-*` mods and the `drover` layout into `~/.config/herdr-app`, and never replaces a real folder. Expect 17 lines `ok   drover-…`. Full runbook: [docs/install.md](docs/install.md).
+`install.sh` runs no tests, links the 17 `drover-*` mods and the `drover` layout into `~/.config/herdr-app`, and never replaces a real folder. Expect 17 lines `ok   drover-…`. Full runbook: [docs/install.md](docs/install.md).
 
 **Installing a single mod from herdr.dev?** Each mod folder is import-self-contained, but some mods need a companion to be useful (for example New task needs Todos, and the Board needs Todos and Squads). Its recipe checks which other Drover mods you have and suggests installing all of them; what each needs is on its [mod page](docs/README.md#the-mods). Check yourself: `ls ~/.config/herdr-app/mods | grep '^drover-'` (you want 17, plus `layouts/drover.json`).
 
@@ -113,7 +113,7 @@ Everything is in **Drover Config** (`Drover ▾ → Config`): the work folder (`
 
 ## Development
 
-Node 22. `mods/install.sh` runs every test, then installs. Edit the shared library in `mods/_lib` only. See [CONTRIBUTING.md](CONTRIBUTING.md), [SECURITY.md](SECURITY.md) and [docs/development.md](docs/development.md).
+Node 22. `mods/install.sh` installs and runs no tests; run them with `node --test mods/_lib/*.test.js mods/_test/*.test.js`. Edit the shared library in `mods/_lib` only. See [CONTRIBUTING.md](CONTRIBUTING.md), [SECURITY.md](SECURITY.md) and [docs/development.md](docs/development.md).
 
 ## Status
 
