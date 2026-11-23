@@ -261,7 +261,6 @@ test("jira: refresh minutes are read live on every tick (no hard-coded 5 min)", 
   globalThis.__host.state[CFG] = {}; // site cleared: ticks make no request
   await tickAt(30);
   assert.equal(searches().length, 3);
-  assert.ok(v);
 });
 
 test("jira: loadContext (Room/Todos) uses the configured site; empty site -> an Issue error and no fetch", async () => {

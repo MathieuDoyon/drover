@@ -78,8 +78,7 @@ for (const n of [3, 30, 300]) {
     assert.deepEqual(cold.d, none, "cold render with remote Review cards");
     assert.ok(cold.out.ids.includes("task-box1/P-9/T-R1"));
     assert.deepEqual(delta(calls, () => render(t, cx)).d, none, "warm render");
-    const timer = delta(calls, () => { for (let i = 0; i < 3; i++) tick(); });
-    assert.ok(timer.d.hc >= 0); // the probe belongs to the timer: whatever it starts, render did not
+    for (let i = 0; i < 3; i++) tick(); // the probe belongs to the timer: whatever it starts, render did not
     const after = delta(calls, () => render(t, cx));
     assert.deepEqual(after.d, none, "render after the timer ran");
     assert.ok(after.out.ids.includes("ro-done-box1/P-9/T-R1"), "the ✓ of a remote Review card is a disabled control with the reason from the cache");
@@ -90,9 +89,7 @@ test("Tasks render: a probe that is expired or not answered is retried by the ti
   const { t, cx, calls, tick } = setup(3, { remote: true });
   tick();
   for (let i = 0; i < 4; i++) assert.deepEqual(delta(calls, () => render(t, cx)).d, none, `render ${i}`);
-  const hcBefore = calls.hc;
   tick(); tick();
-  assert.ok(calls.hc >= hcBefore);
   assert.deepEqual(delta(calls, () => render(t, cx)).d, none);
 });
 

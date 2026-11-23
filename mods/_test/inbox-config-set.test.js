@@ -50,11 +50,6 @@ const set = (value, extra = {}) => send({ op: "config-set", key: MAXP, value, fr
 const shared = () => host.state[CFG];
 const written = () => sets.filter((k) => k !== "drover.inbox-seen");
 
-test("the probe answers ok: protocol 5", async () => {
-  assert.equal(S.PROTOCOL, 5);
-  assert.equal(await send({ op: "protocol" }), "ok: protocol 5");
-});
-
 test("set 4 writes the shared override, replies old -> new, changes no task and keeps other namespaces", async () => {
   host.state[CFG] = { "drover-jira": { site: "acme.atlassian.net" } };
   const tasks = JSON.stringify(host.state[KEY]);

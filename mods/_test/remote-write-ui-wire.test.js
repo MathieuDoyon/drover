@@ -881,7 +881,6 @@ test("T3 create: the assignee chip is live at protocol 3 and the add carries it;
   const v = new Editor(cx);
   let launched = 0; v.launch = () => { launched++; };
   assert.equal(toolTip(view(v, cx, "trig-assignee").node), undefined);
-  assert.ok(!/Starts|start/i.test(view(v, cx, "editor").texts.join(" ")) || true);
   v.setProp("assignee", { kind: "agent", id: "wrangler" }, cx); v.setProp("priority", "P1", cx); v.toggleLabel("ui", cx);
   v.title.value = () => "with owner";
   v.onCreate(cx);

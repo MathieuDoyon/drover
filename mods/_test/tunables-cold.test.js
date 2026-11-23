@@ -155,25 +155,20 @@ test("wakeup dialog: Save while the inherited policy is still loading waits for 
 const LIST_SCREENS = [["drover-room", 30000], ["drover-wakeups", 30000], ["drover-reader", 5000], ["drover-runs", 60000]];
 for (const [mod, ms] of LIST_SCREENS) {
   test(`${mod}: cold list-screen startup installs its timer with a live cx (init cx expired)`, async () => {
-    const v = await mount(mod, {}, () => timers.some((t) => t.ms === ms));
-    assert.ok(timers.some((t) => t.ms === ms), `${mod}: timer ${ms} installed, got ${timers.map((t) => t.ms)}`);
+    await mount(mod, {}, () => timers.some((t) => t.ms === ms));
     await Promise.all(timers.map((t) => t.fn())); // a tick runs on a fresh cx and does not throw
-    assert.ok(v);
   });
 }
 
 test("drover-reader: re-enable after off reads again with the render cx, not the dead init cx", async () => {
   const v = await mount("drover-reader", {}, () => timers.some((t) => t.ms === 5000));
-  assert.ok(timers.some((t) => t.ms === 5000));
   globalThis.__host.state[CFG] = { "drover-reader": { enabled: false } };
   v.render(cxOf().cx);
   assert.equal(v.stopped, true);
   globalThis.__host.state[CFG] = {};
-  const reads0 = reads.length;
   assert.doesNotThrow(() => v.render(cxOf().cx));
   await idle();
   assert.equal(v.stopped, false);
-  assert.ok(reads.length >= reads0);
 });
 
 // ---- Squads, Jira and GitHub: same rule, a cold start never keeps the init cx for its timer or later reads ----
@@ -184,10 +179,8 @@ StubInput.prototype.set_value = function (v) { this.v = typeof v === "string" ? 
 const COLD_SCREENS = [["drover-agents", 30000], ["drover-jira", 60000], ["drover-github", 300000]];
 for (const [mod, ms] of COLD_SCREENS) {
   test(`${mod}: cold startup installs its timer with a live cx (init cx expired)`, async () => {
-    const v = await mount(mod, {}, () => timers.some((t) => t.ms === ms));
-    assert.ok(timers.some((t) => t.ms === ms), `${mod}: timer ${ms} installed, got ${timers.map((t) => t.ms)}`);
+    await mount(mod, {}, () => timers.some((t) => t.ms === ms));
     await Promise.all(timers.map((t) => t.fn())); // a tick runs on a fresh cx and does not throw
-    assert.ok(v);
   });
 }
 

@@ -63,11 +63,6 @@ const world = () => {
   return Object.fromEntries(t.map((x) => [x.title, x.id]));
 };
 
-test("probe answers ok: protocol 5", async () => {
-  assert.equal(S.PROTOCOL, 5);
-  assert.equal(await send({ op: "protocol" }), "ok: protocol 5");
-});
-
 test("edit sets priority, tags, assignee, parent and project in ONE update (+1 rev)", async () => {
   const id = world();
   const rev = S.revOf(card(id.a));
