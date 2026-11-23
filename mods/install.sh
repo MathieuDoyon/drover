@@ -2,6 +2,7 @@
 # Copy the shared library into each drover-* mod, link the mods into Herdr, check them. It runs no tests (CI and docs/development.md run them).
 # Never replaces a real folder in the Herdr home: only its own symlinks.
 # DROVER_SKIP_MODS="drover-jira drover-github" (space list) leaves those mods out and removes their symlink; default empty = all mods.
+# The mod checks run 4 at a time after each mod is linked (links stay serial): a failing mod no longer stops the later links, but is reported first (in mod order, with its output) before the layout, the gate and the stamp, exit 1.
 # Herdr hot-reloads a mod when any of its files is saved, and a symlink that points at a deleted worktree breaks the mod.
 # So a run changes only what differs (a file with equal bytes keeps its mtime, a link already right is left alone), and a run
 # from a linked git worktree is refused unless --from-worktree is given (the "look first" flow: the mods then point at that worktree).
@@ -28,6 +29,23 @@ if ! mkdir "$lock" 2>/dev/null; then
   echo "REFUSE: another install is running in this checkout (or a killed run left $lock: remove that folder if no install.sh is running). Nothing was written." >&2
   exit 2
 fi
+# The per-mod `herdr-app check` calls run in the background, 4 at a time (bash 3.2 has no `wait -n`). chk_reap kills every check still running and its whole
+# process tree (TERM, a short bounded poll, then KILL) and runs FIRST in every exit path, before a lock is released. Idempotent. SIGKILL of install.sh cannot run it.
+chk_pids=""; chk_mods=""; chk_res=""; chk_n=0; ck=""
+chk_tree() { local c; echo "$1"; for c in $(pgrep -P "$1" 2>/dev/null || true); do chk_tree "$c"; done; }
+chk_reap() {
+  local all="" p i live=""
+  for p in $chk_pids; do ! kill -0 "$p" 2>/dev/null || all="$all $(chk_tree "$p")"; done
+  chk_pids=""; chk_mods=""
+  [ -n "$all" ] || return 0
+  kill -TERM $all 2>/dev/null || true
+  for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+    live=""; for p in $all; do ! kill -0 "$p" 2>/dev/null || live=1; done
+    [ -n "$live" ] || break; sleep 0.1
+  done
+  [ -z "$live" ] || kill -KILL $all 2>/dev/null || true
+  wait 2>/dev/null || true
+}
 trap 'rmdir "$lock" 2>/dev/null || true' EXIT
 # The links record lives in the home and is shared by every checkout that installs into it: one installer per home as well (always the checkout lock first,
 # then this one, so two installers cannot wait on each other). Released by the same trap.
@@ -54,7 +72,8 @@ head_of() { local v="H_${1//[^A-Za-z0-9]/_}"; cur="${!v:-}"; }
 # name is never opened or followed. rtmp (in the home, beside the baselines) serves the records; <mod>/.drover-tmp.<pid>.<file>/ serves each managed file.
 # Only directories this run created are ever deleted: an existing name is refused (the records then fail closed), never adopted or cleaned.
 rtmp="$home/.drover-baseline/.run.$run_id"; tn=0; rtmp_made=0; backups_made=0
-trap 'rmdir "$homelock" 2>/dev/null || true; rmdir "$lock" 2>/dev/null || true; [ "$rtmp_made" != 1 ] || rm -rf "$rtmp" 2>/dev/null || true' EXIT
+trap 'trap "" HUP INT TERM; chk_reap; rmdir "$homelock" 2>/dev/null || true; rmdir "$lock" 2>/dev/null || true; [ "$rtmp_made" != 1 ] || rm -rf "$rtmp" 2>/dev/null || true' EXIT
+trap 'exit 129' HUP; trap 'exit 130' INT; trap 'exit 143' TERM # a catchable signal runs the EXIT trap (checks reaped, locks released), which ignores further signals while it works
 rtmp_init() { [ "$rtmp_made" = 1 ] || { mkdir -p "$home/.drover-baseline" 2>/dev/null && mkdir "$rtmp" 2>/dev/null && rtmp_made=1; }; }
 backup_init() { [ "$backups_made" = 1 ] || { mkdir -p "${backups%/*}" 2>/dev/null && mkdir "$backups" 2>/dev/null && backups_made=1; }; }
 put_file() { # <src> <dest>: atomic copy into place; refuses a folder as the destination
@@ -266,6 +285,30 @@ ensure_link() { # <name> <path> <wanted target>; returns 1 when a link was kept
   fi
   ln -sfn "$want" "$path"; link_set "$name" "$want" || true; return 0
 }
+# chk_start <mod> <target>: start one check in the background (output kept in a file of this run's scratch folder); every 4th start waits for the batch.
+chk_start() {
+  if [ -z "$ck" ]; then rtmp_init && mkdir "$rtmp/chk" 2>/dev/null && ck="$rtmp/chk" || { echo "FAIL $1: no scratch folder for the check output" >&2; exit 1; }; fi
+  herdr-app check "$2" >"$ck/$1.out" 2>&1 &
+  chk_pids="$chk_pids $!"; chk_mods="$chk_mods $1"; chk_n=$((chk_n+1))
+  [ $((chk_n % 4)) != 0 ] || chk_wait
+}
+chk_wait() { # every wait is guarded (set -e); a check that cannot be waited for counts as failed
+  local p m
+  set -- $chk_mods
+  for p in $chk_pids; do m=$1; shift; wait "$p" && chk_res="$chk_res $m:0" || chk_res="$chk_res $m:$?"; done
+  chk_pids=""; chk_mods=""
+}
+# chk_finish: report in mod order. The first failing mod prints its output, later failures only their names; exit 1 whatever the check's own code was (before the layout, the gate and the stamp).
+chk_finish() {
+  local r m bad=""
+  chk_wait
+  for r in $chk_res; do
+    m="${r%%:*}"
+    if [ "${r##*:}" = 0 ]; then echo "ok   $m"; continue; fi
+    echo "FAIL $m" >&2; [ -n "$bad" ] || cat "$ck/$m.out" >&2; bad=1
+  done
+  [ -z "$bad" ] || exit 1
+}
 for mod in drover-*/; do
   mod="${mod%/}"
   target="$home/mods/$mod"
@@ -278,8 +321,9 @@ for mod in drover-*/; do
   esac
   if [ -e "$target" ] && [ ! -L "$target" ]; then echo "skip $mod: $target is not a symlink" >&2; continue; fi
   ensure_link "mods/$mod" "$target" "$PWD/$mod" || true
-  herdr-app check "$target" >/dev/null && echo "ok   $mod" || { echo "FAIL $mod" >&2; herdr-app check "$target"; exit 1; }
+  chk_start "$mod" "$target"
 done
+chk_finish
 # The drover layout (main + capsule tabs + Tasks column). Switch: herdr-app do layout.switch '{"name":"drover"}'
 target="$home/layouts/drover.json"
 if [ -e "$target" ] && [ ! -L "$target" ]; then echo "skip layout: $target is not a symlink" >&2
