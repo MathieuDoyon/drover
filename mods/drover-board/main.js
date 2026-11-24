@@ -125,13 +125,13 @@ export default class Board extends View {
   drop(col, beforeId, cx) {
     const id = this.drag; this.drag = null; this.over = null;
     const rc = id ? loadMerged().tasks.find((x) => x.id === id && x.remote) : null;
-    if (rc) { const op = this.wstate(rc).on ? moveOp(rc, col) : null; if (op) this.rsend(rc.project, op, cx); } // a remote card moves through the remote's inbox, to the column only
+    if (rc) { const op = this.wstate(rc, "move").on ? moveOp(rc, col) : null; if (op) this.rsend(rc.project, op, cx); } // a remote card moves through the remote's inbox, to the column only
     else if (id && id !== beforeId) save(reorder(load(), id, col, beforeId));
     cx.notify();
   }
 
   // Remote write controls (T-MWHVWR8TIJB): the state comes from io.js, the ops from remote-write-ui.js; remote-write.js builds the request.
-  wstate(card) { return controlState(remoteWriteState(card.project)); }
+  wstate(card, op) { return controlState(remoteWriteState(card.project), op); }
   async rsend(localId, op, cx) { const o = await remoteSend(localId, op, cx); this.msg = outcomeText(o); cx.notify(); return o; }
   remoteScopeId(merged = loadMerged()) { return this.scope.startsWith("project:") && merged.remotes.find((r) => `project:${r.localId}` === this.scope)?.localId || null; }
   // A new card on a remote project: the read-only card view opens in "new" mode (Save sends an add).
@@ -143,7 +143,7 @@ export default class Board extends View {
   addControl(id, mk, localColumn, rs) {
     const rid = this.remoteScopeId(rs?.merged);
     if (!rid) return mk(null, () => edit(null, localColumn));
-    const w = rs ? rs.gateOf(rid) : controlState(remoteWriteState(rid));
+    const w = rs ? rs.gateOf(rid, "add") : controlState(remoteWriteState(rid), "add");
     return mk(w.on ? null : w.tip, w.on ? () => this.newRemote(localColumn, rid) : null);
   }
 
@@ -158,9 +158,9 @@ export default class Board extends View {
     let r = c < 0 ? -1 : cols[c].cards.findIndex((x) => x.id === this.selected);
     const card = c < 0 ? null : cols[c].cards[r];
     const k = e.key;
-    if (k === "n") { const rid = this.remoteScopeId(); return rid ? (controlState(remoteWriteState(rid)).on ? this.newRemote(this.newColumn(), rid) : undefined) : edit(null, this.newColumn()); }
+    if (k === "n") { const rid = this.remoteScopeId(); return rid ? (controlState(remoteWriteState(rid), "add").on ? this.newRemote(this.newColumn(), rid) : undefined) : edit(null, this.newColumn()); }
     if (c < 0) { this.selected = cols.find((col) => col.cards.length)?.cards[0]?.id ?? null; return cx.notify(); }
-    if (e.modifiers.shift && (k === "left" || k === "right") && card.remote) { const op = this.wstate(card).on ? shiftOp(card, this.visibleIds(), k === "left" ? -1 : 1) : null; if (op) this.rsend(card.project, op, cx); return; }
+    if (e.modifiers.shift && (k === "left" || k === "right") && card.remote) { const op = this.wstate(card, "move").on ? shiftOp(card, this.visibleIds(), k === "left" ? -1 : 1) : null; if (op) this.rsend(card.project, op, cx); return; }
     if (e.modifiers.shift && (k === "left" || k === "right")) save(shiftVisible(load(), card.id, k === "left" ? -1 : 1, this.visibleIds()));
     else if (k === "enter") return edit(card.id, undefined, undefined, undefined, undefined, card.remote ? card : undefined);
     else if (k === "s") return card.remote ? undefined : pick(card.id);
@@ -192,7 +192,7 @@ export default class Board extends View {
     // One snapshot per render (T-MWL7FAABO29): every shared read the render needs happens here, once; nothing inside a card or column closure reads shared state.
     // It lives only in this call. The write gate of a remote project is display-only and computed once per project (it reads the projects, the cache and the pending list).
     const gates = new Map();
-    const gateOf = (pid) => { if (!gates.has(pid)) gates.set(pid, controlState(remoteWriteState(pid))); return gates.get(pid); };
+    const gateOf = (pid, op) => { const k = `${pid}|${op}`; if (!gates.has(k)) gates.set(k, controlState(remoteWriteState(pid), op)); return gates.get(k); };
     const rs = { projects, merged, fctx: this.filterCtx(projects), visible: this.visibleIds(), dflt: cfg("drover-board", "default_sort"), gateOf };
     rs.all = this.allColumns(rs);
     const cfg_ = rs.fctx.config;
@@ -206,7 +206,7 @@ export default class Board extends View {
         .text_size(11).text_color(color).when(Boolean(iconName), (el) => el.child(svg(I(iconName)).size(11))).child(text);
       const ago = updatedAgo(x.updated);
       const ro = Boolean(x.remote); // a card of a project on another machine
-      const w = ro ? gateOf(x.project) : null; // its write controls: on when the remote is reachable, updated and not frozen
+      const w = ro ? gateOf(x.project, "move") : null; // its write controls: on when the remote is reachable, updated and not frozen
       const shift = (dir) => ro ? (w.on ? icon(`${dir < 0 ? "l" : "r"}-${x.id}`, dir < 0 ? "chevron-left" : "chevron-right", (cx) => { const op = shiftOp(x, this.visibleIds(), dir); if (op) this.rsend(x.project, op, cx); }) : off(`${dir < 0 ? "l" : "r"}-${x.id}`, dir < 0 ? "chevron-left" : "chevron-right", w.tip))
         : icon(`${dir < 0 ? "l" : "r"}-${x.id}`, dir < 0 ? "chevron-left" : "chevron-right", () => save(shiftVisible(load(), x.id, dir, this.visibleIds())));
       const dim = ro && staleNow(x) ? 0.55 : 1;

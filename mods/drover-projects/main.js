@@ -4,8 +4,8 @@ import { View, div } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, TextareaState, Textarea } from "gpui-base";
 import { theme, setShared, props, closeOverlay, openOverlay, exec, notify, shared, readTextFile, home } from "herdr";
 import { PROJECTS_KEY, addProject, updateProject, removeProject } from "./store.js";
-import { load, loadProjects, modSettings, remote, remoteWriteState, setRemoteWrites } from "./io.js";
-import { writesToggle } from "./remote-write-ui.js";
+import { load, loadProjects, modSettings, remote, remoteWriteState, setRemoteWrites, setRemoteTransport } from "./io.js";
+import { writesToggle, transportToggle } from "./remote-write-ui.js";
 import { withRemote, remoteOf } from "./remote.js";
 import { bind, isEnabled, whenLoaded, ready as cfgReady } from "./config.js";
 import { gated } from "./ui.js";
@@ -17,7 +17,7 @@ const button = (t, id, text, primary, action) =>
     .text_color(primary ? t.solid_foreground : t.foreground).text_size(12.5)
     .hover((s) => s.opacity(0.88)).on_click(action).child(text);
 
-export const openEditor = (id) => openOverlay({ mod: "drover-projects", kind: "dialog", modal: true, width: 540, props: { projectEdit: id ?? null } });
+export const openEditor = (id) => openOverlay({ mod: "drover-projects", kind: "dialog", modal: true, width: 540, height: 0.8, props: { projectEdit: id ?? null } }); // a definite height (as the proof and pick dialogs): the body scrolls inside it
 
 // The first repo path that is not a git repo, or null. A missing folder fails git too.
 export async function badRepo(paths) {
@@ -85,7 +85,7 @@ export class ProjectEditor {
     if (this.closed || this.binding || !this.project) return;
     const gen = ++this.bindGen, expected = JSON.stringify(remoteOf(loadProjects(), this.project.id) ?? null);
     this.binding = true; this.remoteMsg = "Checking…"; cx.notify();
-    const r = await remote.bind(this.project, { machine: this.machine.value().trim(), projectId: this.remoteId.value().trim() }, { tasks: load(), projects: loadProjects() });
+    const r = await remote.bind(this.project, { machine: this.machine.value().trim(), projectId: this.remoteId.value().trim(), transport: remoteOf(loadProjects(), this.project.id)?.transport }, { tasks: load(), projects: loadProjects() });
     this.binding = false;
     // An Unbind, a close or another dialog's change while checking cancels this attempt: it never writes back.
     if (gen !== this.bindGen || JSON.stringify(remoteOf(loadProjects(), this.project.id) ?? null) !== expected) { this.remoteMsg = "Cancelled: the binding changed while checking"; cx.notify(); return; }
@@ -103,6 +103,18 @@ export class ProjectEditor {
     if (!cur) return;
     setRemoteWrites(this.project.id, cur.writes === false);
     if (!this.writesTimer && cx.timer?.every) { this.writesTimer = true; cx.timer.every(1000, (cx) => { if (!this.closed) cx.notify(); }); }
+    cx.notify();
+  }
+
+  // Flip inbox <-> exec: the binding only (no data moves). Going to exec first asks the machine for drover-headless.
+  async flipTransport(cx) {
+    const cur = remoteOf(loadProjects(), this.project?.id);
+    if (!cur || this.binding) return;
+    const to = transportToggle(cur).next;
+    this.binding = true; this.remoteMsg = to === "exec" ? "Checking the machine…" : "Switching…"; cx.notify();
+    const r = await setRemoteTransport(this.project.id, to);
+    this.binding = false;
+    this.remoteMsg = r.error ?? `Transport is now ${r.transport}`;
     cx.notify();
   }
 
@@ -140,7 +152,7 @@ export class ProjectEditor {
     const t = theme();
     const label = (text) => div().pt(12).pb(5).text_size(11.5).text_color(t.dim).child(text);
     const field = (el) => el.px(10).rounded(8).border_1().border_color(t.input).bg(t.background).text_size(13).text_color(t.foreground);
-    return v_flex().id("project-editor").w_full().p(18).bg(t.popover).text_color(t.foreground)
+    return v_flex().id("project-editor").w_full().max_h_full().min_h(0).p(18).bg(t.popover).text_color(t.foreground)
       .on_key_down((e, cx) => { if (e.key === "escape") { this.close(); cx.stop_propagation(); } })
       .child(h_flex().items_center()
         .child(h_flex().flex_1().items_center().gap(6).text_size(15).font_semibold()
@@ -154,6 +166,7 @@ export class ProjectEditor {
             .child(this.project.id)
             .child(div().text_size(11).font_weight(400).text_color(this.copied ? t.done : t.dim).child(this.copied ? "Copied" : "⧉ Copy")))))
         .child(div().text_size(11).text_color(t.dim).child("Esc")))
+      .child(v_flex().id("project-editor-body").flex_1().min_h(0).overflow_y_scrollbar() // the body scrolls; the header (Esc) and the Cancel/Save row stay in view
       .child(label("Name")).child(field(Input.new(this.name).h(34)))
       .child(label("Repos (git, one path per line, first is the default)")).child(field(Textarea.new(this.repos)).py(6))
       .child(label("Folders (one path per line)")).child(field(Textarea.new(this.folders)).py(6))
@@ -177,11 +190,17 @@ export class ProjectEditor {
           return e.child(h_flex().pt(8).gap(8).items_center()
             .child(button(t, "toggle-writes", g.on ? "Turn writes off" : "Turn writes on", false, (_e, cx) => this.toggleWrites(cx)))
             .child(div().id("writes-note").flex_1().min_w(0).text_size(12).text_color(t.muted).child(`${g.label}: ${g.note}`)));
-        }))
+        })
+        .when(Boolean(remoteOf(loadProjects(), this.project.id)), (e) => {
+          const tt = transportToggle(remoteOf(loadProjects(), this.project.id));
+          return e.child(h_flex().pt(8).gap(8).items_center()
+            .child(button(t, "toggle-transport", tt.button, false, (_e, cx) => cx.spawn((acx) => this.flipTransport(acx))))
+            .child(div().id("transport-note").flex_1().min_w(0).text_size(12).text_color(t.muted).child(`${tt.label}: ${tt.note}`)));
+        })))
       .when(Boolean(this.error), (el) => el.child(div().pt(10).text_size(12).text_color(t.blocked).child(this.error)))
       .child(h_flex().pt(18).gap(8).child(div().flex_1())
         .child(button(t, "ed-cancel", "Cancel", false, () => this.close()))
-        .child(button(t, "ed-save", "Save", true, (_e, cx) => cx.spawn((acx) => this.save(acx)))));
+        .child(button(t, "ed-save", "Save", true, (_e, cx) => cx.spawn((acx) => this.save(acx))))).h_full(); // h_full on the root, as the drover-agents dialogs: a definite height for the flex_1 body
   }
 }
 

@@ -347,7 +347,7 @@ export class Editor {
         this.textDeferred = true; return false;
       }
       this.textDeferred = false;
-      const w = this.wstate();
+      const w = this.wstate(op.op);
       if (!w.on) { this.msg = w.tip; this.textDeferred = true; return false; } // never sent: a later op retries it
       const last = await this.remoteSender(base.project, op, cx);
       if (last.status === "pending" && last.nonce) this.sent.set(last.nonce, { op, destLocal: base.project, text: snap });
@@ -554,7 +554,8 @@ export class Editor {
 
   // ── a remote card: Save / Create go through the writer. Each op is sent after the one before it was saved (a save re-reads the board: the next op carries the new rev).
   rname() { return this.remote?.remote?.machine || "the remote machine"; } // the machine this card or project is bound to, for the messages
-  wstate() { return controlState(remoteWriteState(this.card.project)); }
+  gstate() { return controlState(remoteWriteState(this.card.project)); } // freshness and writes only: for the banner, never for a control
+  wstate(op) { return controlState(remoteWriteState(this.card.project), op); } // op: the card op the control sends (the exec transport gates each op); none: freshness and writes only
   fstate() { return fieldState(remoteWriteState(this.card.project)); } // { on, tip }: priority, labels, assignee, parent, project
   // The options of the field pickers: ONLY what the remote's board carries (its assignees, its same-project cards, its tags, this machine's bound projects).
   remoteChoices() {
@@ -595,7 +596,7 @@ export class Editor {
   remotePick(field, value, cx) {
     const key = { status: "column", priority: "priority", assignee: "assignee", project: "project", tags: "labels", parent: "parent" }[field];
     if (!key || this.closing || this.inflight()) return false;
-    if (field === "status" ? !this.wstate().on : !this.fstate().on) return false; // the control is dead: it says why
+    if (field === "status" ? !this.wstate("move").on : !this.fstate().on) return false; // the control is dead: it says why
     this[key] = value;
     this.startPick(); this.msg = "Sending…"; cx.notify();
     cx.spawn(async (acx) => {
@@ -684,15 +685,17 @@ export class Editor {
   remoteSave(cx) {
     if (this.closing) return;
     if (this.inflight()) { if (!this.submitting) this.msg = "Saving a change…"; return cx.notify(); }
-    const w = this.wstate();
+    const w = this.gstate();
     if (!w.on) { this.msg = w.tip; return cx.notify(); }
     const ops = this.remoteOps();
     if (!ops.length || ops.some((o) => !o)) { this.msg = this.card.new ? "A title is required" : "Nothing to save"; return cx.notify(); }
+    const opOff = ops.map((o) => this.wstate(o.op)).find((c) => !c.on); // each op of the save has its own gate on the exec transport
+    if (opOff) { this.msg = opOff.tip; return cx.notify(); }
     this.remoteRun(cx, ops, Boolean(this.card.new), this.card);
   }
   remoteArchive(cx) {
     const op = archiveOp(this.card);
-    if (!op || this.pickBusy() || this.closing || !this.wstate().on) return;
+    if (!op || this.pickBusy() || this.closing || !this.wstate("archive").on) return;
     cx.spawn(async (acx) => { // typed text is flushed first, as local does
       if (!(await this.flushSave(acx))) return;
       if (!this.closing && !this.pickBusy()) this.remoteRun(acx, [archiveOp(this.card)], true, this.card);
@@ -1129,7 +1132,7 @@ export class Editor {
         return RC.projects.some((x) => x.id === p.id) ? undefined : `not a project on ${p.remote.machine}`;
       }
       if (this.task) return p.remote ? "move between machines comes later" : undefined;
-      if (p.remote) { const c = controlState(remoteWriteState(p.id)); return c.on ? undefined : c.tip; }
+      if (p.remote) { const c = controlState(remoteWriteState(p.id), "add"); return c.on ? undefined : c.tip; } // where to CREATE the card: an add
       return undefined;
     };
     const prio = PRIORITY_COLOR(t);
@@ -1240,7 +1243,8 @@ export class Editor {
     const avatar = (id, name, size = 22) => div().id(id).size(size).flex_none().flex().items_center().justify_center().rounded_full().bg(t.raised).border_1().border_color(t.border)
       .text_size(size < 20 ? 9.5 : 10.5).text_color(t.muted).child(initialOf(name));
     const curParent = this.task && this.parent ? load().find((x) => x.id === this.parent) ?? null : null; // a deleted parent reads as none
-    const R = this.remote, w = R ? this.wstate() : null;
+    const R = this.remote, w = R ? this.gstate() : null; // w: the banner (freshness, writes, clock). Each control below uses its own op's gate.
+    const wArchive = R ? this.wstate("archive") : null, wSend = R ? this.wstate(R.new ? "add" : "note") : null, wMove = R ? this.wstate("move") : null, wEdit = R ? this.wstate("edit") : null;
     const fsr = R ? (!R.new && this.inflight() ? { on: false, tip: this.inflightTip() } : this.fstate()) : null; // the field controls: on only when the remote's probe said protocol 3
     // A control that cannot work for a remote card stays visible, dimmed, with the reason as its tooltip.
     const off = (name, icon, text, tip = offTip(R?.remote?.machine)) => h_flex().id(`trig-${name}`).h(28).px(10).gap(6).items_center().flex_none().rounded_full().border_1().border_color(t.input)
@@ -1263,7 +1267,7 @@ export class Editor {
       const parentCard = this.parent ? loadMerged().tasks.find((x) => x.id === this.parent && x.project === R.project) : null;
       const curParentText = this.parent ? (parentCard ? parentLabel(parentCard) : this.parent) : "No parent";
       const ro = remoteWriteState(R.project);
-      const roText = [w.on ? null : statusLine(ro), this.msg || null].filter(Boolean).join(" · "); // nothing while writes are on and there is nothing to report
+      const roText = [w.on ? (!R.new && !wEdit.on ? `text and fields: ${wEdit.tip}` : null) : statusLine(ro), this.msg || null].filter(Boolean).join(" · "); // nothing while writes are on and there is nothing to report
       const rnote = (n, i) => v_flex().id(`remote-note-${i}`).flex_none().gap(8).p(12).rounded(10).border_1().border_color(cardBorder).bg(cardBg)
         .child(h_flex().flex_none().h(24).gap(8).items_center()
           .child(avatar(`note-avatar-${i}`, n.by))
@@ -1297,8 +1301,10 @@ export class Editor {
         .child(h_flex().id("body-row").flex_1().min_h(0)
           .child(v_flex().id("main-col").h_full().flex_1().min_w(0).min_h(0).px(24).pt(16).pb(12).gap(10)
             .child(v_flex().id("thread").flex_1().min_h(0).overflow_y_scrollbar().gap(14)
-              .child(Input.new(this.title).h(40).flex_none().text_size(22).font_semibold())
-              .child(v_flex().id("desc-block").flex_none().w_full().child(Textarea.new(this.desc).text_size(14)))
+              .child(R && !R.new && !wEdit.on ? div().id("title-text").h(40).flex_none().text_size(22).font_semibold().child(this.title.value()) : Input.new(this.title).h(40).flex_none().text_size(22).font_semibold()) // edit not supported: read-only text
+              .child(v_flex().id("desc-block").flex_none().w_full().child(R && !R.new && !wEdit.on
+                ? div().id("desc-view").text_size(14).line_height(1.6).text_color(this.desc.value().trim() ? t.foreground : t.dim).child(this.desc.value().trim() ? this.desc.value() : "No description")
+                : Textarea.new(this.desc).text_size(14)))
               .child(h_flex().id("activity-header").flex_none().h(28).gap(8).items_center().child(div().text_size(13).font_medium().child("Activity"))
                 .when(rows.notes.length > 0, (el) => el.child(div().text_size(12).text_color(t.muted).child(String(rows.notes.length)))))
               .child(v_flex().id("notes").flex_none().gap(10).children(foldNotes(rows.notes).map((item) => {
@@ -1313,16 +1319,16 @@ export class Editor {
               .child(v_flex().id("remote-note-new").gap(4).p(8).rounded(10).border_1().border_color(t.input).bg(t.background)
                 .child(Textarea.new(this.note).h(64).text_size(13).border_0())
                 .child(h_flex().items_center().gap(8).child(div().flex_1())
-                  .child(w.on && !this.submitting ? button(t, "remote-archive", "Archive", false, (_e, cx) => this.remoteArchive(cx))
-                    : div().id("remote-archive").h(30).px(12).flex().items_center().rounded(7).border_1().border_color(t.input).text_color(t.dim).text_size(12.5).opacity(0.5).tooltip(w.tip ?? "Sending…").child("Archive"))
+                  .child(wArchive.on && !this.submitting ? button(t, "remote-archive", "Archive", false, (_e, cx) => this.remoteArchive(cx))
+                    : div().id("remote-archive").h(30).px(12).flex().items_center().rounded(7).border_1().border_color(t.input).text_color(t.dim).text_size(12.5).opacity(0.5).tooltip(wArchive.tip ?? "Sending…").child("Archive"))
                   .child(h_flex().id("ed-create").h(32).px(14).gap(8).items_center().rounded(8).cursor_pointer()
-                    .bg(w.on && !this.submitting ? t.solid : t.raised).text_color(w.on && !this.submitting ? t.solid_foreground : t.dim).text_size(13).font_medium()
-                    .when(!w.on, (el) => el.tooltip(w.tip))
-                    .when(w.on, (el) => el.on_click((_e, cx) => this.onCreate(cx)))
+                    .bg(wSend.on && !this.submitting ? t.solid : t.raised).text_color(wSend.on && !this.submitting ? t.solid_foreground : t.dim).text_size(13).font_medium()
+                    .when(!wSend.on, (el) => el.tooltip(wSend.tip))
+                    .when(wSend.on, (el) => el.on_click((_e, cx) => this.onCreate(cx)))
                     .child("Send").child(keycap(t, "command", noteReadyR)).child(keycap(t, "corner-down-left", noteReadyR)))))))
           .child(v_flex().id("ed-sidebar").w(240).flex_none().h_full().border_l_1().border_color(t.border).p(12).gap(2).overflow_y_scrollbar()
             .child(section(t, "Properties"))
-            .child(lock ? sideRow("status", "Status", COLUMN_NAME[this.column], lockTip) : row("status", "Status", "", t[STATUS_ICON[this.column]?.tone], COLUMN_NAME[this.column], Select, null, true, "circle"))
+            .child(lock || (R && !wMove.on) ? sideRow("status", "Status", COLUMN_NAME[this.column], lock ? lockTip : wMove.tip) : row("status", "Status", "", t[STATUS_ICON[this.column]?.tone], COLUMN_NAME[this.column], Select, null, true, "circle"))
             .child(fsr.on ? row("priority", "Priority", "", prio[this.priority], `${this.priority} ${PRIORITY_LABEL[this.priority]}`, Select, null, true, "signal")
               : sideRow("priority", "Priority", `${this.priority} ${PRIORITY_LABEL[this.priority]}`, fsr.tip))
             .child(fsr.on ? row("assignee", "Assignee", "", t.muted, curRunner?.name ?? "No assignee", Select, null, true, "user")
@@ -1339,7 +1345,7 @@ export class Editor {
             .child(div().id("remote-wake-off").text_size(12).text_color(t.dim).child(`Wakeups: ${offTip(R?.remote?.machine)}`))));
     }
     if (!this.task) {
-      const ready = R ? w.on && !this.submitting && (!R.new || canCreate(this.title.value())) : agentMode ? canCreateAgent(this.prompt.value()) : canCreate(this.title.value());
+      const ready = R ? wSend.on && !this.submitting && (!R.new || canCreate(this.title.value())) : agentMode ? canCreateAgent(this.prompt.value()) : canCreate(this.title.value());
       const knob = div().size(16).flex_none().rounded_full().bg(t.foreground).when(this.another, (el) => el.ml(14));
       return v_flex().id("editor").size_full().bg(t.popover).text_color(t.foreground)
         .on_key_down((e, cx) => {
@@ -1384,9 +1390,9 @@ export class Editor {
             : h_flex().id("ed-mode").h(28).px(10).items_center().rounded(6).cursor_pointer().bg(t.accent).opacity(0.9).text_size(12.5).text_color(t.solid_foreground)
               .hover((s) => s.opacity(1)).on_click((_e, cx) => this.toggleMode(cx)).child(agentMode ? "⇄ Switch to Manual" : "⇄ Switch to Agent"))
           .child(div().flex_1())
-          .when(Boolean(R) && !R.new, (el) => el.child(R && w.on && !this.submitting
+          .when(Boolean(R) && !R.new, (el) => el.child(R && wArchive.on && !this.submitting
             ? button(t, "remote-archive", "Archive", false, (_e, cx) => this.remoteArchive(cx))
-            : div().id("remote-archive").h(30).px(12).flex().items_center().rounded(7).border_1().border_color(t.input).text_color(t.dim).text_size(12.5).opacity(0.5).tooltip(w?.tip ?? "Sending…").child("Archive")))
+            : div().id("remote-archive").h(30).px(12).flex().items_center().rounded(7).border_1().border_color(t.input).text_color(t.dim).text_size(12.5).opacity(0.5).tooltip(wArchive?.tip ?? "Sending…").child("Archive")))
           .when(!R || R.new, (el) => el.child(h_flex().gap(8).items_center()
             .child(Switch.new("create-another").w(34).h(20).p(2).flex_none().items_center().rounded_full().cursor_pointer()
               .bg(this.another ? t.solid : t.raised).border_1().border_color(this.another ? t.solid : t.input)
@@ -1394,8 +1400,8 @@ export class Editor {
             .child(div().text_size(13).text_color(t.muted).child("Create another"))))
           .child(h_flex().id("ed-create").h(32).px(14).gap(8).items_center().rounded(8).cursor_pointer()
             .bg(ready ? t.solid : t.raised).text_color(ready ? t.solid_foreground : t.dim).text_size(13).font_medium()
-            .when(Boolean(R) && !w.on, (el) => el.tooltip(w.tip))
-            .when(!R || w.on, (el) => el.on_click((_e, cx) => this.onCreate(cx)))
+            .when(Boolean(R) && !wSend.on, (el) => el.tooltip(wSend.tip))
+            .when(!R || wSend.on, (el) => el.on_click((_e, cx) => this.onCreate(cx)))
             .child(this.starting ? "Starting…" : agentMode ? "Create" : R && !R.new ? "Save" : "Create task").child(keycap(t, "command", ready)).child(keycap(t, "corner-down-left", ready))));
     }
     // Edit: the create shell. Text on the left, a fixed empty sidebar slot on the right (properties arrive there).

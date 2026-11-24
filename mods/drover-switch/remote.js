@@ -89,13 +89,13 @@ export const withRemote = (projects, id, remote) =>
   projects.map((p) => {
     if (p.id !== id) return p;
     const { remote: _old, ...rest } = p;
-    return remote ? { ...rest, remote: { machine: remote.machine, projectId: remote.projectId, ...(remote.id ? { id: remote.id } : {}) } } : rest;
+    return remote ? { ...rest, remote: { machine: remote.machine, projectId: remote.projectId, ...(remote.id ? { id: remote.id } : {}), ...(remote.transport === "exec" ? { transport: "exec" } : {}) } } : rest;
   });
 
 // The bindings a projects list holds: [{ localId, machine, projectId }].
 export const bindings = (projects) =>
   (Array.isArray(projects) ? projects : []).filter((p) => p?.remote && validMachine(p.remote.machine) && validProjectId(p.remote.projectId))
-    .map((p) => ({ localId: p.id, machine: p.remote.machine, projectId: p.remote.projectId, id: typeof p.remote.id === "string" ? p.remote.id : undefined }));
+    .map((p) => ({ localId: p.id, machine: p.remote.machine, projectId: p.remote.projectId, id: typeof p.remote.id === "string" ? p.remote.id : undefined, ...(p.remote.transport === "exec" ? { transport: "exec" } : {}) }));
 
 // ---- a remote description is text only: its image paths and file links mean files on the other machine ----
 export const isRemoteCard = (task) => Boolean(task?.remote);
@@ -147,7 +147,7 @@ const hhmm = (at) => { const d = new Date(at); return `${String(d.getHours()).pa
 // bound(machine, projectId, id): is this exact binding still the current one? Asked again at commit, so an unbind or rebind made by
 // ANOTHER reader (each mod holds its own) still drops a read that was already running. Default: always.
 // active(): is the owning screen still on? Asked at commit too, so a read that returns after a switch-off, before the next timer tick, is dropped.
-export function createRemote({ run, getShared, setShared, now = Date.now, log = () => {}, bound = () => true, active = () => true }) {
+export function createRemote({ run, getShared, setShared, now = Date.now, log = () => {}, bound = () => true, active = () => true, probeExec = null }) {
   const entries = new Map(); // cacheKey -> { machine, projectId, gen, failures, nextAt, inflight, ok, error }
   let genSeed = 0;
 
@@ -159,7 +159,7 @@ export function createRemote({ run, getShared, setShared, now = Date.now, log = 
   }
 
   // Binding checks. Returns { project } (the project with `remote` set; the caller saves it) or { error }.
-  async function bind(project, { machine, projectId }, { tasks, projects }) {
+  async function bind(project, { machine, projectId, transport }, { tasks, projects }) {
     if (!project) return { error: "No such project" };
     if (!validMachine(machine)) return { error: "Machine name: letters, digits, . _ - only (1-64)" };
     if (!validProjectId(projectId)) return { error: "Remote project id looks like P-XXXX" };
@@ -171,12 +171,18 @@ export function createRemote({ run, getShared, setShared, now = Date.now, log = 
     let machines = [];
     try { machines = JSON.parse(ml?.stdout ?? "").machines ?? []; } catch {}
     if (!machines.some((m) => m?.name === machine)) return { error: `Unknown machine ${machine} (see: hc machine ls)` };
-    const f = await fetchBoard(machine);
-    if (f.error) return { error: `${machine} did not answer (${f.error})` };
-    const parsed = parseRemote(f.text, projectId);
-    if (parsed.error) return { error: `${machine}'s board is unreadable (${parsed.error})` };
-    if (!parsed.projectIds.includes(projectId)) return { error: `${machine} has no project ${projectId}` };
-    return { project: { ...project, remote: { machine, projectId, id: `B-${now().toString(36)}-${Math.random().toString(36).slice(2, 8)}` } } }; // id: this binding, not the pair
+    const viaExec = transport === "exec";
+    if (viaExec) { // the exec transport: the machine must answer drover-headless (version, projects), not shared.json
+      const pe = probeExec ? await probeExec(machine, projectId) : { error: "the exec transport is not available here" };
+      if (pe.error) return { error: pe.error };
+    } else {
+      const f = await fetchBoard(machine);
+      if (f.error) return { error: `${machine} did not answer (${f.error})` };
+      const parsed = parseRemote(f.text, projectId);
+      if (parsed.error) return { error: `${machine}'s board is unreadable (${parsed.error})` };
+      if (!parsed.projectIds.includes(projectId)) return { error: `${machine} has no project ${projectId}` };
+    }
+    return { project: { ...project, remote: { machine, projectId, id: `B-${now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`, ...(viaExec ? { transport: "exec" } : {}) } } }; // id: this binding, not the pair
   }
 
   // Start tracking a binding. A new generation: any read still in flight for the old one is dropped.

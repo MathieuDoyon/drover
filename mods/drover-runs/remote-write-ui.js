@@ -8,14 +8,19 @@ const named = (machine) => machine || "the remote machine";
 const COLUMNS = ["backlog", "todo", "doing", "review", "blocked", "done"];
 
 // { on, tip } for any control that writes a card. ws = remoteWriteState(localId).
-export function controlState(ws) {
-  if (ws?.enabled) return { on: true, tip: null };
+// op: the card op this control sends (move, note, edit, add, archive). On the exec transport each op has its own gate (the remote's ops list), applied after the
+// freshness / writes / clock gate; the inbox transport has one gate for all (no ws.controls).
+export function controlState(ws, op) {
+  if (ws?.enabled) {
+    if (op && ws.controls && ws.controls[op] === false) return { on: false, tip: ws.opTips?.[op] || `The remote machine does not support ${op}` };
+    return { on: true, tip: null };
+  }
   if (ws?.frozen) return { on: false, tip: "writes frozen" };
   return { on: false, tip: ws?.reason || "writes are off" };
 }
 // { on, tip } for the field controls (priority, labels, assignee, parent, project): writes on AND the probe allows fields.
 export function fieldState(ws) {
-  const c = controlState(ws);
+  const c = controlState(ws, "edit");
   if (!c.on) return c;
   return ws?.fields?.on ? { on: true, tip: null } : { on: false, tip: ws?.fields?.tip || "needs the update for priority, labels, assignee, parent and project" };
 }
@@ -82,7 +87,7 @@ export function outcomeText(o) {
     case "stale": return `card changed on ${named(o.machine)}: reloaded, try again`;
     case "expired": return "not applied, too old";
     case "pending": return "sent, may still apply";
-    case "unknown": return `outcome unknown: check the card on ${named(o.machine)}`;
+    case "unknown": return o.transport === "exec" && o.message ? o.message : `outcome unknown: check the card on ${named(o.machine)}`; // exec: "…Repeat the action to retry safely"
     case "refused": case "failed": return o.message || "not sent";
     default: {
       const first = String(o.text ?? "").split("\n")[0].trim() || `error: ${o.message ?? "unknown"}`;
@@ -95,4 +100,16 @@ export function outcomeText(o) {
 export function writesToggle(remote, ws) {
   const on = remote?.writes !== false;
   return { on, label: `Writes to ${named(remote?.machine)}`, note: on ? "on" : ws?.frozen ? "frozen" : "off, waiting for sends in flight" };
+}
+
+// The "Transport" control next to it: inbox (the default, files in the machine's inbox) or exec (drover-headless over hc exec). Flipping saves the binding only.
+export function transportToggle(remote) {
+  const exec = remote?.transport === "exec";
+  return {
+    value: exec ? "exec" : "inbox",
+    next: exec ? "inbox" : "exec",
+    button: exec ? "Back to inbox" : "Switch to exec",
+    label: `Transport to ${named(remote?.machine)}`,
+    note: exec ? "exec: headless board. Back any time; nothing moves" : "inbox (default). exec needs install + migrate-in; nothing moves",
+  };
 }

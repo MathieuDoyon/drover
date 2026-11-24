@@ -8,10 +8,12 @@ import { fileURLToPath } from "node:url";
 import { install, check, doctor, formatDoctor, createHold, holdDir } from "../machines.js";
 
 const USAGE = `usage: drover machines install|check|doctor <machine> [--force] [--node <dir>] [--json]
+       drover machines migrate-in <machine> [--json]
        drover machines hold clear --reason <text>
   install   copy the CLI and its helpers to a linked machine as one complete generation, check it, then switch to it; --force replaces files edited on the machine
   check     read-only: each file is current, update, new, edited-remote, newer-remote or missing; exit 1 on any drift
   doctor    read-only: the checks of an install; clears the sync hold of this machine when everything passes; exit 1 only on FAIL
+  migrate-in  copy the cards and projects of the machine's old shared.json into its headless board (drover-headless migrate-in); existing ids are kept, it can be run again
   hold clear   the owner's release of a sync hold that cannot clear itself (an offline machine, a damaged record); appends a record, deletes nothing
   --node    the folder of node on the machine, tried after PATH and before the common places and version managers (node is required there)
   --json    machine-readable output
@@ -46,6 +48,33 @@ export const hcRuntime = () => ({
   },
 });
 
+// The old board of a machine is its shared.json under its home. Only the headless verb reads it; the answer's counts are printed, nothing else of it.
+// The headless launcher of the installed generation, relative to the remote home (hc exec starts there). Same string as _lib/remote-exec.js HEADLESS (a test compares them):
+// this file ships to machines, so it does not import the laptop transport code.
+export const HEADLESS = ".local/share/drover-herdr/current/bin/drover-headless";
+export const OLD_BOARD = ".config/herdr-app/shared.json";
+const KINDS = ["tasks", "projects", "agents", "squads"];
+const countsText = (c) => KINDS.map((k) => `${k} ${Number.isSafeInteger(c?.[k]) ? c[k] : 0}`).join(", ");
+async function migrateIn(rest, { out, err, runtime }) {
+  const json = rest.includes("--json");
+  const names = rest.filter((a) => a !== "--json");
+  if (names.length !== 1 || names[0].startsWith("-")) { err(USAGE); return 2; }
+  const machine = names[0];
+  let r = null;
+  try { r = await runtime.exec(machine, [HEADLESS, "migrate-in", "--from", OLD_BOARD], { timeout: 120 }); } catch { r = null; }
+  let j = null;
+  try { j = JSON.parse(String(r?.stdout ?? "")); } catch { j = null; }
+  const fail = (code, message) => { if (json) out(`${JSON.stringify({ ok: false, machine, code, message })}\n`); else err(`migrate-in failed on ${machine}: ${code}: ${message}\n`); return 1; };
+  if (r?.code === 69) return fail("E_NODE_NOT_FOUND", "Node is not available on the machine (run drover machines doctor)");
+  if (r?.code === 0 && j?.ok === true) {
+    if (json) out(`${JSON.stringify({ ok: true, machine, copied: j.copied ?? {}, skipped: j.skipped ?? {} })}\n`);
+    else out(`migrated into ${machine}: copied ${countsText(j.copied)}; skipped ${countsText(j.skipped)}\n`);
+    return 0;
+  }
+  if (r?.code === 1 && j?.ok === false && typeof j.code === "string" && /^[A-Za-z0-9_-]{1,40}$/.test(j.code)) return fail(j.code, "the machine refused it");
+  return fail("no-answer", `${machine} did not give a usable answer (is drover-headless installed? drover machines doctor ${machine})`);
+}
+
 export async function main(argv, { out = (s) => process.stdout.write(s), err = (s) => process.stderr.write(s), runtime = hcRuntime() } = {}) {
   const [verb, ...rest] = argv;
   const appHome = process.env.HERDR_APP_HOME || join(homedir(), ".config/herdr-app");
@@ -60,6 +89,7 @@ export async function main(argv, { out = (s) => process.stdout.write(s), err = (
     out(`hold cleared by hand (hold.${r.record.n}.json): ${reason}\n`);
     return 0;
   }
+  if (verb === "migrate-in") return migrateIn(rest, { out, err, runtime });
   if (!["install", "check", "doctor"].includes(verb)) { err(USAGE); return 2; }
   const opts = { force: false, nodeDir: "", json: false };
   let machine = "";

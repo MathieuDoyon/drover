@@ -6,6 +6,7 @@
 drover machines install <machine> [--force] [--node <dir>] [--json]
 drover machines check   <machine> [--node <dir>] [--json]
 drover machines doctor  <machine> [--node <dir>] [--json]
+drover machines migrate-in <machine> [--json]
 drover machines hold clear --reason <text>
 ```
 
@@ -76,6 +77,10 @@ doctor: N ok, N warn, N fail
 ```
 
 Checks: `name` (WARN only, when the machine is named `local`), `link` (the machine is connected; WARN when it may stop while nobody is logged in), `node`, `python3`, `current` (the link resolves to a generation with a `MANIFEST.json`), `files` (every sha256 and mode matches the stamp; an edit kept on purpose is checked against what was recorded), `tests` (each file's test argv, run on the machine), `entry` (the launcher), `hold`. Exit status 1 only on FAIL. `--json` prints `{ok, machine, checks[], summary}`. Doctor writes nothing on the machine.
+
+## migrate-in
+
+`drover machines migrate-in <machine>` runs `drover-headless migrate-in --from .config/herdr-app/shared.json` on the machine (the path is under its home) and prints what was copied and skipped, for tasks, projects, agents and squads. `--json` prints one JSON line. Exit 1 on a refusal, a machine that does not answer, or no node (`doctor` says why). It only reads the old file, keeps existing ids, and can be run again. It does not change any transport: that is the project editor's Transport control ([the cutover](remote-machines.md#the-exec-transport-and-the-cutover)).
 
 ## Live check (owner present)
 

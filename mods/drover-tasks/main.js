@@ -62,7 +62,7 @@ export default class Tasks extends View {
     const w = needsWorld();
     const controls = {};
     if (isEnabled("drover-tasks")) { // a remote card in Review: the ✓ control state (this may start the write probe, so it stays out of render)
-      for (const t of w.tasks) if (t.remote && t.column === "review" && !(t.project in controls)) controls[t.project] = controlState(remoteWriteState(t.project));
+      for (const t of w.tasks) if (t.remote && t.column === "review" && !(t.project in controls)) controls[t.project] = controlState(remoteWriteState(t.project), "move");
     }
     return { ...w, controls };
   }

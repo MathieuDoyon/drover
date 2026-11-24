@@ -290,10 +290,11 @@ export async function submit(env, { dir = boardDir(), now = Date.now, hooks, io 
 
 // ---------------------------------------------------------------------------------------------------------- read verbs
 const tasksHash = (tasks) => createHash("sha256").update(JSON.stringify(tasks)).digest("hex").slice(0, 16);
-export const versionInfo = () => ({ cli: CLI, schema: SCHEMA, ops: [...OPS] });
-export function revInfo(dir = boardDir()) {
+// `now` (ms) is this machine's clock, additive: the laptop measures the skew from it and refuses writes when it is over 30 s.
+export const versionInfo = (now = Date.now) => ({ cli: CLI, schema: SCHEMA, ops: [...OPS], now: now() });
+export function revInfo(dir = boardDir(), now = Date.now) {
   const { gen, state } = readBoard(dir);
-  return { gen, tasks: tasksHash(state.tasks), bytes: Buffer.byteLength(JSON.stringify(state.tasks)) };
+  return { gen, tasks: tasksHash(state.tasks), bytes: Buffer.byteLength(JSON.stringify(state.tasks)), now: now() };
 }
 export function tasksInfo(dir = boardDir()) {
   const { gen, state } = readBoard(dir);

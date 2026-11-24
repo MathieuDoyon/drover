@@ -298,6 +298,20 @@ export async function doctor(rt, opts) {
   const entryOk = P?.entry?.present && P.entry.sha === LAUNCHER_SHA && P.entry.mode === "755";
   if (!P || P.error) add("entry", "skip", "the machine could not be read");
   else add("entry", entryOk ? "ok" : "FAIL", entryOk ? `${ENTRY} runs the current generation` : P.entry?.present ? `${ENTRY} differs from the launcher (run install)` : `${ENTRY} is missing`);
+  // The exec transport stamps every write with the laptop's clock and the machine checks its age: a difference over 30 s refuses writes there (WARN only: it never holds an install).
+  if (!P || P.error || !P.current || problems.length || !node) add("clock", "skip", "needs an installed generation and node");
+  else {
+    const t0 = Date.now();
+    const r = await rt.exec(machine, [`${SHARE}/current/bin/drover-headless`, "version", "--json"], { timeout: 30 });
+    let j = null;
+    try { j = JSON.parse(r.stdout); } catch { j = null; }
+    if (r.code !== 0 || !Number.isFinite(j?.now)) add("clock", "WARN", "this drover-headless reports no clock: exec writes are refused until the machine is updated (drover machines install)");
+    else {
+      const skew = Math.round(j.now - (t0 + Date.now()) / 2);
+      const big = Math.abs(skew) > 30000;
+      add("clock", big ? "WARN" : "ok", big ? `the machine's clock is ${Math.round(Math.abs(skew) / 1000)} s ${skew > 0 ? "ahead of" : "behind"} this computer's: exec writes are refused over 30 s` : `within ${Math.max(1, Math.round(Math.abs(skew) / 1000))} s of this computer's clock`);
+    }
+  }
   let cleared = false;
   const currentId = P?.current ? posix.basename(P.current) : null;
   if (hold) {

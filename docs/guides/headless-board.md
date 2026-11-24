@@ -28,6 +28,10 @@ Send the same payload again to retry: a nonce seen in the last 24 hours with the
 
 Exit status: 0 ok, 1 refused (`{ok:false, code, error}`), 2 usage, 69 no node. Codes: `bad-envelope`, `nonce-reused`, `expired`, `stale`, `refused`, `unknown-op`, `busy`, `board-corrupt`, `board-schema`, `no-link` (the folder's filesystem cannot hard-link), `E_SYNC` (the file or the folder could not be fsynced: nothing is acknowledged, and a retry of the same payload syncs the folder again before it answers), `io`.
 
+## Used from the laptop
+
+A remote project set to the `exec` transport reads this board with `version`, `rev`, `tasks` and `projects`, and writes it with the verbs above, one envelope on stdin per call (see [the exec transport](remote-machines.md#the-exec-transport-and-the-cutover)). The `ops` of `version` decide which controls the laptop turns on. `drover machines migrate-in <machine>` fills this board from the machine's old `shared.json` ([Machines](machines.md#migrate-in)).
+
 ## import, move-out, migrate-in
 
 `import` creates a card from `{movedFrom, task}` with its notes; the same `movedFrom` again answers the existing card (and records its nonce in a generation that changes no card). `move-out` needs `ifRev`, refuses an archived card or one in progress with an agent attached, and archives the card with `movedOut: true`. Both are **minimal**: the pointer, closing note and destination checks of a safe machine move belong to the Local adapters (T-MWI9FEOTDFE), which must upgrade both ends before they are used.
