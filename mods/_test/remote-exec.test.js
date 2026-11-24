@@ -38,12 +38,8 @@ function reader(extra = {}) {
   return { r, f, s, clock };
 }
 
-test("transport defaults to inbox; only the exact word exec switches", () => {
-  assert.equal(X.transport(undefined), "inbox");
-  assert.equal(X.transport({ machine: "m", projectId: "P-ABC" }), "inbox");
-  assert.equal(X.transport({ transport: "weird" }), "inbox");
-  assert.equal(X.transport({ transport: "exec" }), "exec");
-  assert.equal(X.transport({ transport: "inbox" }), "inbox");
+test("exec is the only transport: remote-exec.js has no transport chooser and no inbox words", () => {
+  assert.equal(X.transport, undefined);
 });
 
 test("the headless argv: hc exec --on <m>, the program relative to the remote home, no shell, no payload", () => {
@@ -439,4 +435,21 @@ test("R2-3: an authoritative answer to the retry (stale, expired, refused by the
     assert.equal(r.status, want);
     assert.deepEqual(w.pending(), []);
   }
+});
+
+// Restored from the retired inbox tests (1h: a failed step logs one payload-free line; a stderr sentinel never reaches the log).
+test("writer log: an unanswered (unknown) write logs one fixed line; neither the payload, the nonce nor the remote's stderr reaches the log", async () => {
+  const SENTINEL = "SENTINEL-WRITER-LOG";
+  const lines = [];
+  const w = X.createExecWriter({
+    exec: async () => ({ code: 255, stdout: "", stderr: SENTINEL }),
+    link: () => ({ state: "fresh", ops: OPS, skew: 0 }),
+    log: (line) => lines.push(String(line)),
+  });
+  const o = await w.send("box", "P-ABC", { op: "note", id: "T-1", text: SENTINEL, kind: "log" }, { rev: 1 });
+  assert.equal(o.status, "unknown");
+  assert.equal(lines.length, 1, "one line");
+  assert.equal(lines[0], "remote box/P-ABC: exec write unanswered, note held for retry");
+  assert.ok(!lines.join("\n").includes(SENTINEL), "no payload, no stderr");
+  assert.ok(!lines.join("\n").includes(o.nonce), "no nonce");
 });

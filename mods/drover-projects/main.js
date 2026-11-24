@@ -4,8 +4,8 @@ import { View, div } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, TextareaState, Textarea } from "gpui-base";
 import { theme, setShared, props, closeOverlay, openOverlay, exec, notify, shared, readTextFile, home } from "herdr";
 import { PROJECTS_KEY, addProject, updateProject, removeProject } from "./store.js";
-import { load, loadProjects, modSettings, remote, remoteWriteState, setRemoteWrites, setRemoteTransport } from "./io.js";
-import { writesToggle, transportToggle } from "./remote-write-ui.js";
+import { load, loadProjects, modSettings, remote, setRemoteWrites } from "./io.js";
+import { writesToggle } from "./remote-write-ui.js";
 import { withRemote, remoteOf } from "./remote.js";
 import { bind, isEnabled, whenLoaded, ready as cfgReady } from "./config.js";
 import { gated } from "./ui.js";
@@ -85,7 +85,7 @@ export class ProjectEditor {
     if (this.closed || this.binding || !this.project) return;
     const gen = ++this.bindGen, expected = JSON.stringify(remoteOf(loadProjects(), this.project.id) ?? null);
     this.binding = true; this.remoteMsg = "Checking…"; cx.notify();
-    const r = await remote.bind(this.project, { machine: this.machine.value().trim(), projectId: this.remoteId.value().trim(), transport: remoteOf(loadProjects(), this.project.id)?.transport }, { tasks: load(), projects: loadProjects() });
+    const r = await remote.bind(this.project, { machine: this.machine.value().trim(), projectId: this.remoteId.value().trim() }, { tasks: load(), projects: loadProjects() });
     this.binding = false;
     // An Unbind, a close or another dialog's change while checking cancels this attempt: it never writes back.
     if (gen !== this.bindGen || JSON.stringify(remoteOf(loadProjects(), this.project.id) ?? null) !== expected) { this.remoteMsg = "Cancelled: the binding changed while checking"; cx.notify(); return; }
@@ -97,24 +97,11 @@ export class ProjectEditor {
     cx.notify();
   }
 
-  // The freeze switch of the rollback runbook. "frozen" shows only once the writer says no send is in flight (a timer repaints until then).
+  // The writes switch: remote.writes off refuses every write to that machine at once (nothing is queued).
   toggleWrites(cx) {
     const cur = remoteOf(loadProjects(), this.project?.id);
     if (!cur) return;
     setRemoteWrites(this.project.id, cur.writes === false);
-    if (!this.writesTimer && cx.timer?.every) { this.writesTimer = true; cx.timer.every(1000, (cx) => { if (!this.closed) cx.notify(); }); }
-    cx.notify();
-  }
-
-  // Flip inbox <-> exec: the binding only (no data moves). Going to exec first asks the machine for drover-headless.
-  async flipTransport(cx) {
-    const cur = remoteOf(loadProjects(), this.project?.id);
-    if (!cur || this.binding) return;
-    const to = transportToggle(cur).next;
-    this.binding = true; this.remoteMsg = to === "exec" ? "Checking the machine…" : "Switching…"; cx.notify();
-    const r = await setRemoteTransport(this.project.id, to);
-    this.binding = false;
-    this.remoteMsg = r.error ?? `Transport is now ${r.transport}`;
     cx.notify();
   }
 
@@ -186,16 +173,10 @@ export class ProjectEditor {
           .when(Boolean(remoteOf(loadProjects(), this.project.id)), (e) => e.child(button(t, "unbind-remote", "Unbind", false, (_e, cx) => this.unbindRemote(cx))))
           .when(Boolean(this.remoteMsg), (e) => e.child(div().flex_1().min_w(0).text_size(12).text_color(t.muted).child(this.remoteMsg))))
         .when(Boolean(remoteOf(loadProjects(), this.project.id)), (e) => {
-          const g = writesToggle(remoteOf(loadProjects(), this.project.id), remoteWriteState(this.project.id));
+          const g = writesToggle(remoteOf(loadProjects(), this.project.id));
           return e.child(h_flex().pt(8).gap(8).items_center()
             .child(button(t, "toggle-writes", g.on ? "Turn writes off" : "Turn writes on", false, (_e, cx) => this.toggleWrites(cx)))
             .child(div().id("writes-note").flex_1().min_w(0).text_size(12).text_color(t.muted).child(`${g.label}: ${g.note}`)));
-        })
-        .when(Boolean(remoteOf(loadProjects(), this.project.id)), (e) => {
-          const tt = transportToggle(remoteOf(loadProjects(), this.project.id));
-          return e.child(h_flex().pt(8).gap(8).items_center()
-            .child(button(t, "toggle-transport", tt.button, false, (_e, cx) => cx.spawn((acx) => this.flipTransport(acx))))
-            .child(div().id("transport-note").flex_1().min_w(0).text_size(12).text_color(t.muted).child(`${tt.label}: ${tt.note}`)));
         })))
       .when(Boolean(this.error), (el) => el.child(div().pt(10).text_size(12).text_color(t.blocked).child(this.error)))
       .child(h_flex().pt(18).gap(8).child(div().flex_1())

@@ -1,7 +1,7 @@
 // The scratch-machine rehearsal of the exec cutover (T-MWO2UYPADZC, A3b). Replay it with: node --test mods/_test/install/exec-rehearsal.test.js
 // A fake remote machine (the machine-rt harness: real argv, real stdin, a temp HOME, no shell) holds an OLD shared.json. The REAL headless CLI is installed on it,
 // then the cutover runs end to end through the laptop code: install + doctor, `drover machines migrate-in`, bind/flip the transport to exec, read, add, edit,
-// note, move and archive through the real exec writer, flip back to inbox (the old store is untouched, the card ids are the same), flip to exec again.
+// note, move and archive through the real exec writer, and there is no way back to the inbox (the old store is untouched).
 // The laptop side is the real io.js on a stubbed host whose `hc` runs the argv on the fake machine. No sleeps: until() only.
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -42,7 +42,7 @@ const projectsState = (m, extra = {}) => [{ id: "P-LOCAL", name: "mine", repos: 
 const ids = () => IO.loadMerged().tasks.filter((t) => t.project === LID).map((t) => t.id).sort();
 const CKEY = (m) => `drover.remote.${m.name}.${RID}`;
 
-test("scratch-machine rehearsal: install, doctor, migrate-in, flip to exec, add/edit/note/move/archive, flip back, flip again", async () => {
+test("scratch-machine rehearsal: install, doctor, migrate-in, read over exec, add/edit/note/move/archive, no way back", async () => {
   const m = machine(), s = source();
   dateAll(s, T_NEW);
   const rt = RT.makeRuntime(m);
@@ -51,7 +51,7 @@ test("scratch-machine rehearsal: install, doctor, migrate-in, flip to exec, add/
   const res = await install(rt, o(m, s));
   assert.equal(res.ok, true, JSON.stringify({ code: res.code, message: res.message, path: res.path }));
   assert.equal((await doctor(RT.makeRuntime(m), o(m, s))).ok, true);
-  // 2. the machine's old store, as the inbox transport reads it
+  // 2. the machine's old store (what migrate-in reads)
   mkdirSync(dirname(join(m.home, OLD)), { recursive: true });
   writeFileSync(join(m.home, OLD), JSON.stringify({ "drover.projects": [{ id: RID, name: "r" }], "drover.tasks": [card("T-OLD1", { rev: 2 }), card("T-OLD2")], "drover.agents": { agents: [{ id: "a1", name: "A one" }], squads: [] } }));
   const oldBytes = readFileSync(join(m.home, OLD), "utf8");
@@ -64,24 +64,19 @@ test("scratch-machine rehearsal: install, doctor, migrate-in, flip to exec, add/
   out = "";
   assert.equal(await main(["migrate-in", m.name, "--json"], { runtime: rt, out: (x) => { out += x; }, err: () => {} }), 0);
   assert.deepEqual(JSON.parse(out).copied, { tasks: 0, projects: 0, agents: 0, squads: 0 }, "a second run copies nothing (existing ids are kept)");
-  // 4. the laptop: a binding on the inbox transport (the default) reads the old store
+  // 4. the laptop: a binding (exec is the only transport) reads the headless board, which migrate-in filled from the old store
   const h = laptop(m, { "drover.tasks": [], "drover.projects": projectsState(m) });
   const timers = [];
   const cx = { notify() {}, spawn: (fn) => Promise.resolve().then(() => fn(cx)).catch(() => {}), timer: { every: (_ms, fn) => timers.push(() => fn(cx)) } };
   const fire = () => timers.forEach((t) => t());
   IO.remote.sync([]); IO.resetRemoteWriter();
   IO.watchRemote(cx, () => true);
-  await until(() => globalThis.__host.state[CKEY(m)], "inbox read");
-  assert.deepEqual(ids(), oldIds);
-  assert.equal(h.execCalls.length, 0, "the inbox transport never ran the headless CLI");
-  // 5. flip to exec: only the binding changes; the board is now the headless one
-  assert.deepEqual(await IO.setRemoteTransport(LID, "exec"), { ok: true, transport: "exec" });
-  const bind = () => globalThis.__host.state["drover.projects"].find((p) => p.id === LID).remote;
-  assert.equal(bind().transport, "exec"); assert.equal(bind().id, "B-1");
-  fire();
   await until(() => globalThis.__host.state[CKEY(m)]?.ops, "exec read");
   await until(() => IO.remoteWriteState(LID).enabled, "controls on from the remote's ops");
-  assert.deepEqual(ids(), oldIds, "same card ids after the flip");
+  const bind = () => globalThis.__host.state["drover.projects"].find((p) => p.id === LID).remote;
+  assert.deepEqual(ids(), oldIds, "the migrated cards keep their ids");
+  assert.ok(h.execCalls.length > 0, "the board was read through the headless CLI");
+  assert.equal(bind().id, "B-1", "the binding is the one that was saved");
   assert.deepEqual(IO.remoteWriteState(LID).controls, { move: true, note: true, edit: true, add: true, archive: true });
   // 6. add, edit, note, move, archive through the real exec writer
   const send = async (op) => { const r = await IO.remoteSend(LID, op, cx); assert.equal(r.status, "saved", JSON.stringify(r)); return r; };
@@ -122,17 +117,11 @@ test("scratch-machine rehearsal: install, doctor, migrate-in, flip to exec, add/
   IO.loadMerged(); fire(); IO.remoteWriteState(LID);
   assert.ok(performance.now() - t0 < 500);
   h.hang = false;
-  // 9. flip back to inbox (the rollback): the old store is unchanged, the card ids are the old ones; cards written after the flip are not carried back
-  assert.deepEqual(await IO.setRemoteTransport(LID, "inbox"), { ok: true, transport: "inbox" });
-  assert.equal(bind().transport, undefined); assert.equal(bind().id, "B-1");
-  fire();
-  await until(() => globalThis.__host.state[CKEY(m)] && !globalThis.__host.state[CKEY(m)].ops && ids().length === 2 && !ids().includes(newId), "inbox read again");
-  assert.deepEqual(ids(), oldIds, "the inbox shows its own store: the old ids, and not the card added after the flip");
+  // 9. there is no way back to the old store: no flip, and the old store is still as migrate-in left it (read, never written)
+  assert.equal(IO.setRemoteTransport, undefined);
   assert.equal(readFileSync(join(m.home, OLD), "utf8"), oldBytes);
-  // 10. flip to exec again: the headless board still holds everything written there
-  assert.equal((await IO.setRemoteTransport(LID, "exec")).ok, true);
   fire();
-  await until(() => globalThis.__host.state[CKEY(m)]?.ops && ids().includes(newId), "exec read after the second flip");
+  await until(() => ids().includes(newId), "the board still shows what was written over exec");
   assert.deepEqual(ids(), ["T-OLD1", newId].sort());
   assert.equal(find("T-OLD1").column, "doing");
 });

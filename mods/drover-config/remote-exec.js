@@ -1,10 +1,10 @@
 // Canonical copy lives in mods/_lib; mods/install.sh copies it into each drover-* mod.
 // The exec transport of a project bound to another machine (T-MWO2UYPADZC): the laptop reads and writes that machine's board through
-// `hc exec --on <machine>` running drover-headless, instead of reading shared.json and dropping files in the inbox.
+// `hc exec --on <machine>` running drover-headless. It is the only transport: the shared.json reader and the inbox are retired (T-MWO2V65MUSX).
 // Pure logic: the hc runners and the shared-state accessors are injected, and so is the clock (the mod runtime offers no byte or timer helpers).
 //  - Reads: version (the ops the remote supports), rev (a poll), tasks + projects only when the rev changed. The cache is { at, tasks, picks, ops, rev, gen }.
 //  - Writes: ONE envelope, its JSON on STDIN of the remote program, never in a remote command line or script text (the remote argv holds the verb and nothing else).
-//    Limit: the mod host's exec has no stdin option, so on THIS computer the JSON is a local argv item of a local sh (as the inbox's STAGE_SCRIPT does), which pipes it to `hc exec --stdin`.
+//    Limit: the mod host's exec has no stdin option, so on THIS computer the JSON is a local argv item of a local sh which pipes it to `hc exec --stdin`.
 //    There is no queue: a write on a view that is not fresh, or whose clock is over 30 s away, is refused ("nothing was sent"). A write whose answer is lost keeps its envelope;
 //    repeating the same action sends the SAME bytes (the remote's nonce makes that safe).
 //  - Every message the UI sees is a fixed text: the remote's stderr and error text are never shown or logged.
@@ -19,9 +19,6 @@ export const VERSION_MS = 300000; // how long a reported ops list is trusted bef
 export const HELD_MS = 24 * 3600000; // an unanswered envelope is held this long (the remote's nonce retention): it answers a retained nonce with its stored result, and refuses by expiry after
 export const SKEW_MAX_MS = 30000; // writes are refused beyond this clock difference, in both directions
 export const UI_OPS = ["move", "note", "edit", "add", "archive"];
-
-// An exec project is exactly { transport: "exec" } on its remote binding; anything else is the inbox (the default).
-export const transport = (remote) => (remote?.transport === "exec" ? "exec" : "inbox");
 
 // hc args for one headless verb. hc exec runs the program as given (no shell) in the remote home.
 export const headlessArgv = (machine, words, timeoutSec = Math.ceil(TIMEOUT_MS / 1000)) => ["exec", "--on", machine, "--timeout", String(timeoutSec), HEADLESS, ...words];
@@ -58,8 +55,8 @@ export async function probeExec(run, machine, projectId) {
   return { ops: v.ops.filter((o) => typeof o === "string").slice(0, 32) };
 }
 
-// run(args, { timeout }) -> Promise<{ code, stdout, stderr }> (hc). bound(machine, projectId, id) and active() as in remote.js createRemote.
-// The surface is createRemote's: sync / suspend / tick / retry / view, plus ops().
+// run(args, { timeout }) -> Promise<{ code, stdout, stderr }> (hc). bound(machine, projectId, id): is this exact binding still the current one? active(): is the owning screen still on? Both are asked again at commit.
+// The surface: sync / suspend / tick / retry / view, plus ops().
 export function createExecReader({ run, getShared, setShared, now = Date.now, log = () => {}, bound = () => true, active = () => true }) {
   const entries = new Map(); // cacheKey -> { machine, projectId, id, gen, failures, nextAt, inflight, startedAt, ok, error, ops, opsAt, rev, hgen }
   let genSeed = 0;

@@ -8,13 +8,15 @@ const U = await import("../_lib/remote-write-ui.js");
 const W = await import("../_lib/remote-write.js");
 
 const card = (extra = {}) => ({ id: "T-AB1", title: "old title", desc: "old desc", column: "todo", priority: "P2", tags: [], project: "P-LOCAL", remote: { machine: "box1" }, ...extra });
-const ON = { remote: true, enabled: true, reason: null, frozen: false };
+const ON = { remote: true, enabled: true, reason: null };
 
-test("control states: enabled -> no tip; otherwise the writer's reason; frozen says so", () => {
+test("control states: enabled -> no tip; otherwise the writer's reason; an op the remote did not report says so", () => {
   assert.deepEqual(U.controlState(ON), { on: true, tip: null });
-  assert.deepEqual(U.controlState({ remote: true, enabled: false, reason: "box1 needs the update", frozen: false }), { on: false, tip: "box1 needs the update" });
-  assert.deepEqual(U.controlState({ remote: true, enabled: false, reason: "Checking box1, try again in a moment", frozen: false }), { on: false, tip: "Checking box1, try again in a moment" });
-  assert.deepEqual(U.controlState({ remote: true, enabled: false, reason: "x", frozen: true }), { on: false, tip: "writes frozen" });
+  assert.deepEqual(U.controlState({ remote: true, enabled: false, reason: "box1 needs the update" }), { on: false, tip: "box1 needs the update" });
+  assert.deepEqual(U.controlState({ remote: true, enabled: false, reason: "Checking box1, try again in a moment" }), { on: false, tip: "Checking box1, try again in a moment" });
+  assert.deepEqual(U.controlState({ ...ON, controls: { move: false }, opTips: { move: "The remote machine does not support move" } }, "move"), { on: false, tip: "The remote machine does not support move" });
+  assert.deepEqual(U.controlState({ ...ON, controls: { move: true, note: true } }, "note"), { on: true, tip: null });
+  assert.equal(U.controlState({ remote: true, enabled: false, reason: "x", frozen: true }).tip, "x", "there is no freeze any more: the reason wins");
   assert.equal(U.controlState({ remote: true, enabled: false, reason: null, frozen: false }).tip, "writes are off");
   assert.equal(U.controlState(undefined).on, false);
 });
@@ -25,8 +27,7 @@ test("agent ops stay off on a remote card, with the fixed tooltip", () => {
 
 test("status line per remote project", () => {
   assert.equal(U.statusLine(ON), "writes on");
-  assert.equal(U.statusLine({ remote: true, enabled: false, reason: "box1 needs the update", frozen: false }), "box1 needs the update");
-  assert.equal(U.statusLine({ remote: true, enabled: false, reason: "r", frozen: true }), "writes frozen");
+  assert.equal(U.statusLine({ remote: true, enabled: false, reason: "box1 needs the update" }), "box1 needs the update");
 });
 
 test("ops built from gestures are exact and whitelisted", () => {
@@ -55,8 +56,9 @@ test("outcome text: every writer outcome has a fixed message", () => {
   assert.equal(U.outcomeText({ status: "saved" }), "Saved");
   assert.equal(U.outcomeText({ status: "stale", machine: "box1" }), "card changed on box1: reloaded, try again");
   assert.equal(U.outcomeText({ status: "expired" }), "not applied, too old");
-  assert.equal(U.outcomeText({ status: "pending" }), "sent, may still apply");
+  assert.equal(U.outcomeText({ status: "pending" }).startsWith("error:"), true, "no outcome is pending any more: it falls to the generic error text");
   assert.equal(U.outcomeText({ status: "unknown", machine: "box1" }), "outcome unknown: check the card on box1");
+  assert.equal(U.outcomeText({ status: "unknown", machine: "box1", message: "no answer: not known whether it was applied. Repeat within 24 h to retry safely" }), "no answer: not known whether it was applied. Repeat within 24 h to retry safely");
   assert.equal(U.outcomeText({ status: "refused", message: "box1 needs the update" }), "box1 needs the update");
   assert.equal(U.outcomeText({ status: "failed", message: "not sent: nothing was applied" }), "not sent: nothing was applied");
   assert.equal(U.outcomeText({ status: "error", text: "error: unknown task T-ZZ\nsecond line" }), "error: unknown task T-ZZ");
@@ -64,10 +66,13 @@ test("outcome text: every writer outcome has a fixed message", () => {
   assert.equal(U.outcomeText(null), "");
 });
 
-test("writes toggle model: on by default, off reports frozen only when the writer says so", () => {
-  assert.deepEqual(U.writesToggle({ machine: "box1", projectId: "P-R" }, ON), { on: true, label: "Writes to box1", note: "on" });
-  assert.deepEqual(U.writesToggle({ machine: "box1", writes: false }, { frozen: true }), { on: false, label: "Writes to box1", note: "frozen" });
-  assert.deepEqual(U.writesToggle({ machine: "box1", writes: false }, { frozen: false }), { on: false, label: "Writes to box1", note: "off, waiting for sends in flight" });
+test("writes toggle model: on by default, off says off at once (nothing is in flight to wait for)", () => {
+  assert.deepEqual(U.writesToggle({ machine: "box1", projectId: "P-R" }), { on: true, label: "Writes to box1", note: "on" });
+  assert.deepEqual(U.writesToggle({ machine: "box1", writes: false }), { on: false, label: "Writes to box1", note: "off" });
+});
+
+test("the project editor has no transport control: the inbox is retired", () => {
+  assert.equal(U.transportToggle, undefined);
 });
 
 test("applied: a saved move becomes the card's column, so the status chip is not sent twice", () => {
@@ -110,6 +115,6 @@ test("applied: the saved fields become the editor's baseline; none clears", () =
 test("fieldState: on only when the writer is on AND the probe allows fields; else the reason", () => {
   assert.deepEqual(U.fieldState({ ...ON, fields: { on: true, tip: null } }), { on: true, tip: null });
   assert.deepEqual(U.fieldState({ ...ON, fields: { on: false, tip: "box1 needs the update for priority, labels, assignee, parent and project" } }), { on: false, tip: "box1 needs the update for priority, labels, assignee, parent and project" });
-  assert.deepEqual(U.fieldState({ remote: true, enabled: false, reason: "r", frozen: false, fields: { on: true, tip: null } }), { on: false, tip: "r" });
+  assert.deepEqual(U.fieldState({ remote: true, enabled: false, reason: "r", fields: { on: true, tip: null } }), { on: false, tip: "r" });
   assert.equal(U.fieldState(undefined).on, false);
 });

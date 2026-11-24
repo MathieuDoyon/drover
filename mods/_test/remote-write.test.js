@@ -1,816 +1,93 @@
-// Remote project, step 2: the laptop writes to box1's inbox (T-MWHVWR8TIJB). Fake hc runner (records argv + stdin); no real hc, no sleeps.
-import { test, beforeEach } from "node:test";
+// The request a UI op becomes (T-MWHVWR8TIJB): remote-write.js is now only buildPayload; the exec transport (remote-exec.js) sends it.
+// The inbox delivery tests (stage + rename, the protocol probe, pending, adoption, sweeps, results) retired with the inbox (T-MWO2V65MUSX): their
+// delivery-side faults are covered for exec by remote-exec.test.js (envelope on stdin, unknown + held retry, stale/expired/refused/failed mapping, skew).
+import { test } from "node:test";
 import assert from "node:assert/strict";
-import { register } from "node:module";
-import { spawnSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { readFileSync, readdirSync } from "node:fs";
 
-register("./hooks.js", import.meta.url);
-const { until, drain } = await import(new URL("./stubs/until.js", import.meta.url).href);
 const W = await import("../_lib/remote-write.js");
-const R = await import("../_lib/remote.js");
+const X = await import("../_lib/remote-exec.js");
 
-const M = "box1", PID = "P-REMOTE1";
+const PID = "P-REMOTE1";
+const build = (op, rev = 7) => W.buildPayload(op, { projectId: PID, rev });
 const SENTINEL = "SENTINEL-sk-not-a-real-secret-0042";
-const EPOCH = 1_700_000_000; // box1's `date +%s`
-const KEY = R.cacheKey(M, PID);
-const DIR = ".config/herdr-app/data/drover-inbox";
 
-// A fake hc. `inbox` is box1's folder: { name -> text }. `mode` decides what the send does:
-//   Step 1 (local exec) stages the JSON as `.<nonce>.tmp`; step 2 (remote exec) renames it. mode: ok | stage-fail: step 1 fails |
-//   before: step 2 drops before the rename | after: rename done, reply lost
-const sc = (a) => a[a.indexOf("-c") + 1]; // the sh -c script
-const arg = (a) => a[a.indexOf("-c") + 2]; // its $0
-function fakeHc() {
-  const f = { calls: [], inbox: {}, mode: "ok", down: false, epoch: EPOCH, listFails: false };
-  f.sends = () => f.calls.filter((c) => c.step === 1); // one per delivery: step 1 carries the JSON
-  f.remoteSends = () => f.calls.filter((c) => c.args[0] === "exec" && sc(c.args)?.startsWith("d=$HOME"));
-  f.old = new Set(); // names that `find -mmin +1440` would report
-  f.exec = async (cmd, args, opts = {}) => { // step 1: sh -c 'printf %s "$1" | hc file write --on "$2" "$3"' drover-send <json> <machine> <path>
-    f.calls.push({ cmd, args, opts, stdin: args[3], step: 1 });
-    if (f.mode === "stage-fail") throw new Error("hc file write failed");
-    if (f.mode === "stage-landed-fail") { f.inbox[args[5].split("/").pop()] = args[3]; return { code: 255, stdout: "", stderr: "timed out" }; } // the file landed, the call still failed
-    f.inbox[args[5].split("/").pop()] = args[3];
-    return { code: 0, stdout: "", stderr: "" };
-  };
-  f.rms = () => f.calls.filter((c) => c.args[0] === "exec" && sc(c.args)?.startsWith("rm "));
-  f.run = async (args, opts = {}) => {
-    f.calls.push({ args, opts, stdin: opts.stdin });
-    if (f.down) throw new Error("hc down");
-    if (args[0] === "exec" && sc(args)?.startsWith("d=$HOME")) {
-      const nonce = arg(args), name = `${f.epoch}-${nonce}`;
-      if (f.mode === "before") throw new Error("link dropped");
-      if (!(`.${nonce}.tmp` in f.inbox)) return { code: 1, stdout: "", stderr: "mv: no such file" };
-      f.inbox[`${name}.json`] = f.inbox[`.${nonce}.tmp`]; delete f.inbox[`.${nonce}.tmp`];
-      if (f.mode === "after") throw new Error("link dropped after rename");
-      return { code: 0, stdout: `${name}.json\n`, stderr: "" };
-    }
-    if (args[0] === "exec" && sc(args)?.startsWith("find ")) {
-      const hit = Object.keys(f.inbox).filter((n) => n.startsWith(`.L${arg(args)}-`) && n.endsWith(".tmp") && f.old.has(n));
-      return { code: 0, stdout: hit.join("\n") + (hit.length ? "\n" : ""), stderr: "" };
-    }
-    if (args[0] === "exec" && sc(args)?.includes("grep -F")) { // the recovery lookup: exit 3 = the listing failed (unknown), 1 = listed, no match
-      if (f.listFails) return { code: 3, stdout: "", stderr: "ls: cannot access" };
-      const hit = Object.keys(f.inbox).filter((n) => n.includes(`-${arg(args)}.`));
-      return { code: hit.length ? 0 : 1, stdout: hit.join("\n") + (hit.length ? "\n" : ""), stderr: "" };
-    }
-    if (args[0] === "exec" && sc(args)?.startsWith("ls ")) {
-      if (f.listFails) throw new Error("listing failed");
-      const names = Object.keys(f.inbox);
-      return { code: 0, stdout: names.join("\n") + (names.length ? "\n" : ""), stderr: "" };
-    }
-    if (args[0] === "exec" && sc(args)?.startsWith("rm ")) { delete f.inbox[arg(args)]; return { code: 0, stdout: "", stderr: "" }; }
-    if (args[0] === "file" && args[1] === "read") {
-      const n = args[4].slice(DIR.length + 1);
-      return n in f.inbox ? { code: 0, stdout: f.inbox[n], stderr: "" } : { code: 1, stdout: "", stderr: "no such file" };
-    }
-    return { code: 2, stdout: "", stderr: "unexpected" };
-  };
-  // box1's consumer: answers every .json file with `reply(cmd)`.
-  f.consume = (reply) => { for (const n of Object.keys(f.inbox)) if (n.endsWith(".json")) { const cmd = JSON.parse(f.inbox[n]); delete f.inbox[n]; f.inbox[n.replace(/\.json$/, ".result")] = reply(cmd, n); } };
-  return f;
-}
-
-let hc, shared, clock, seq, outcomes, reloads, linkState, w;
-const card = (id, rev) => ({ id, title: "t", column: "todo", project: "local", notes: [], ...(rev === undefined ? {} : { rev }) });
-beforeEach(() => {
-  hc = fakeHc(); shared = { [KEY]: { at: 1, tasks: [card("T-AB1", 7), card("T-NOREV")] } };
-  clock = 1_000_000_000_000; seq = 0; outcomes = []; reloads = []; linkState = { writes: true, state: "fresh" };
-  w = mk();
+test("the module is only the request builder: no inbox delivery, no pending list, no probe, no writer", () => {
+  assert.deepEqual(Object.keys(W).sort(), ["OPS", "TTL_MS", "buildPayload"]);
+  const src = readFileSync(new URL("../_lib/remote-write.js", import.meta.url), "utf8");
+  for (const w of ["drover-inbox", "createWriter", "PENDING_KEY", "STAGE_SCRIPT", "SEND_SCRIPT", "hc file write", "shared.json"]) assert.ok(!src.includes(w), `${w} is gone`);
 });
-const mk = (over = {}) => W.createWriter({
-  run: hc.run, exec: hc.exec, getShared: (k) => shared[k], setShared: (k, v) => { if (v === null) delete shared[k]; else shared[k] = v; },
-  now: () => clock, rand: () => String(++seq).padStart(12, "0"), origin: "LAPTOP1",
-  link: () => linkState, writable: () => linkState.writes !== false, reload: (m, p) => reloads.push([m, p]), onOutcome: (o) => outcomes.push(o), ...over,
-});
-// n sends have returned to the writer
-const delivered = (n = 1) => hc.sends().length >= n && w.inflight(M) === 0;
-const lastSend = () => hc.sends().at(-1);
-const bodyOf = (c) => JSON.parse(c.stdin);
-// Make the machine writable: answer the probe.
-async function enable() {
-  const p = w.probe(M);
-  await until(() => delivered(), "probe delivered");
-  hc.consume((cmd) => (cmd.op === "protocol" ? "ok: protocol 2" : "ok: x"));
-  clock += 1000; await w.tick(); await p;
-  hc.calls.length = 0;
-}
-// Send an op, let box1 answer it, tick, return the outcome.
-async function sendAndAnswer(op, reply) {
-  const n = hc.sends().length;
-  const p = w.send(M, PID, op);
-  await until(() => delivered(n + 1), "delivered");
-  hc.consume(() => reply);
-  clock += 1000; await w.tick();
-  return p;
-}
 
-// ---- 1a: the exact JSON per op ----
-test("1a the whitelist and the exact JSON of each op", async () => {
-  await enable();
+test("no laptop-side remote file reads shared.json or writes the inbox of a machine", () => {
+  for (const f of ["remote.js", "remote-write.js", "remote-write-ui.js", "remote-exec.js"]) {
+    const src = readFileSync(new URL(`../_lib/${f}`, import.meta.url), "utf8");
+    for (const w of ["drover-inbox", "SHARED_PATH", "parseRemote", "createRemote", "createWriter", "STAGE_SCRIPT"]) assert.ok(!src.includes(w), `${f} still has ${w}`);
+  }
+  assert.equal((readFileSync(new URL("../_lib/remote.js", import.meta.url), "utf8").match(/"file", "read"/g) ?? []).length, 0, "no hc file read in remote.js");
+  assert.equal((readFileSync(new URL("../_lib/remote-exec.js", import.meta.url), "utf8").match(/"file"/g) ?? []).length, 0, "the exec transport never runs hc file");
+});
+
+test("every mod copy of the remote files is the same bytes as _lib (nothing of the inbox lives on in a copy)", () => {
+  const lib = (f) => readFileSync(new URL(`../_lib/${f}`, import.meta.url), "utf8");
+  for (const d of readdirSync(new URL("../", import.meta.url)).filter((n) => n.startsWith("drover-"))) {
+    for (const f of ["remote.js", "remote-write.js", "remote-write-ui.js", "remote-exec.js", "io.js"]) {
+      let t; try { t = readFileSync(new URL(`../${d}/${f}`, import.meta.url), "utf8"); } catch { continue; }
+      assert.equal(t, lib(f), `${d}/${f}`);
+    }
+  }
+});
+
+test("1a the whitelist and the exact JSON of each op", () => {
   const cases = [
     [{ op: "move", id: "T-AB1", column: "doing" }, { op: "move", id: "T-AB1", column: "doing", ifRev: 7, ttlMs: 120000 }],
     [{ op: "note", id: "T-AB1", text: "hi", kind: "log" }, { op: "note", id: "T-AB1", text: "hi", kind: "log", ifRev: 7, ttlMs: 120000 }],
-    [{ op: "edit", id: "T-NOREV", title: "new", desc: "d" }, { op: "edit", id: "T-NOREV", title: "new", desc: "d", ifRev: 0, ttlMs: 120000 }],
+    [{ op: "edit", id: "T-NOREV", title: "new", desc: "d" }, { op: "edit", id: "T-NOREV", title: "new", desc: "d", ifRev: 7, ttlMs: 120000 }],
     [{ op: "archive", id: "T-AB1" }, { op: "archive", id: "T-AB1", ifRev: 7, ttlMs: 120000 }],
     [{ op: "add", title: "x", desc: "", tags: ["a"], column: "backlog", priority: "P1", project: "P-OTHER" }, { op: "add", title: "x", desc: "", tags: ["a"], column: "backlog", priority: "P1", project: PID, ttlMs: 120000 }],
   ];
-  for (const [op, want] of cases) {
-    const out = await sendAndAnswer(op, "ok: done");
-    assert.equal(out.status, "saved", op.op);
-    assert.deepEqual(bodyOf(lastSend()), want, op.op);
-  }
+  for (const [op, want] of cases) assert.deepEqual(build(op).json, want, op.op);
 });
 
-test("1a any op outside the whitelist is refused and nothing is sent", async () => {
-  await enable();
-  for (const op of ["start", "wake", "next", "link", "project", "project-add", "protocol", "note-rm", "x"]) {
-    const out = await w.send(M, PID, { op, id: "T-AB1" });
-    assert.equal(out.status, "refused", op);
-  }
-  assert.equal(hc.sends().length, 0);
+test("1a any op outside the whitelist is refused", () => {
+  for (const op of ["start", "wake", "next", "link", "project", "project-add", "protocol", "note-rm", "x"]) assert.match(build({ op, id: "T-AB1" }).error, /not allowed/, op);
+  assert.match(build(undefined).error, /not allowed/);
 });
 
-test("1a two argv-only steps: the JSON is a local argv item only; the remote script has the nonce as $0 and box1 stamps date +%s", async () => {
-  await enable();
-  await sendAndAnswer({ op: "move", id: "T-AB1", column: "doing" }, "ok: T-AB1 -> doing");
-  const s1 = lastSend();
-  assert.equal(s1.cmd, "sh");
-  assert.equal(s1.args[0], "-c"); assert.equal(s1.args[1], 'printf %s "$1" | hc file write --on "$2" "$3"');
-  assert.equal(s1.args[2], "drover-send");
-  assert.equal(s1.args[4], M);
-  const nonce = hc.remoteSends().at(-1).args[6];
-  assert.equal(s1.args[5], `${DIR}/.${nonce}.tmp`);
-  assert.deepEqual(JSON.parse(s1.args[3]), { op: "move", id: "T-AB1", column: "doing", ifRev: 7, ttlMs: 120000 });
-  const a = hc.remoteSends().at(-1).args;
-  assert.deepEqual(a.slice(0, 5), ["exec", "--on", M, "sh", "-c"]);
-  assert.equal(a[5], 'd=$HOME/.config/herdr-app/data/drover-inbox; f=$(date +%s)-$0; mv "$d/.$0.tmp" "$d/$f.json" && echo "$f.json"');
-  assert.equal(a.length, 7);
-  assert.match(a[6], /^LLAPTOP1-\d{12}$/);
-  assert.ok(!hc.calls.filter((c) => c.step !== 1).map((c) => JSON.stringify(c.args)).join("").includes('"op"'), "the payload is never in a remote argv or script");
+test("1b a card id or value outside its charset is refused, never built", () => {
+  for (const id of ["T-ab", "T-A; rm -rf /", "../x", "", "T-"]) assert.ok(build({ op: "move", id, column: "doing" }).error, id);
+  for (const col of ["nowhere", "", undefined, 5]) assert.ok(build({ op: "move", id: "T-AB1", column: col }).error, String(col));
+  assert.ok(build({ op: "add", title: "   " }).error);
+  assert.ok(build({ op: "note", id: "T-AB1", text: " " }).error);
+  assert.ok(build({ op: "note", id: "T-AB1", text: "x", kind: "weird" }).error);
+  assert.ok(build({ op: "edit", id: "T-AB1" }).error, "nothing to change");
 });
 
-test("1a step 1 fails: nothing is applied, no second step, no resend", async () => {
-  await enable();
-  hc.mode = "stage-fail";
-  const o = await w.send(M, PID, { op: "move", id: "T-AB1", column: "doing" });
-  assert.equal(o.status, "failed"); assert.match(o.message, /nothing was applied/);
-  assert.equal(hc.remoteSends().length, 0);
-  assert.deepEqual((shared[W.PENDING_KEY] ?? []).filter((e) => !e.probe), []);
-  assert.equal(w.inflight(M), 0);
+test("5 payloads hold only op fields plus ifRev and ttlMs; nothing else of the caller's object is copied", () => {
+  const b = build({ op: "move", id: "T-AB1", column: "doing", agent: SENTINEL, env: SENTINEL, desc: SENTINEL }).json;
+  assert.deepEqual(Object.keys(b).sort(), ["column", "id", "ifRev", "op", "ttlMs"]);
+  assert.ok(!JSON.stringify(b).includes(SENTINEL));
 });
 
-// ---- 1b: the nonce ----
-test("1b the nonce is unique per call, in pending BEFORE the send, passed as $0 and never in the script", async () => {
-  const seen = [];
-  const spy = { pending: [] };
-  w = mk({
-    exec: async (c, a, o) => { spy.pending = (shared[W.PENDING_KEY] ?? []).map((e) => e.nonce); return hc.exec(c, a, o); },
-    run: async (args, o) => { if (sc(args)?.startsWith("d=$HOME")) seen.push({ nonce: arg(args), script: sc(args), pending: spy.pending }); return hc.run(args, o); },
-  });
-  await enable();
-  for (let i = 0; i < 3; i++) await sendAndAnswer({ op: "move", id: "T-AB1", column: "doing" }, "ok: x");
-  assert.equal(seen.length, 4); // the probe and 3 moves
-  assert.equal(new Set(seen.map((s) => s.nonce)).size, 4);
-  for (const s of seen) {
-    assert.match(s.nonce, /^LLAPTOP1-[A-Za-z0-9]{12}$/);
-    assert.ok(s.pending.includes(s.nonce), "recorded in pending before the exec");
-    assert.ok(!s.script.includes(s.nonce), "never inline in the script");
-  }
+test("T3 the exact JSON of each field op; {kind,id} of an assignee is copied, not the caller's object", () => {
+  const op = { op: "edit", id: "T-AB1", priority: "P0", tags: ["a", "b"], assignee: { kind: "agent", id: "wrangler", junk: 1 }, parent: "T-AB2", project: "P-OTHER", title: "n" };
+  assert.deepEqual(build(op).json, { op: "edit", id: "T-AB1", title: "n", priority: "P0", tags: ["a", "b"], assignee: { kind: "agent", id: "wrangler" }, parent: "T-AB2", project: "P-OTHER", ifRev: 7, ttlMs: 120000 });
+  assert.notEqual(build(op).json.assignee, op.assignee);
+  assert.deepEqual(build({ op: "edit", id: "T-AB1", assignee: "none", parent: "none", project: "none" }).json, { op: "edit", id: "T-AB1", assignee: "none", parent: "none", project: "none", ifRev: 7, ttlMs: 120000 });
+  assert.deepEqual(build({ op: "add", title: "x", assignee: { kind: "squad", id: "cattle-drive" }, parent: "T-AB1" }).json, { op: "add", title: "x", desc: "", tags: [], column: "backlog", priority: "P2", project: PID, assignee: { kind: "squad", id: "cattle-drive" }, parent: "T-AB1", ttlMs: 120000 });
 });
 
-test("1b a task id, machine or nonce outside its charset never reaches argv", async () => {
-  await enable();
-  for (const id of ["T-ab", "T-A; rm -rf /", "../x", "", "T-"]) assert.equal((await w.send(M, PID, { op: "move", id, column: "doing" })).status, "refused", id);
-  assert.equal((await w.send("bad machine;", PID, { op: "move", id: "T-AB1", column: "doing" })).status, "refused");
-  assert.equal((await w.send("om$(x)", PID, { op: "add", title: "x" })).status, "refused");
-  assert.throws(() => mk({ origin: "bad origin" }), /origin/);
-  await assert.rejects(mk({ rand: () => "x;y" }).probe(M), /nonce/);
-  assert.equal(hc.sends().length, 0);
-  const everything = hc.calls.flatMap((c) => c.args).join(" ");
-  assert.ok(!everything.includes("rm -rf"));
-});
-
-// ---- 1b2: reply lost ----
-test("1b2 the rename happened but the reply was lost: recover by nonce, no resend, no cleanup as 'no longer pending'", async () => {
-  await enable();
-  hc.mode = "after";
-  const out = await w.send(M, PID, { op: "move", id: "T-AB1", column: "doing" });
-  assert.equal(out.status, "pending");
-  assert.match(out.message, /may still apply/);
-  assert.equal(hc.sends().length, 1);
-  hc.mode = "ok";
-  await w.cleanup(M); // would remove "no longer pending" results if it did
-  assert.equal(hc.rms().length, 0);
-  hc.consume(() => "ok: T-AB1 -> doing");
-  clock += 20000; await w.tick();
-  await until(() => outcomes.length === 1, "late outcome");
-  assert.equal(outcomes[0].status, "saved");
-  assert.equal(hc.sends().length, 1, "never resent");
-  const ls = hc.calls.find((c) => sc(c.args)?.includes("grep -F"));
-  assert.ok(ls && /^LLAPTOP1-/.test(arg(ls.args)), "recovered through ls | grep -F with the nonce in $0");
-  assert.deepEqual(shared[W.PENDING_KEY] ?? [], []);
-});
-
-// ---- 1b3: gate, probe, freeze ----
-test("1b3 the probe is {op:protocol, ttlMs:30000}; writes need `ok: protocol 2` newer than 60 s", async () => {
-  const p = w.probe(M);
-  await until(() => delivered(), "probe sent");
-  assert.deepEqual(bodyOf(lastSend()), { op: "protocol", ttlMs: 30000 });
-  assert.equal(w.canWrite(M, PID).ok, false);
-  hc.consume(() => "ok: protocol 2"); clock += 1000; await w.tick(); await p;
-  assert.equal(w.canWrite(M, PID).ok, true);
-  clock += 59000; assert.equal(w.canWrite(M, PID).ok, true);
-  clock += 2000; assert.equal(w.canWrite(M, PID).ok, false, "older than 60 s");
-});
-
-test("1b3 the probe is re-sent when the last answer is old, and writes stay off when it fails", async () => {
-  await enable();
-  clock += 61000;
-  const t = w.tick();
-  await until(() => delivered(), "re-probe");
-  assert.equal(bodyOf(lastSend()).op, "protocol");
-  hc.consume(() => "error: Unknown drover command: protocol"); // rollback to v1 with hc still up
-  clock += 1000; await w.tick(); await t;
-  const g = w.canWrite(M, PID);
-  assert.equal(g.ok, false);
-  assert.match(g.reason, /needs the update/);
-});
-
-test("1b3 reconnect forgets the answer and re-probes", async () => {
-  await enable();
-  w.reconnect(M);
-  assert.equal(w.canWrite(M, PID).ok, false);
-  await until(() => hc.sends().some((c) => bodyOf(c).op === "protocol"), "probe on reconnect");
-});
-
-test("1b3 a read-only binding (writes:false) sends nothing", async () => {
-  await enable();
-  linkState.writes = false;
-  const out = await w.send(M, PID, { op: "move", id: "T-AB1", column: "doing" });
-  assert.equal(out.status, "refused");
-  assert.match(out.message, /read-only/);
-  assert.equal(hc.sends().length, 0);
-});
-
-test("1b3 frozen is reported only after the in-flight sends end", async () => {
-  let release;
-  const gate = new Promise((r) => (release = r));
-  w = mk({ exec: async (c, a, o) => { if (JSON.parse(a[3]).op === "move") await gate; return hc.exec(c, a, o); } });
-  await enable();
-  const p = w.send(M, PID, { op: "move", id: "T-AB1", column: "doing" });
-  await until(() => w.inflight(M) === 1, "in flight");
-  linkState.writes = false;
-  assert.equal(w.frozen(M, PID), false, "a send is still in flight");
-  release(); await until(() => w.inflight(M) === 0, "send ended");
-  assert.equal(w.frozen(M, PID), true);
-  assert.equal((await w.send(M, PID, { op: "move", id: "T-AB1", column: "doing" })).status, "refused");
-  clock += 1000; await w.tick(); void p;
-});
-
-// the drain-check (a disposable inbox) is the deploy drain-check.sh, Job 2.
-
-// ---- 1c: result mapping ----
-test("1c ok saves, stale reloads, expired says too old", async () => {
-  await enable();
-  let o = await sendAndAnswer({ op: "move", id: "T-AB1", column: "doing" }, "ok: T-AB1 -> doing");
-  assert.equal(o.status, "saved");
-  o = await sendAndAnswer({ op: "move", id: "T-AB1", column: "doing" }, "error: stale: card T-AB1 is at rev 9, request saw 7");
-  assert.equal(o.status, "stale"); assert.equal(o.message, "card changed on the remote machine");
-  assert.deepEqual(reloads, [[M, PID]]);
-  o = await sendAndAnswer({ op: "move", id: "T-AB1", column: "doing" }, "error: expired: arrived 300s ago, ttl 120000ms; not applied");
-  assert.equal(o.status, "expired"); assert.equal(o.message, "not applied, too old");
-  o = await sendAndAnswer({ op: "move", id: "T-AB1", column: "doing" }, "error: unknown task T-NOPE");
-  assert.equal(o.status, "error"); assert.match(o.message, /unknown task/);
-});
-
-test("1c no result in 10 s: 'sent, may still apply', no resend; the result file is removed after it is read", async () => {
-  await enable();
-  const p = w.send(M, PID, { op: "move", id: "T-AB1", column: "doing" });
-  await until(() => delivered(), "sent");
-  clock += 10001; await w.tick();
-  const o = await p;
-  assert.equal(o.status, "pending"); assert.equal(o.message, "sent, may still apply");
-  clock += 5000; await w.tick(); await drain();
-  assert.equal(hc.sends().length, 1);
-  hc.inbox = {}; // the first request is still pending on the laptop side only
-  const done = await sendAndAnswer({ op: "archive", id: "T-AB1" }, "ok: T-AB1 archived");
-  assert.equal(done.status, "saved");
-  assert.equal(hc.rms().length, 1, "own result removed after reading");
-  assert.match(arg(hc.rms()[0].args), /^\d+-LLAPTOP1-\d{12}\.result$/);
-});
-
-// ---- 1d: refusal ----
-test("1d stale or unreachable machine, or an unanswered probe: every write is refused with the reason", async () => {
-  linkState.state = "stale";
-  let o = await w.send(M, PID, { op: "move", id: "T-AB1", column: "doing" });
-  assert.equal(o.status, "refused"); assert.match(o.message, /unreachable|saved copy/);
-  linkState.state = "fresh";
-  o = await w.send(M, PID, { op: "move", id: "T-AB1", column: "doing" });
-  assert.equal(o.status, "refused"); assert.match(o.message, /checking/i);
-  assert.equal(hc.sends().filter((c) => bodyOf(c).op !== "protocol").length, 0);
-});
-
-test("1d a card missing from the saved copy is refused (no ifRev to send)", async () => {
-  await enable();
-  const o = await w.send(M, PID, { op: "move", id: "T-GONE", column: "doing" });
-  assert.equal(o.status, "refused");
-  assert.equal(hc.sends().length, 0);
-});
-
-// ---- 1f: delayed outcomes ----
-test("1f disconnect before the rename (step 2 drops): a missing file is NOT proof of nothing applied; it stays pending until TTL + 1 h, then unknown", async () => {
-  await enable();
-  hc.mode = "before";
-  const o = await w.send(M, PID, { op: "add", title: "x" });
-  assert.equal(o.status, "pending"); assert.match(o.message, /may still apply/);
-  assert.equal(hc.sends().length, 1);
-  assert.equal((shared[W.PENDING_KEY] ?? []).filter((e) => !e.probe).length, 1, "kept");
-  clock += 20000; await w.tick(); await drain();
-  assert.equal(outcomes.length, 0, "absence alone settles nothing");
-  clock += 3600000 + 120000; await w.tick();
-  await until(() => outcomes.some((x) => x.status === "unknown"), "unknown");
-  assert.equal(hc.sends().filter((c) => bodyOf(c).op === "add").length, 1, "never resent");
-});
-
-test("review 1.3 a failed listing is unknown, never 'nothing applied'; the entry stays and a later result still reconciles", async () => {
-  await enable();
-  hc.mode = "after";
-  const p = await w.send(M, PID, { op: "add", title: "x" });
-  assert.equal(p.status, "pending");
-  hc.mode = "ok"; hc.listFails = true;
-  clock += 20000; await w.tick(); await drain();
-  assert.equal(outcomes.length, 0);
-  assert.equal((shared[W.PENDING_KEY] ?? []).filter((e) => !e.probe).length, 1);
-  hc.listFails = false;
-  hc.consume(() => "ok: T-NEW1 added");
-  clock += 20000; await w.tick();
-  await until(() => outcomes.some((x) => x.status === "saved"), "late result");
-});
-
-test("1f a timed-out add is reconciled by its late result after the UI is reopened", async () => {
-  await enable();
-  const p = w.send(M, PID, { op: "add", title: "x" });
-  await until(() => delivered(), "sent");
-  clock += 10001; await w.tick(); await p;
-  const saved = JSON.parse(JSON.stringify(shared[W.PENDING_KEY]));
-  w = mk(); // UI reopened: a new writer with the persisted pending list
-  assert.deepEqual(shared[W.PENDING_KEY], saved);
-  hc.consume(() => "ok: T-NEW1 added");
-  clock += 40000; await w.tick(); // the old writer stopped beating: the new one adopts the entry after 30 s
-  await until(() => outcomes.length === 1, "late result");
-  assert.equal(outcomes[0].status, "saved");
-  assert.equal(hc.sends().length, 1);
-});
-
-test("1f a late error: stale reloads the board", async () => {
-  await enable();
-  const p = w.send(M, PID, { op: "edit", id: "T-AB1", title: "n" });
-  await until(() => delivered(), "sent");
-  clock += 10001; await w.tick(); await p;
-  hc.consume(() => "error: stale: card T-AB1 is at rev 8, request saw 7");
-  clock += 20000; await w.tick();
-  await until(() => outcomes.length === 1, "late");
-  assert.equal(outcomes[0].status, "stale");
-  assert.deepEqual(reloads, [[M, PID]]);
-});
-
-test("1f a pending entry older than TTL + 1 h is 'outcome unknown'; nothing is resent", async () => {
-  await enable();
-  hc.mode = "after";
-  await w.send(M, PID, { op: "move", id: "T-AB1", column: "doing" });
-  hc.mode = "ok"; hc.inbox = {};
-  clock += 120000 + 3600000 + 1000; await w.tick();
-  await until(() => outcomes.length === 1, "unknown");
-  assert.equal(outcomes[0].status, "unknown"); assert.match(outcomes[0].message, /outcome unknown/);
-  assert.equal(hc.sends().filter((c) => bodyOf(c).op === "move").length, 1, "the move is never resent (a new probe is not a resend)");
-  assert.deepEqual((shared[W.PENDING_KEY] ?? []).filter((e) => !e.probe), []);
-});
-
-// ---- 1g: cleanup ----
-test("1g a leftover own-origin .result older than 24 h is removed; a foreign one and a young one are kept", async () => {
-  const day = 86400;
-  const nowS = Math.floor(clock / 1000);
-  hc.inbox = {
-    [`${nowS - day - 10}-LLAPTOP1-000000000001.result`]: "ok: old own",
-    [`${nowS - 100}-LLAPTOP1-000000000002.result`]: "ok: young own",
-    [`${nowS - day - 10}-LOTHER-000000000003.result`]: "ok: foreign origin",
-    [`${nowS - day - 10}-4242.result`]: "ok: CLI",
-    [`${nowS - day - 10}-LLAPTOP1-000000000004.json`]: "{}",
-  };
-  await w.cleanup(M);
-  assert.deepEqual(Object.keys(hc.inbox).sort(), [`${nowS - 100}-LLAPTOP1-000000000002.result`, `${nowS - day - 10}-4242.result`, `${nowS - day - 10}-LLAPTOP1-000000000004.json`, `${nowS - day - 10}-LOTHER-000000000003.result`].sort());
-  assert.equal(hc.rms().length, 1);
-  assert.ok(sc(hc.rms()[0].args).includes("rm --"));
-});
-
-test("1g a name outside the charset is never passed to rm", async () => {
-  const nowS = Math.floor(clock / 1000);
-  hc.inbox = { [`${nowS - 100000}-LLAPTOP1-0000000000$x.result`]: "x", [`${nowS - 100000}-LLAPTOP1-000000000001.result; rm`]: "x" };
-  await w.cleanup(M);
-  assert.equal(hc.rms().length, 0);
-});
-
-// ---- 5: security ----
-test("5 payloads hold only op fields plus ifRev and ttlMs; a sentinel in the cache never reaches argv or stdin", async () => {
-  shared[KEY].tasks[0].desc = SENTINEL; shared[KEY].tasks[0].agent = SENTINEL;
-  await enable();
-  await sendAndAnswer({ op: "move", id: "T-AB1", column: "doing", agent: SENTINEL, env: SENTINEL }, "ok: x");
-  const body = bodyOf(lastSend());
-  assert.deepEqual(Object.keys(body).sort(), ["column", "id", "ifRev", "op", "ttlMs"]);
-  assert.ok(!JSON.stringify(hc.calls).includes(SENTINEL));
-});
-
-test("1g step 1 leftovers: an own-origin `.L<origin>-*.tmp` the server reports as old (-mmin +10) is removed; foreign, young and still-pending ones are kept", async () => {
-  const p = w.probe(M); await until(() => delivered(), "probe"); // a pending entry with its own staging name
-  const live = `.${shared[W.PENDING_KEY][0].nonce}.tmp`;
-  Object.assign(hc.inbox, { ".LLAPTOP1-000000000091.tmp": "{}", ".LLAPTOP1-000000000092.tmp": "{}", ".LOTHER-000000000093.tmp": "{}", ".4242.tmp": "{}", ".LLAPTOP1-0000000000$x.tmp": "{}" });
-  hc.inbox[live] ??= "{}";
-  hc.old = new Set([".LLAPTOP1-000000000091.tmp", ".LOTHER-000000000093.tmp", ".4242.tmp", ".LLAPTOP1-0000000000$x.tmp", live]);
-  await w.cleanup(M);
-  assert.ok(!(".LLAPTOP1-000000000091.tmp" in hc.inbox), "own, old: removed");
-  for (const n of [".LLAPTOP1-000000000092.tmp", ".LOTHER-000000000093.tmp", ".4242.tmp", ".LLAPTOP1-0000000000$x.tmp", live]) assert.ok(n in hc.inbox, `${n} kept`);
-  assert.equal(hc.rms().length, 1);
-  assert.match(arg(hc.rms()[0].args), /^\.LLAPTOP1-\d{12}\.tmp$/);
-  void p;
-});
-
-// ---- T-MWKX74YE6RM: a staging file that is never renamed must not sit in box1's inbox ----
-test("1h step 1 fails although the file landed: the own staging file is removed at once, nothing is renamed", async () => {
-  await enable();
-  hc.mode = "stage-landed-fail";
-  const out = await w.send(M, PID, { op: "move", id: "T-AB1", column: "doing" });
-  assert.equal(out.status, "failed");
-  await until(() => hc.rms().length === 1, "rm of the staging file");
-  assert.match(arg(hc.rms()[0].args), /^\.LLAPTOP1-\d{12}\.tmp$/);
-  assert.deepEqual(Object.keys(hc.inbox).filter((n) => n.endsWith(".tmp")), []);
-  assert.equal(hc.remoteSends().length, 0);
-});
-
-test("1h step 2 never ran (link dropped before the rename) and the entry settles unknown: the staging file is removed", async () => {
-  await enable();
-  hc.mode = "before";
-  const p = w.send(M, PID, { op: "move", id: "T-AB1", column: "doing" });
-  await until(() => hc.remoteSends().length === 1, "step 2 tried");
-  await drain();
-  hc.mode = "ok"; // the link is back; the request was never renamed
-  clock += W.TTL_MS + 3600000 + 1000;
-  await w.tick(); await p;
-  await until(() => hc.rms().length >= 1, "rm of the staging file");
-  assert.deepEqual(Object.keys(hc.inbox).filter((n) => n.endsWith(".tmp")), []);
-});
-
-test("1h the staging sweep is short (not 24 h) and runs from tick(), not only at reconnect", async () => {
-  await enable();
-  hc.calls.length = 0;
-  clock += W.SWEEP_MS + 1000;
-  await w.tick();
-  await until(() => hc.calls.some((c) => c.args[0] === "exec" && sc(c.args)?.startsWith("find ")), "a sweep from tick");
-  assert.match(W.FIND_TMP_SCRIPT, /-mmin \+(\d+)/);
-  assert.ok(Number(/-mmin \+(\d+)/.exec(W.FIND_TMP_SCRIPT)[1]) <= 15, "a stale staging file is reaped within minutes");
-});
-
-test("1h a failed rm leaves the file; the next sweep retries it. With writes off no sweep runs (documented limit)", async () => {
-  await enable();
-  hc.inbox[".LLAPTOP1-000000000777.tmp"] = "{}"; hc.old = new Set([".LLAPTOP1-000000000777.tmp"]);
-  const realRun = hc.run; let failRm = true;
-  w = mk({ run: async (a, o) => (failRm && sc(a)?.startsWith("rm ") ? { code: 1, stdout: "", stderr: "x" } : realRun(a, o)) });
-  await w.cleanup(M);
-  assert.ok(".LLAPTOP1-000000000777.tmp" in hc.inbox, "rm failed: still there");
-  failRm = false; await w.cleanup(M);
-  assert.ok(!(".LLAPTOP1-000000000777.tmp" in hc.inbox), "retried");
-  hc.inbox[".LLAPTOP1-000000000778.tmp"] = "{}"; hc.old.add(".LLAPTOP1-000000000778.tmp");
-  linkState.writes = false; hc.calls.length = 0; clock += W.SWEEP_MS + 1000; await w.tick();
-  assert.equal(hc.calls.filter((c) => sc(c.args)?.startsWith("find ")).length, 0);
-});
-
-test("1h a failed step logs one payload-free line: step, code, ms, short stderr", async () => {
-  const lines = []; w = mk({ log: (m) => lines.push(m) });
-  await enable();
-  hc.mode = "stage-landed-fail";
-  await w.send(M, PID, { op: "note", id: "T-AB1", text: SENTINEL });
-  assert.equal(lines.length, 1);
-  assert.match(lines[0], /^remote-write stage failed: code:255 ms=\d+$/);
-  assert.ok(!lines[0].includes(SENTINEL) && !lines[0].includes("timed out"), "no stderr in the log");
-});
-
-test("1h thrown errors log an allowlisted code only, never the message; a stderr sentinel never reaches the log", async () => {
-  const lines = []; let next = null;
-  w = mk({ log: (m) => lines.push(m), exec: (...a) => (next ? next() : hc.exec(...a)) });
-  await enable();
-  next = async () => { const e = new Error(SENTINEL); e.code = "ETIMEDOUT"; throw e; };
-  await w.send(M, PID, { op: "note", id: "T-AB1", text: "x" });
-  next = async () => { throw new Error(SENTINEL); };
-  await w.send(M, PID, { op: "note", id: "T-AB1", text: "y" });
-  next = async () => ({ code: 1, stdout: "", stderr: SENTINEL });
-  await w.send(M, PID, { op: "note", id: "T-AB1", text: "z" });
-  assert.match(lines[0], /stage failed: threw:ETIMEDOUT ms=\d+$/);
-  assert.match(lines[1], /stage failed: threw:other ms=\d+$/);
-  assert.match(lines[2], /stage failed: code:1 ms=\d+$/);
-  assert.ok(!lines.join("\n").includes(SENTINEL));
-});
-
-test("1h the timed sweep retries a failed rm even when every probe fails (writes on, reader fresh)", async () => {
-  await enable();
-  hc.inbox[".LLAPTOP1-000000000888.tmp"] = "{}"; hc.old = new Set([".LLAPTOP1-000000000888.tmp"]);
-  const realRun = hc.run; let failRm = true, rmTries = 0;
-  w = mk({ run: async (a, o) => (failRm && sc(a)?.startsWith("rm ") ? (rmTries++, { code: 1, stdout: "", stderr: "x" }) : realRun(a, o)) });
-  w.reconnect(M); // registers the machine; its probe is never answered
-  await until(() => hc.sends().length >= 1, "probe sent");
-  clock += W.SWEEP_MS + 1000; await w.tick();
-  await until(() => rmTries >= 1, "first rm");
-  assert.ok(".LLAPTOP1-000000000888.tmp" in hc.inbox, "rm failed");
-  failRm = false; clock += W.SWEEP_MS + 1000; await w.tick();
-  await until(() => !(".LLAPTOP1-000000000888.tmp" in hc.inbox), "retried by the timer");
-});
-
-// ---- Inspector review 1 (Job 5): several writers on one pending list, shared freeze, probe generations, deadlines ----
-const mkB = (over = {}) => W.createWriter({
-  run: hc.run, exec: hc.exec, getShared: (k) => shared[k], setShared: (k, v) => { if (v === null) delete shared[k]; else shared[k] = v; },
-  now: () => clock, rand: () => "B" + String(++seq).padStart(11, "0"), origin: "LAPTOP1", link: () => linkState, writable: () => linkState.writes !== false, reload: () => {}, onOutcome: (o) => outcomesB.push(o), ...over,
-});
-let outcomesB;
-const gated = () => { let release; const gate = new Promise((r) => (release = r)); return { gate, release }; };
-
-test("review 1.1 a second writer never touches the first one's staging entry; A's caller still resolves; an orphan is adopted after 30 s", async () => {
-  outcomesB = [];
-  const g = gated();
-  w = mk({ exec: async (c, a, o) => { if (JSON.parse(a[3]).op === "add") await g.gate; return hc.exec(c, a, o); } });
-  await enable();
-  const B = mkB();
-  const pA = w.send(M, PID, { op: "add", title: "from A" });
-  await until(() => w.inflight(M) === 1, "A is staging");
-  clock += 2000; await B.tick();
-  assert.equal(outcomesB.length, 0);
-  assert.equal((shared[W.PENDING_KEY] ?? []).filter((e) => !e.probe).length, 1, "B did not remove A's entry");
-  g.release();
-  await until(() => w.inflight(M) === 0, "A's rename done");
-  hc.consume(() => "ok: T-NEW1 added");
-  clock += 1000;
-  const o = await (async () => { for (;;) { await w.tick(); await B.tick(); const r = await Promise.race([pA, drain(2).then(() => null)]); if (r) return r; } })();
-  assert.equal(o.status, "saved", "A's own waiter got the answer");
-  assert.equal(outcomesB.length, 0, "B did not surface it");
-});
-
-test("review 1.1 an entry whose owner stopped beating is adopted by another writer after 30 s and reconciled", async () => {
-  outcomesB = [];
-  await enable();
-  hc.mode = "after";
-  await w.send(M, PID, { op: "add", title: "x" }); // A: pending, then A goes away (UI closed)
-  hc.mode = "ok"; hc.consume(() => "ok: T-NEW2 added");
-  const B = mkB();
-  clock += 20000; await B.tick(); await drain();
-  assert.equal(outcomesB.length, 0, "A is still alive for B (beat younger than 30 s)... or not adopted yet");
-  clock += 40000; await B.tick();
-  await until(() => outcomesB.some((x) => x.status === "saved"), "adopted and settled by B");
-});
-
-test("review 1.2 frozen comes from the shared pending list: another copy's send in staging keeps it false", async () => {
-  const g = gated();
-  w = mk({ exec: async (c, a, o) => { if (JSON.parse(a[3]).op === "move") await g.gate; return hc.exec(c, a, o); } });
-  await enable();
-  const B = mkB();
-  const p = w.send(M, PID, { op: "move", id: "T-AB1", column: "doing" });
-  await until(() => w.inflight(M) === 1, "A is staging");
-  linkState.writes = false;
-  assert.equal(B.frozen(M, PID), false, "B sees A's send in flight");
-  assert.equal(w.frozen(M, PID), false);
-  g.release(); await until(() => w.inflight(M) === 0, "A done");
-  assert.equal(B.frozen(M, PID), true);
-  assert.equal(w.frozen(M, PID), true);
-  clock += 1000; await w.tick(); void p;
-});
-
-test("review 1.4 a probe answered after reconnect() is discarded and a new probe is sent", async () => {
-  const p0 = w.probe(M);
-  await until(() => delivered(), "old probe staged");
-  const oldJson = Object.keys(hc.inbox).find((n) => n.endsWith(".json"));
-  w.reconnect(M);
-  await until(() => hc.sends().length === 2 && w.inflight(M) === 0, "a new probe is sent for the new connection");
-  hc.inbox[oldJson.replace(/\.json$/, ".result")] = "ok: protocol 2"; delete hc.inbox[oldJson]; // only the OLD connection's probe is answered
-  clock += 1000; await w.tick(); await drain();
-  assert.equal(w.canWrite(M, PID).ok, false, "the old answer does not enable writes");
-  hc.consume(() => "ok: protocol 2");
-  clock += 1000; await w.tick();
-  await until(() => w.canWrite(M, PID).ok, "the new connection's answer enables writes");
-  void p0;
-});
-
-test("review 1.5 a held remote rename: at 10 s the caller resolves 'may still apply', the send stays in flight until hc returns, a late return is reconciled", async () => {
-  const g = gated();
-  w = mk({ run: async (a, o) => { if (g.on && sc(a)?.startsWith("d=$HOME")) await g.gate; return hc.run(a, o); } });
-  await enable();
-  g.on = true;
-  const p = w.send(M, PID, { op: "move", id: "T-AB1", column: "doing" });
-  await until(() => hc.sends().length === 1, "staged");
-  clock += 10001;
-  const t = w.tick();
-  const o = await p;
-  assert.equal(o.status, "pending"); assert.equal(o.message, "sent, may still apply");
-  assert.equal(w.inflight(M), 1, "still counted in flight (frozen stays false)");
-  linkState.writes = false; assert.equal(w.frozen(M, PID), false);
-  g.release();
-  await until(() => w.inflight(M) === 0, "the late return");
-  assert.equal(linkState.writes === false && w.frozen(M, PID), true);
-  hc.consume(() => "ok: T-AB1 -> doing");
-  clock += 20000; await w.tick();
-  await until(() => outcomes.some((x) => x.status === "saved"), "late result reconciled");
-  assert.equal(hc.sends().length, 1, "no resend"); void t;
-});
-
-test("review 1.5 a held result read does not block the caller's deadline", async () => {
-  const g = gated();
-  w = mk({ run: async (a, o) => { if (a[0] === "file" && a[4].endsWith(".result") && g.on) await g.gate; return hc.run(a, o); } });
-  await enable();
-  g.on = true;
-  const p = w.send(M, PID, { op: "move", id: "T-AB1", column: "doing" });
-  await until(() => delivered(), "staged");
-  clock += 1000; const t1 = w.tick(); // the first look is held
-  clock += 10000; const t2 = w.tick();
-  const o = await p;
-  assert.equal(o.status, "pending");
-  g.release(); await t1; await t2;
-});
-
-test("review 1.3 the real FIND_SCRIPT: a failing listing exits 3 (unknown), not 1 (absent); a hit exits 0", () => {
-  const home = mkdtempSync(join(tmpdir(), "find-home-"));
-  const run = (h) => spawnSync("sh", ["-c", W.FIND_SCRIPT, "LX-000000000001"], { env: { HOME: h, PATH: process.env.PATH }, encoding: "utf8" });
-  assert.equal(run(join(home, "no-such-home")).status, 3, "the inbox cannot be listed");
-  const dir = join(home, ".config/herdr-app/data/drover-inbox");
-  mkdirSync(dir, { recursive: true });
-  assert.equal(run(home).status, 1, "listed, no match");
-  writeFileSync(join(dir, "1700000000-LX-000000000001.json"), "{}");
-  const hit = run(home);
-  assert.equal(hit.status, 0); assert.equal(hit.stdout.trim(), "1700000000-LX-000000000001.json");
-});
-
-// ---- Inspector re-review 2 (Job 7) ----
-const tickSome = async (w_) => { await Promise.race([w_.tick(), drain(2)]); };
-
-test("re-review 2.1 a live owner's send stays in flight until its hc call returns, however long it takes", async () => {
-  const g = gated();
-  w = mk({ run: async (a, o) => { if (g.on && sc(a)?.startsWith("d=$HOME")) await g.gate; return hc.run(a, o); } });
-  await enable();
-  g.on = true;
-  const p = w.send(M, PID, { op: "move", id: "T-AB1", column: "doing" });
-  await until(() => w.inflight(M) === 1 && hc.sends().length === 1, "rename held");
-  g.on = false; // only this one call is held
-  linkState.writes = false;
-  for (let i = 0; i < 16; i++) { clock += 10000; await tickSome(w); } // 160 s: past the old 120 s cut-off, the owner still beats
-  assert.equal(w.frozen(M, PID), false, "the rename can still happen");
-  g.release();
-  await until(() => w.inflight(M) === 0, "the call returned");
-  assert.equal(w.frozen(M, PID), true);
-  void p;
-});
-
-test("re-review 2.1 an entry adopted from a dead owner still counts as in flight for 2 x ttl after adoption", async () => {
-  outcomesB = [];
-  const g = gated();
-  w = mk({ run: async (a, o) => { if (g.on && sc(a)?.startsWith("d=$HOME")) await g.gate; return hc.run(a, o); } });
-  await enable();
-  g.on = true;
-  const pA = w.send(M, PID, { op: "move", id: "T-AB1", column: "doing" });
-  await until(() => w.inflight(M) === 1 && hc.sends().length === 1, "rename held");
-  linkState.writes = false;
-  const B = mkB(); // A goes silent (no more ticks)
-  clock += 31000; await tickSome(B);
-  assert.equal(B.frozen(M, PID), false, "adopted, but not certified ended");
-  clock += 200000; await tickSome(B);
-  assert.equal(B.frozen(M, PID), false, "still inside 2 x ttl of the adoption");
-  clock += 60000; await tickSome(B);
-  assert.equal(B.frozen(M, PID), true, "after 240 s from adoption");
-  g.release(); void pA;
-});
-
-test("re-review 2.3 lost-reply recovery does not hold the caller past the 10 s deadline", async () => {
-  const g = gated();
-  w = mk({ run: async (a, o) => { if (g.on && sc(a)?.startsWith("d=$HOME")) clock += 9000; if (g.on && sc(a)?.includes("grep -F")) await g.gate; return hc.run(a, o); } }); // the reply is lost at send + 9 s
-  await enable();
-  g.on = true;
-  hc.mode = "after";
-  let o = null;
-  const p = w.send(M, PID, { op: "add", title: "x" }).then((v) => (o = v));
-  await until(() => hc.sends().length === 1 && w.inflight(M) === 0, "rename done, reply lost, lookup held");
-  clock += 1001; await tickSome(w); // send + 10.001 s
-  await until(() => o, "the caller resolved at its deadline", 2000);
-  assert.equal(o.status, "pending"); assert.equal(o.message, "sent, may still apply");
-  g.release(); void p;
-});
-
-test("re-review 2.5 writes:false sends nothing, not even the protocol probe; turning writes on probes at once", async () => {
-  linkState.writes = false;
-  w.reconnect(M);
-  clock += 1000; await tickSome(w); await drain();
-  clock += 100000; await tickSome(w); await drain();
-  assert.equal(hc.sends().length, 0, "nothing staged");
-  assert.equal(hc.remoteSends().length, 0);
-  linkState.writes = true;
-  clock += 1000; await tickSome(w);
-  await until(() => hc.sends().length === 1, "a probe as soon as writes are on");
-  assert.equal(bodyOf(hc.sends()[0]).op, "protocol");
-});
-
-// ---- T-MWIA1D6HO84: protocol levels. 2 = basic writes; 3 = priority, tags, assignee, parent, project (edit) and assignee (add). ----
-async function enableAt(level) {
-  const p = w.probe(M);
-  await until(() => delivered(), "probe delivered");
-  hc.consume((cmd) => (cmd.op === "protocol" ? `ok: protocol ${level}` : "ok: x"));
-  clock += 1000; await w.tick(); await p;
-  hc.calls.length = 0;
-}
-const FIELD_OPS = [
-  { op: "edit", id: "T-AB1", priority: "P0" }, { op: "edit", id: "T-AB1", tags: ["a"] }, { op: "edit", id: "T-AB1", assignee: { kind: "agent", id: "wrangler" } },
-  { op: "edit", id: "T-AB1", assignee: "none" }, { op: "edit", id: "T-AB1", parent: "T-AB2" }, { op: "edit", id: "T-AB1", parent: "none" }, { op: "edit", id: "T-AB1", project: "P-OTHER" },
-  { op: "edit", id: "T-AB1", title: "new", priority: "P1" }, { op: "add", title: "x", assignee: { kind: "squad", id: "cattle-drive" } },
-];
-const TIP = "box1 needs the update for priority, labels, assignee, parent and project";
-
-test("T3 level 3: fields are on; the exact JSON of each new field", async () => {
-  await enableAt(3);
-  assert.deepEqual(w.fields(M, PID), { on: true, tip: null });
-  const cases = [
-    [{ op: "edit", id: "T-AB1", priority: "P0", tags: ["a", "b"], assignee: { kind: "agent", id: "wrangler", junk: 1 }, parent: "T-AB2", project: "P-OTHER", title: "n" },
-      { op: "edit", id: "T-AB1", title: "n", priority: "P0", tags: ["a", "b"], assignee: { kind: "agent", id: "wrangler" }, parent: "T-AB2", project: "P-OTHER", ifRev: 7, ttlMs: 120000 }],
-    [{ op: "edit", id: "T-AB1", assignee: "none", parent: "none" }, { op: "edit", id: "T-AB1", assignee: "none", parent: "none", ifRev: 7, ttlMs: 120000 }],
-    [{ op: "add", title: "x", assignee: { kind: "squad", id: "cattle-drive" }, parent: "T-AB1" }, { op: "add", title: "x", desc: "", tags: [], column: "backlog", priority: "P2", project: PID, assignee: { kind: "squad", id: "cattle-drive" }, parent: "T-AB1", ttlMs: 120000 }],
-  ];
-  for (const [op, want] of cases) { assert.equal((await sendAndAnswer(op, "ok: done")).status, "saved"); assert.deepEqual(bodyOf(lastSend()), want); }
-});
-test("T3 ifRev is the editor's opened baseline when it gives one, else the saved copy's rev", async () => {
-  await enableAt(3);
-  await sendAndAnswer({ op: "edit", id: "T-AB1", priority: "P0", ifRev: 3 }, "ok: done");
-  assert.equal(bodyOf(lastSend()).ifRev, 3);
-  await sendAndAnswer({ op: "edit", id: "T-AB1", priority: "P0" }, "ok: done");
-  assert.equal(bodyOf(lastSend()).ifRev, 7);
-  const bad = await w.send(M, PID, { op: "edit", id: "T-AB1", priority: "P0", ifRev: -1 });
-  assert.equal(bad.status, "refused");
-});
-test("T3 strict payloads: bad priority, tags, assignee, parent, project are refused and nothing is sent", async () => {
-  await enableAt(3);
+test("T3 strict payloads: bad priority, tags, assignee, parent, project are refused", () => {
   for (const bad of [{ priority: "P9" }, { tags: "a" }, { tags: [1] }, { assignee: { kind: "robot", id: "x" } }, { assignee: "x" }, { assignee: null }, { parent: "nope" }, { parent: 5 }, { project: "x y" }, { project: 5 }]) {
-    assert.equal((await w.send(M, PID, { op: "edit", id: "T-AB1", ...bad })).status, "refused", JSON.stringify(bad));
+    assert.ok(build({ op: "edit", id: "T-AB1", ...bad }).error, JSON.stringify(bad));
   }
-  assert.equal((await w.send(M, PID, { op: "add", title: "x", assignee: { kind: "agent" } })).status, "refused");
-  assert.equal(hc.sends().length, 0);
-});
-test("T3 level 2: basic writes work, field controls are off with the reason, and send() refuses every protocol-3-only field", async () => {
-  await enableAt(2);
-  assert.equal(w.canWrite(M, PID).ok, true);
-  assert.deepEqual(w.fields(M, PID), { on: false, tip: TIP });
-  assert.equal((await sendAndAnswer({ op: "edit", id: "T-AB1", title: "t2", desc: "d" }, "ok: done")).status, "saved");
-  assert.equal((await sendAndAnswer({ op: "move", id: "T-AB1", column: "doing" }, "ok: done")).status, "saved");
-  assert.equal((await sendAndAnswer({ op: "add", title: "plain" }, "ok: done")).status, "saved");
-  const n = hc.sends().length;
-  for (const op of FIELD_OPS) {
-    const o = await w.send(M, PID, op);
-    assert.equal(o.status, "refused", JSON.stringify(op)); assert.equal(o.message, TIP);
-  }
-  assert.equal(hc.sends().length, n, "nothing reached the wire");
-});
-test("T3 a downgrade (3 -> 2) after a reconnect refuses the fields again; an upgrade turns them on", async () => {
-  await enableAt(3);
-  assert.equal(w.fields(M, PID).on, true);
-  w.reconnect(M);
-  await until(() => delivered(), "probe delivered");
-  hc.consume((cmd) => (cmd.op === "protocol" ? "ok: protocol 2" : "ok: x"));
-  clock += 1000; await w.tick();
-  await until(() => w.canWrite(M, PID).ok, "probe answered");
-  assert.equal(w.fields(M, PID).on, false);
-  assert.equal((await w.send(M, PID, { op: "edit", id: "T-AB1", title: "t", priority: "P0" })).message, TIP, "mixed title + field");
-  w.reconnect(M);
-  await until(() => hc.sends().length >= 1 && w.inflight(M) === 0, "probe delivered");
-  hc.consume((cmd) => (cmd.op === "protocol" ? "ok: protocol 3" : "ok: x"));
-  clock += 1000; await w.tick();
-  await until(() => w.fields(M, PID).on, "fields on after the upgrade");
-});
-test("T3 while the probe is stale or unanswered, fields are off with the generic reason, and a field send is refused", async () => {
-  assert.equal(w.fields(M, PID).on, false);
-  assert.match(w.fields(M, PID).tip, /Checking box1|needs the update/);
-  assert.equal((await w.send(M, PID, { op: "edit", id: "T-AB1", priority: "P0" })).status, "refused");
-});
-test("T3 an answer that is not 'ok: protocol N' (N>=2) keeps writes off", async () => {
-  for (const text of ["ok: protocol 1", "ok: protocol x", "error: Unknown drover command"]) {
-    const p = w.probe(M); await until(() => delivered(), "probe delivered");
-    hc.consume((cmd) => (cmd.op === "protocol" ? text : "ok: x")); clock += 1000; await w.tick(); await p;
-    assert.equal(w.canWrite(M, PID).ok, false, text); assert.equal(w.fields(M, PID).on, false, text);
-    hc.calls.length = 0;
-  }
+  assert.ok(build({ op: "add", title: "x", assignee: { kind: "agent" } }).error);
+  assert.ok(build({ op: "add", title: "x", parent: "nope" }).error);
 });
 
-// T-MWMKWXEHKUC: a consumer's writeFile creates the .result empty first; reading it then must not settle the send.
-test("1c2 an empty result is not an answer: the send settles only once the reply text is there, and the file is kept until then", async () => {
-  await enable();
-  const n = hc.sends().length;
-  const p = w.send(M, PID, { op: "move", id: "T-AB1", column: "doing" });
-  await until(() => delivered(n + 1), "delivered");
-  hc.consume(() => ""); // the consumer created the file, nothing written yet
-  clock += 1000; await w.tick(); await drain();
-  assert.equal(hc.rms().length, 0, "an empty read removes nothing");
-  assert.equal(outcomes.length, 0, "an empty read settles nothing");
-  for (const k of Object.keys(hc.inbox)) if (k.endsWith(".result")) hc.inbox[k] = "ok: T-AB1 -> in-progress";
-  clock += 1000; await w.tick();
-  assert.equal((await p).status, "saved");
+test("the exec writer sends exactly what buildPayload built, with the rev the caller gave (the editor's opened baseline wins over the saved copy)", async () => {
+  const sent = [];
+  const w = X.createExecWriter({ exec: async (_c, a) => { sent.push(JSON.parse(a[3])); return { code: 0, stdout: JSON.stringify({ ok: true, result: {} }), stderr: "" }; }, link: () => ({ state: "fresh", ops: ["move", "edit"], skew: 0 }) });
+  assert.equal((await w.send("box1", PID, { op: "edit", id: "T-AB1", priority: "P0" }, { rev: 3 })).status, "saved");
+  assert.equal(sent[0].ifRev, 3);
+  assert.deepEqual([sent[0].op, sent[0].priority, sent[0].ttlMs], ["edit", "P0", 120000]);
 });

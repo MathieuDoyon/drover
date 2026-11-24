@@ -4,8 +4,7 @@ import { shared, setShared, openOverlay, exec, hc, readTextFile, writeTextFile, 
 import * as fs from "fs/promises";
 import { KEY, SEEN_KEY, PROJECTS_KEY, firstSight, list, add, update, bySource, addCommand, addProjectKey, applyCommand, columnName, repoOf, projectOf, projectKey, projectAddRequest, projectDiff, PROTOCOL, inboxGate, arrivalOf, addProject, projectNamed, nextReport, claim, release, editSize, CLAIMING, clearClaimToken } from "./store.js";
 import { base64, httpProblem, jiraIssue, jiraKey, githubIssue, prItems } from "./sources.js";
-import { ownerError, createRemote, bindings as remoteBindings, mergeRemote, cacheKey } from "./remote.js";
-import { createWriter } from "./remote-write.js";
+import { ownerError, bindRemote, bindings as remoteBindings, mergeRemote, cacheKey } from "./remote.js";
 import { createExecReader, createExecWriter, probeExec, controls as execControls, opGate, skewReason, UI_OPS } from "./remote-exec.js";
 import { createNeedsCache } from "./needs.js";
 import { cleanAsk, terminalIdOk } from "./asks.js";
@@ -147,29 +146,25 @@ export const remoteRun = (args) => hc(args); // hc takes argv only: the 10 s dea
 let screenOn = () => true; // set by watchRemote: the owning screen's switch
 const remoteShared = { getShared: (k) => shared(k), setShared: (k, v) => setShared(k, v ?? undefined) };
 const remoteBound = (machine, projectId, id) => remoteBindings(loadProjects()).some((b) => b.machine === machine && b.projectId === projectId && b.id === id);
-const inboxRemote = createRemote({ run: remoteRun, active: () => screenOn(), ...remoteShared, bound: remoteBound, probeExec: (machine, projectId) => probeExec(remoteRun, machine, projectId) });
 const execRemote = createExecReader({ run: remoteRun, active: () => screenOn(), ...remoteShared, bound: remoteBound, log: (m) => globalThis.console?.log?.(m) });
 const bindingOf = (machine, projectId) => loadProjects().find((p) => p.remote?.machine === machine && p.remote.projectId === projectId)?.remote;
-const viaExec = (machine, projectId) => bindingOf(machine, projectId)?.transport === "exec";
-const readerOf = (machine, projectId) => (viaExec(machine, projectId) ? execRemote : inboxRemote);
-// One reader per transport behind createRemote's surface: a binding is read by the one its transport names (default inbox; the exec reader is exec-only).
+// The reader of every binding: the exec transport (drover-headless over hc exec) is the only one. bind checks the machine over exec before it saves the binding.
 export const remote = {
-  bind: (...a) => inboxRemote.bind(...a),
-  attach: (...a) => inboxRemote.attach(...a),
-  detach(machine, projectId) { inboxRemote.detach(machine, projectId); execRemote.detach(machine, projectId); },
-  sync(list) { inboxRemote.sync(list.filter((b) => b.transport !== "exec")); execRemote.sync(list.filter((b) => b.transport === "exec")); },
-  suspend() { inboxRemote.suspend(); execRemote.suspend(); },
-  tick: async () => (await Promise.all([inboxRemote.tick(), execRemote.tick()])).flat(),
-  read: (machine, projectId) => readerOf(machine, projectId).read(machine, projectId),
-  retry: (machine, projectId) => readerOf(machine, projectId).retry(machine, projectId),
-  view: (machine, projectId) => readerOf(machine, projectId).view(machine, projectId),
+  bind: (project, args, ctx) => bindRemote({ run: remoteRun, probeExec: (machine, projectId) => probeExec(remoteRun, machine, projectId) }, project, args, ctx),
+  detach: (machine, projectId) => execRemote.detach(machine, projectId),
+  sync: (list) => execRemote.sync(list),
+  suspend: () => execRemote.suspend(),
+  tick: () => execRemote.tick(),
+  read: (machine, projectId) => execRemote.read(machine, projectId),
+  retry: (machine, projectId) => execRemote.retry(machine, projectId),
+  view: (machine, projectId) => execRemote.view(machine, projectId),
 };
 export const loadProjects = () => (Array.isArray(shared(PROJECTS_KEY)) ? shared(PROJECTS_KEY) : []);
 
 // Local cards plus the cached cards of every remote-bound project (read-only; see remote.js). { tasks, remotes } where remotes carry each banner.
 export const loadMerged = () => { const ps = loadProjects(); return remoteBindings(ps).length ? mergeRemote(load(), ps, remote.view) : { tasks: load(), remotes: [] }; };
 // Board / Tasks timer: keeps the tracked bindings equal to the projects' and reads the due ones (a mod copy polls on its own while it is open).
-// enabled(): the owning screen's switch. Off: no read, and a read in flight is dropped (the inbox consumers are separate and keep running).
+// enabled(): the owning screen's switch. Off: no read, and a read in flight is dropped (the local inbox consumer is separate and keeps running).
 export function watchRemote(cx, enabled = () => true) {
   screenOn = enabled;
   const tick = (cx) => {
@@ -177,7 +172,7 @@ export function watchRemote(cx, enabled = () => true) {
     const list = remoteBindings(loadProjects());
     remote.sync(list); // the whole binding, id included: the commit-time check compares it
     if (list.length && cx.spawn) cx.spawn(async (cx) => { if ((await remote.tick()).length) cx.notify(); });
-    driveWriter(cx, list);
+    execWriter?.tick(); // ends a write wait past its deadline and drops an old held envelope
   };
   cx.timer?.every?.(1000, tick);
   tick(cx);
@@ -323,43 +318,25 @@ export function startNeeds(cx, { read = needsWorld, gate = () => true, remote = 
   if (remote) watchRemote(cx, gate);
   return cache;
 }
-// ---- Remote project, step 2: writes to the machine's inbox (T-MWHVWR8TIJB). remote-write.js is pure; this is its host side. ----
-// Each mod copy that polls (Board, Tasks) owns one writer; the pending list is a shared key. Origin: this laptop's stable tag in every nonce.
+// ---- Remote project, step 2: writes over the exec transport (T-MWO2UYPADZC). remote-write.js builds the request, remote-exec.js sends it. ----
+// Each mod copy that polls (Board, Tasks) owns one writer. Origin: this laptop's stable tag in every nonce.
 const ORIGIN_KEY = "drover.remote-origin";
-let writer = null, writerCx = null;
-const remoteOutcomes = [];
 const originTag = () => {
   let origin = shared(ORIGIN_KEY);
   if (!/^[A-Za-z0-9]{1,16}$/.test(origin ?? "")) { origin = `D${Math.random().toString(36).slice(2, 9).padEnd(7, "0")}`; setShared(ORIGIN_KEY, origin); }
   return origin;
 };
-export const remoteWriter = () => {
-  if (writer) return writer;
-  const origin = originTag();
-  const bound = (machine, projectId) => loadProjects().find((p) => p.remote?.machine === machine && p.remote.projectId === projectId);
-  writer = createWriter({
-    run: (args) => hc(args), // the writer owns its deadlines (tick); hc takes argv only
-    exec: (cmd, args, opts) => exec(cmd, args, opts),
-    now: () => Date.now(), getShared: (k) => shared(k), setShared: (k, v) => setShared(k, v ?? undefined), origin,
-    log: (m) => globalThis.console?.log?.(m), // one payload-free line per failed delivery step
-    writable: (machine) => loadProjects().some((p) => p.remote?.machine === machine && p.remote.writes !== false),
-    link: (machine, projectId) => ({ writes: bound(machine, projectId)?.remote.writes !== false, state: remote.view(machine, projectId).state }),
-    reload: (machine, projectId) => { void remote.retry(machine, projectId).then(() => writerCx?.notify?.()); },
-    onOutcome: (o) => { if (!o.probe) remoteOutcomes.push(o); if (remoteOutcomes.length > 20) remoteOutcomes.shift(); writerCx?.notify?.(); },
-  });
-  return writer;
-};
-// Late outcomes (a result that arrived after the wait), oldest first; the caller shows and clears them.
-export const takeRemoteOutcomes = () => remoteOutcomes.splice(0);
 const remoteBinding = (localId) => remoteBindings(loadProjects()).find((b) => b.localId === localId) ?? null;
-// What a Board/Tasks control needs: { remote, enabled, reason, frozen, fields: { on, tip } } (fields: the protocol-3 controls).
-// The exec transport (T-MWO2UYPADZC): no probe, no freeze, no queue. The controls are the ones the remote reported in its ops list, and only on a fresh view.
+// No probe, no freeze, no queue. The controls are the ones the remote reported in its ops list, and only on a fresh view.
 let execWriter = null;
 const execWriterOf = () => (execWriter ??= createExecWriter({
   exec: (cmd, args, opts) => exec(cmd, args, opts), origin: originTag(), log: (m) => globalThis.console?.log?.(m),
   link: (machine, projectId) => { const v = execRemote.view(machine, projectId); return { state: v.state, ops: v.ops, skew: v.skew }; },
 }));
-function execWriteState(b) {
+// What a Board/Tasks control needs: { remote, enabled, reason, controls, opTips, fields: { on, tip } }.
+export function remoteWriteState(localId) {
+  const b = remoteBinding(localId);
+  if (!b) return { remote: false, enabled: false, reason: "Not a remote project" };
   const v = execRemote.view(b.machine, b.projectId);
   const ctl = execControls(v.ops);
   const rb = bindingOf(b.machine, b.projectId);
@@ -369,29 +346,13 @@ function execWriteState(b) {
     : skewReason(b.machine, v.skew);
   // `enabled`/`reason` are freshness, the writes switch and the clock: they gate every control. Each op then has its own gate (controls, opTips), which controlState(ws, op) applies.
   const opTips = Object.fromEntries(UI_OPS.map((o) => [o, opGate(v.ops, o)]));
-  return { remote: true, transport: "exec", enabled: reason === null, reason, frozen: false, controls: ctl, opTips, fields: { on: reason === null && ctl.edit, tip: ctl.edit ? null : opTips.edit } };
-}
-export function remoteWriteState(localId) {
-  const b = remoteBinding(localId);
-  if (!b) return { remote: false, enabled: false, reason: "Not a remote project", frozen: false };
-  if (b.transport === "exec") return execWriteState(b);
-  const w = remoteWriter();
-  const g = w.canWrite(b.machine, b.projectId);
-  return { remote: true, enabled: g.ok, reason: g.ok ? null : g.reason, frozen: w.frozen(b.machine, b.projectId), fields: w.fields(b.machine, b.projectId) };
+  return { remote: true, enabled: reason === null, reason, controls: ctl, opTips, fields: { on: reason === null && ctl.edit, tip: ctl.edit ? null : opTips.edit } };
 }
 // A card change on a remote project: only remote-write.js builds the request. The board is re-read after a save.
 export async function remoteSend(localId, op, cx) {
   const b = remoteBinding(localId);
   if (!b) return { status: "refused", message: "Not a remote project" };
-  if (cx) writerCx = cx;
-  if (b.transport === "exec") return remoteSendExec(b, op, cx);
-  const o = await remoteWriter().send(b.machine, b.projectId, op);
-  if (o.status === "saved") await remote.retry(b.machine, b.projectId);
-  cx?.notify?.();
-  return o;
-}
-async function remoteSendExec(b, op, cx) {
-  const done = (o) => ({ ...o, machine: b.machine, transport: "exec" });
+  const done = (o) => ({ ...o, machine: b.machine });
   if (bindingOf(b.machine, b.projectId)?.writes === false) return done({ status: "refused", message: "writes are off; nothing was sent" });
   let rev;
   if (op?.op !== "add") {
@@ -410,47 +371,17 @@ export async function remoteReload(localId) {
   const b = remoteBinding(localId);
   if (b) await remote.retry(b.machine, b.projectId);
 }
-// The freeze switch of the rollback runbook: remote.writes (the binding keeps its id). `frozen` is true only when no send is in flight.
+// The writes switch: remote.writes (the binding keeps its id). Off refuses every write to that machine at once; nothing is queued.
 export function setRemoteWrites(localId, on) {
   const b = remoteBinding(localId);
   if (!b) return { error: "Not a remote project" };
   setShared(PROJECTS_KEY, loadProjects().map((p) => (p.id === localId ? { ...p, remote: { ...p.remote, writes: Boolean(on) } } : p)));
-  return { ok: true, writes: Boolean(on), frozen: b.transport === "exec" ? !on : remoteWriter().frozen(b.machine, b.projectId) };
+  return { ok: true, writes: Boolean(on) };
 }
-// Flip a binding's transport (inbox | exec). Only the binding is saved: no card, project or file is moved, and its id (so every card id) stays.
-// To exec needs the machine to answer drover-headless and to hold the project; back to inbox needs nothing (the rollback).
-export async function setRemoteTransport(localId, to) {
-  const b = remoteBinding(localId);
-  if (!b) return { error: "Not a remote project" };
-  if (to !== "inbox" && to !== "exec") return { error: "Transport is inbox or exec" };
-  if (to === b.transport) return { ok: true, transport: to };
-  if (to === "exec") { const pe = await probeExec(remoteRun, b.machine, b.projectId); if (pe.error) return { error: pe.error }; }
-  const cur = remoteBinding(localId);
-  if (!cur || cur.id !== b.id || cur.transport !== b.transport) return { error: "The binding changed while checking: try again" };
-  setShared(PROJECTS_KEY, loadProjects().map((p) => {
-    if (p.id !== localId) return p;
-    const { transport: _t, ...rest } = p.remote;
-    return { ...p, remote: to === "exec" ? { ...rest, transport: "exec" } : rest };
-  }));
-  return { ok: true, transport: to };
-}
-const seenState = new Map(); // binding key -> the last view state, to see stale/never -> fresh
-// Forget the writer, its probes and what it saw (a test, or a reset of the remote layer).
-export function resetRemoteWriter() { writer = null; writerCx = null; seenState.clear(); remoteOutcomes.length = 0; }
-function driveWriter(cx, list) {
-  writerCx = cx;
-  execWriter?.tick();
-  list = list.filter((b) => b.transport !== "exec"); // exec bindings have no probe or inbox sweep
-  const w = remoteWriter();
-  for (const b of list) {
-    const key = cacheKey(b.machine, b.projectId);
-    const now = remote.view(b.machine, b.projectId).state;
-    if (now === "fresh" && seenState.get(key) !== "fresh") { w.reconnect(b.machine); void w.cleanup(b.machine); } // bind, or the machine came back
-    seenState.set(key, now);
-  }
-  for (const key of [...seenState.keys()]) if (!list.some((b) => cacheKey(b.machine, b.projectId) === key)) seenState.delete(key);
-  if (list.length) void w.tick().then(() => cx.notify?.());
-}
+// Forget the exec writer (a test, or a reset of the remote layer): its held envelopes go with it.
+export function resetRemoteWriter() { execWriter = null; }
+// The exec writer answers each send before it returns (saved, stale, refused, failed or unknown, held for a safe repeat): no outcome arrives late.
+export const takeRemoteOutcomes = () => [];
 // The Retry control: a read now, then a repaint.
 export const retryRemote = (machine, projectId, cx) => cx.spawn(async (cx) => { await remote.retry(machine, projectId); cx.notify(); });
 export const loadRuns = () => (Array.isArray(shared(RUNS_KEY)) ? shared(RUNS_KEY) : []);

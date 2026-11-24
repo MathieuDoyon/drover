@@ -1,4 +1,5 @@
 // Inspector review 2 of T-MWHVWQNL2HA: the Tasks sidebar, Squads "Opens in", cross-reader unbind, bind race, screen gate.
+// Read through the exec reader against a fake drover-headless since the shared.json reader retired (T-MWO2V65MUSX).
 import { test, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import { register } from "node:module";
@@ -6,6 +7,7 @@ import { register } from "node:module";
 register("./hooks.js", import.meta.url);
 const { until, drain } = await import(new URL("./stubs/until.js", import.meta.url).href);
 const R = await import("../_lib/remote.js");
+const X = await import("../_lib/remote-exec.js");
 const IO = await import("../_lib/io.js");
 const CFG = await import("../_lib/config.js");
 const { default: Tasks } = await import("../drover-tasks/main.js");
@@ -14,7 +16,18 @@ CFG.setSettings("drover-tasks", {});
 
 const RID = "P-REMOTE1";
 const card = (id, project, extra = {}) => ({ id, title: `title ${id}`, desc: "", column: "todo", priority: "P2", tags: [], project, archived: false, notes: [], ...extra });
-const remoteBoard = () => JSON.stringify({ "drover.projects": [{ id: RID, name: "r" }], "drover.tasks": [card("T-REMOTE", RID)] });
+// What the machine answers to hc: `machine ls`, and drover-headless version|rev|tasks|projects.
+const answer = (args) => {
+  if (args[0] === "machine") return { code: 0, stdout: JSON.stringify({ machines: [{ name: "box1" }] }), stderr: "" };
+  const v = args.slice(args.indexOf(X.HEADLESS) + 1)[0];
+  const ok = (o) => ({ code: 0, stdout: JSON.stringify(o), stderr: "" });
+  if (v === "version") return ok({ cli: "drover-headless", schema: 1, ops: ["add", "archive", "edit", "move", "note"] });
+  if (v === "rev") return ok({ gen: 1, tasks: "h1" });
+  if (v === "tasks") return ok({ gen: 1, rev: "h1", tasks: [card("T-REMOTE", RID)] });
+  if (v === "projects") return ok({ gen: 1, projects: [{ id: RID, name: "r" }] });
+  return { code: 2, stdout: "", stderr: "" };
+};
+const startsOf = (calls) => calls.filter((a) => a[0] === "exec" && a.includes("version")).length; // a poll pass of a fresh reader starts with version
 const REMOTE_PROJECT = { id: "P-ONREM", name: "pairstone", repos: [{ path: "/remote/repo", default: true }], folders: [], branch: "main", remote: { machine: "box1", projectId: RID } };
 let host, timers, hcCalls;
 const mkCx = () => { const cx = { notify() {}, stop_propagation() {}, spawn: (fn) => Promise.resolve().then(() => fn(cx)).catch(() => {}), focus_handle: () => ({ focus() {} }), timer: { after() {}, every: (_ms, fn) => timers.push(() => fn(cx)) } }; return cx; };
@@ -22,7 +35,7 @@ beforeEach(() => {
   timers = []; hcCalls = [];
   host = globalThis.__host = { appHome: "/app", home: "/h", props: {}, notified: [], terminals: [], agents: [], spaces: [], panes: [], focused: { space: "s1" }, overlays: [], runs: [],
     state: { "drover.tasks": [], "drover.projects": [REMOTE_PROJECT] },
-    hc: async (args) => { hcCalls.push(args); return { code: 0, stdout: remoteBoard(), stderr: "" }; },
+    hc: async (args) => { hcCalls.push(args); return answer(args); },
     openOverlay: (o) => { host.overlays.push(o); return "ov1"; }, run: (...a) => host.runs.push(a),
     exec: async () => { hcCalls.push(["EXEC"]); return { code: 1, stdout: "", stderr: "" }; } };
 });
@@ -30,7 +43,7 @@ const render = (v, cx) => { globalThis.__rec = { ids: [], texts: [] }; v.render(
 const cacheKey = `drover.remote.box1.${RID}`;
 
 test("F1 the actual Tasks sidebar: never-loaded banner, then remote rows with the machine, stale banner + Retry, fresh without a banner", async () => {
-  const cx = mkCx(); const v = new Tasks(); v.init({}, { ...cx, spawn() {} }); // init starts the inbox and wakeup loops: not under test
+  const cx = mkCx(); const v = new Tasks(); v.init({}, { ...cx, spawn() {} }); // init starts the local inbox and wakeup loops: not under test
   let r = render(v, cx);
   assert.ok(r.ids.includes("banner-P-ONREM") && r.ids.includes("retry-P-ONREM"), "never loaded: banner + Retry");
   assert.ok(r.texts.some((x) => x.includes("box1 has not answered yet")));
@@ -68,8 +81,8 @@ test("F3 unbind reaches a read already running in another reader instance, and a
   let projects = [{ id: "P-L", name: "l", remote: { machine: "box1", projectId: RID, id: "B1" } }];
   const bound = (m, p, id) => R.bindings(projects).some((b) => b.machine === m && b.projectId === p && b.id === id);
   let release; const hold = new Promise((r) => { release = r; });
-  const run = async () => { await hold; return { code: 0, stdout: remoteBoard(), stderr: "" }; };
-  const A = R.createRemote({ run, getShared, setShared, bound }), B = R.createRemote({ run, getShared, setShared, bound });
+  const run = async (args) => { await hold; return answer(args); };
+  const A = X.createExecReader({ run, getShared, setShared, bound }), B = X.createExecReader({ run, getShared, setShared, bound });
   A.sync(R.bindings(projects)); B.sync(R.bindings(projects));
   const pending = A.tick();
   // B (the Projects mod) unbinds: removes the field and detaches ITS entries.
@@ -84,7 +97,7 @@ test("F3 unbind reaches a read already running in another reader instance, and a
 
 test("F4 an in-flight Rebind cannot undo a later Unbind", async () => {
   let release; const hold = new Promise((r) => { release = r; });
-  host.hc = async (args) => { if (args[0] === "machine") return { code: 0, stdout: JSON.stringify({ machines: [{ name: "box1" }] }), stderr: "" }; await hold; return { code: 0, stdout: remoteBoard(), stderr: "" }; };
+  host.hc = async (args) => { if (args[0] === "machine") return answer(args); await hold; return answer(args); };
   const cx = mkCx();
   host.props = { overlay: "ov", projectEdit: "P-ONREM" };
   const ed = new ProjectEditor(cx);
@@ -102,9 +115,9 @@ test("F5 a disabled screen's remote timer reads nothing and drops its pending re
   let on = true;
   const cx = mkCx();
   let release; const hold = new Promise((r) => { release = r; });
-  host.hc = async (args) => { hcCalls.push(args); await hold; return { code: 0, stdout: remoteBoard(), stderr: "" }; };
+  host.hc = async (args) => { hcCalls.push(args); await hold; return answer(args); };
   IO.watchRemote(cx, () => on);
-  await until(() => hcCalls.length === 1, "a read starts while the screen is on");
+  await until(() => startsOf(hcCalls) === 1, "a read starts while the screen is on");
   on = false;
   for (const t of timers) t(); // the screen was switched off
   release();
@@ -113,18 +126,19 @@ test("F5 a disabled screen's remote timer reads nothing and drops its pending re
   hcCalls.length = 0;
   for (const t of timers) t();
   await drain();
-  assert.equal(hcCalls.length, 0, "no read while the screen is off");
+  assert.equal(startsOf(hcCalls), 0, "no read while the screen is off");
   on = true;
   for (const t of timers) t();
-  await until(() => hcCalls.length === 1, "reads resume when the screen is on again");
+  await until(() => startsOf(hcCalls) === 1, "reads resume when the screen is on again");
 });
 
 // A binding exactly as the Projects dialog saves it: produced by remote.bind (it carries an id).
 async function uiBinding() {
-  const maker = R.createRemote({ run: async (args) => (args[0] === "machine" ? { code: 0, stdout: JSON.stringify({ machines: [{ name: "box1" }] }), stderr: "" } : { code: 0, stdout: remoteBoard(), stderr: "" }), getShared() {}, setShared() {} });
-  const { project, error } = await maker.bind({ id: "P-ONREM", name: "pairstone", repos: [], folders: [], branch: "main" }, { machine: "box1", projectId: RID }, { tasks: [], projects: [] });
+  const run = async (args) => answer(args);
+  const { project, error } = await R.bindRemote({ run, probeExec: (m, p) => X.probeExec(run, m, p) },{ id: "P-ONREM", name: "pairstone", repos: [], folders: [], branch: "main" }, { machine: "box1", projectId: RID }, { tasks: [], projects: [] });
   assert.ok(!error, error);
   assert.match(project.remote.id, /^B-/);
+  assert.equal(project.remote.transport, "exec");
   return project;
 }
 
@@ -147,10 +161,10 @@ test("R3-Medium a read that returns after the screen was switched off, before th
   host.state["drover.projects"] = [await uiBinding()];
   let on = true;
   let release; const hold = new Promise((r) => { release = r; });
-  host.hc = async (args) => { hcCalls.push(args); await hold; return { code: 0, stdout: remoteBoard(), stderr: "" }; };
+  host.hc = async (args) => { hcCalls.push(args); await hold; return answer(args); };
   const cx = mkCx();
   IO.watchRemote(cx, () => on);
-  await until(() => hcCalls.length === 1, "a read is in flight");
+  await until(() => startsOf(hcCalls) === 1, "a read is in flight");
   on = false; // switched off; the timer has NOT run again
   release();
   await IO.remote.read("box1", RID);
@@ -158,6 +172,6 @@ test("R3-Medium a read that returns after the screen was switched off, before th
   on = true;
   for (const t of timers) t();
   hcCalls.length = 0;
-  host.hc = async () => ({ code: 0, stdout: remoteBoard(), stderr: "" });
+  host.hc = async (args) => answer(args);
   await until(() => host.state[cacheKey], "reads resume and commit once on");
 });

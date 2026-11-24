@@ -39,7 +39,8 @@ test("what the owner sees: the root has a DEFINITE height (h_full, as the workin
   assert.ok(root.kids[1] === body, "the body is the middle child");
   assert.ok(descendants(body) > descendants(root.kids[0]) + descendants(root.kids[2]), "the body holds the form");
   for (const label of ["Name", "Repos", "Folders", "Base branch", "Org (optional", "Remote: machine"]) assert.ok(texts.some((t) => t.startsWith(label)), `label ${label} rendered`);
-  for (const id of ["open-lessons", "open-project-lessons", "bind-remote", "unbind-remote", "toggle-writes", "toggle-transport"]) assert.ok(findNode(body, id), `${id} is inside the scrolling body`);
+  for (const id of ["open-lessons", "open-project-lessons", "bind-remote", "unbind-remote", "toggle-writes"]) assert.ok(findNode(body, id), `${id} is inside the scrolling body`);
+  assert.ok(!findNode(body, "toggle-transport") && !findNode(body, "transport-note"), "the inbox is retired: no transport control");
   for (const id of ["ed-save", "ed-cancel"]) { assert.ok(findNode(root, id), id); assert.ok(!findNode(body, id), `${id} stays outside the scroll`); }
 });
 
@@ -58,12 +59,4 @@ test("source contract: the project dialog uses the same root + body idiom as the
   assert.match(tail, /\.h_full\(\);/, "the root gets .h_full() at the end of the chain, as the agents dialogs do");
   const open = src.match(/export const openEditor = [^\n]*/)[0];
   assert.match(open, /height: 0\.\d+/, "opened with a definite height, like the other scrolling dialogs (the proof and the pick dialogs)");
-});
-
-test("the Transport note is short enough to wrap in the dialog", () => {
-  for (const t of [undefined, "exec"]) {
-    const tt = UI.transportToggle({ machine: "box1", projectId: "P-REMOTE1", transport: t });
-    assert.ok(tt.note.length <= 70, `${tt.note.length} characters: ${tt.note}`);
-    assert.match(tt.note, /nothing moves/);
-  }
 });

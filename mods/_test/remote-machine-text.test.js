@@ -5,7 +5,7 @@ import { readFileSync } from "node:fs";
 import { discoverPrivateWords, wholeWord } from "./private-words.js";
 
 const U = await import("../_lib/remote-write-ui.js");
-const W = await import("../_lib/remote-write.js");
+const X = await import("../_lib/remote-exec.js");
 
 test("OFF_TIP names the bound machine; generic when no binding is in scope", () => {
   for (const m of ["box1", "box2"]) assert.match(U.offTip(m), new RegExp(`\\b${m}\\b`));
@@ -24,18 +24,18 @@ test("stale and unknown outcomes name the machine of the outcome", () => {
 });
 
 test("the 'Writes to' toggle label takes the bound machine", () => {
-  assert.equal(U.writesToggle({ machine: "box1" }, null).label, "Writes to box1");
-  assert.equal(U.writesToggle({ machine: "box2", writes: false }, null).label, "Writes to box2");
-  assert.equal(U.writesToggle(undefined, null).label, "Writes to the remote machine");
+  assert.equal(U.writesToggle({ machine: "box1" }).label, "Writes to box1");
+  assert.equal(U.writesToggle({ machine: "box2", writes: false }).label, "Writes to box2");
+  assert.equal(U.writesToggle(undefined).label, "Writes to the remote machine");
 });
 
-test("the writer's own messages carry no machine name", () => {
-  assert.equal(W.classify("error: stale: card T-1 is at rev 5").message, "card changed on the remote machine");
+test("the exec writer's own messages carry no machine name", () => {
+  assert.equal(X.classify({ code: 1, stdout: JSON.stringify({ ok: false, code: "stale" }), stderr: "" }).message, "card changed on the remote machine");
 });
 
 test("the shipped sources spell no private word (machines, user, host read at run time)", () => {
   const { words } = discoverPrivateWords();
-  for (const f of ["../_lib/remote-write-ui.js", "../_lib/remote-write.js"]) {
+  for (const f of ["../_lib/remote-write-ui.js", "../_lib/remote-write.js", "../_lib/remote-exec.js"]) {
     const text = readFileSync(new URL(f, import.meta.url), "utf8");
     for (const w of words) assert.ok(!wholeWord(text, w), `${f} names a private word`);
   }

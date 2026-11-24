@@ -1,4 +1,7 @@
 // The write controls on remote cards, through the real Board and the Editor (T-MWHVWR8TIJB). Stub elements, fake box1; no sleeps.
+// Over the exec transport since the inbox retired (T-MWO2V65MUSX). Retired with it: the protocol probe and levels, "writes frozen", and every test of a LATE
+// outcome (a result that arrives after the wait: pending, late saved/stale, late rebase, deferral behind an unknown outcome). The exec writer has no late
+// outcome: a send answers, or ends "unknown" after 10 s and a repeat of the same action re-sends the same envelope (remote-exec.test.js F3, R2-2, R2-3).
 // A disabled control carries a tooltip (the reason) and no click handler; an enabled one has the handler. Pixels are looked at natively.
 import { test, beforeEach } from "node:test";
 import assert from "node:assert/strict";
@@ -7,6 +10,7 @@ import { register } from "node:module";
 register("./hooks.js", import.meta.url);
 const { until, drain } = await import(new URL("./stubs/until.js", import.meta.url).href);
 const R = await import("../_lib/remote.js");
+const X = await import("../_lib/remote-exec.js");
 const IO = await import("../_lib/io.js");
 const S = await import("../_lib/store.js");
 const U = await import("../_lib/remote-write-ui.js");
@@ -21,46 +25,61 @@ const base = (p) => p.split("/").pop();
 
 let host, timers, om, notifies;
 const mkCx = () => { const cx = { notify: () => notifies.push(1), stop_propagation() {}, focus_handle: () => ({ focus() {} }), spawn: (fn) => Promise.resolve().then(() => fn(cx)).catch(() => {}), timer: { after() {}, every: (_ms, fn) => timers.push(() => fn(cx)) } }; return cx; };
-// box1: its inbox, its board, and the hc surface the laptop sees.
+// box1: its headless board (answering hc exec <drover-headless>), and what the laptop sends to it. A send is held until the test answers it (om.consume),
+// like the inbox request that waited for its result file; the reply text maps to the exec answer: "ok:" saved, "error: stale" stale, "error: expired" expired,
+// any other "error:" is a refusal by the remote.
+const hash = (t) => { let h = 7; for (let i = 0; i < t.length; i++) h = (h * 31 + t.charCodeAt(i)) >>> 0; return h.toString(36); };
+const OPS_ALL = ["add", "archive", "edit", "move", "note"];
 beforeEach(() => {
   timers = []; notifies = [];
-  om = { inbox: {}, step1: [], remote: [], boardReads: 0, board: { "drover.projects": [{ id: RID, name: "r" }], "drover.tasks": [card("T-R1", RID, { rev: 4 }), card("T-R2", RID)], "drover.agents": { env: SENTINEL } } };
-  om.consume = (reply) => { for (const n of Object.keys(om.inbox)) if (n.endsWith(".json")) { const cmd = JSON.parse(om.inbox[n]); delete om.inbox[n]; om.inbox[n.replace(/\.json$/, ".result")] = reply(cmd); } };
+  om = { waiting: [], step1: [], remote: [], boardReads: 0, ops: OPS_ALL, board: { "drover.projects": [{ id: RID, name: "r" }], "drover.tasks": [card("T-R1", RID, { rev: 4 }), card("T-R2", RID)] } };
+  const exec = (o) => ({ code: o.ok === true ? 0 : 1, stdout: JSON.stringify(o), stderr: "" });
+  om.answerOf = (text, env) => {
+    const t = String(text);
+    if (/^ok:/.test(t)) return exec({ ok: true, gen: 2, replayed: false, attempts: 1, result: { id: env.id ?? "T-NEW1" } });
+    if (/^error:\s*stale/.test(t)) return exec({ ok: false, code: "stale" });
+    if (/^error:\s*expired/.test(t)) return exec({ ok: false, code: "expired" });
+    return exec({ ok: false, code: "refused" });
+  };
+  om.consume = (reply) => { for (const w of om.waiting.splice(0)) w.resolve(om.answerOf(reply(w.env), w.env)); };
   host = globalThis.__host = { appHome: "/app", home: "/h", props: {}, notified: [], terminals: [], agents: [], spaces: [], panes: [], state: { "drover.tasks": [card("T-LOCAL1", "P-LOCAL")], "drover.projects": [{ id: "P-LOCAL", name: "mine", repos: [], folders: [], branch: "main" }, REMOTE_PROJECT()] } };
   host.closed = []; host.closeOverlay = (id) => host.closed.push(id);
   host.watchFolder = () => new Promise(() => {}); // the CLI inbox consumer has nothing to watch here
-  host.exec = async (cmd, args, opts) => { if (String(cmd).endsWith("drover-asks-read")) return { code: 1, stdout: "", stderr: "" }; /* the asks reader (B4b) is not a remote write */ om.step1.push({ cmd, args, opts }); om.inbox[base(args[5])] = args[3]; return { code: 0, stdout: "", stderr: "" }; };
+  host.exec = (cmd, args, opts) => {
+    if (String(cmd).endsWith("drover-asks-read")) return Promise.resolve({ code: 1, stdout: "", stderr: "" }); /* the asks reader (B4b) is not a remote write */
+    const env = JSON.parse(args[3]);
+    const { nonce: _n, issuedAt: _i, ...plain } = env; // the tests read the request, not its envelope
+    om.step1.push({ cmd, args: [...args.slice(0, 3), JSON.stringify(plain), ...args.slice(4)], opts, nonce: env.nonce });
+    return new Promise((resolve) => om.waiting.push({ env: plain, resolve }));
+  };
   host.hc = async (args) => {
     if (args[0] === "machine") return { code: 0, stdout: JSON.stringify({ machines: [{ name: M }] }), stderr: "" };
-    if (args[0] === "file" && args[1] === "read") {
-      const p = args[4];
-      if (p.endsWith("shared.json")) { om.boardReads++; if (om.boardFail) return { code: 1, stdout: "", stderr: "" }; return { code: 0, stdout: JSON.stringify(om.board), stderr: "" }; }
-      const n = base(p);
-      return n in om.inbox ? { code: 0, stdout: om.inbox[n], stderr: "" } : { code: 1, stdout: "", stderr: "" };
-    }
-    if (args[0] === "exec") {
-      const sc = args[args.indexOf("-c") + 1], a0 = args[args.indexOf("-c") + 2];
+    if (args[0] === "exec" && args.includes(X.HEADLESS)) {
       om.remote.push(args);
-      if (sc.startsWith("d=$HOME")) { const f = `1700000000-${a0}`; om.inbox[`${f}.json`] = om.inbox[`.${a0}.tmp`]; delete om.inbox[`.${a0}.tmp`]; return { code: 0, stdout: `${f}.json\n`, stderr: "" }; }
-      if (sc.startsWith("rm ")) { delete om.inbox[a0]; return { code: 0, stdout: "", stderr: "" }; }
-      return { code: 0, stdout: "", stderr: "" };
+      if (om.boardFail) return { code: 1, stdout: "", stderr: "" };
+      const v = args.slice(args.indexOf(X.HEADLESS) + 1)[0];
+      const ok = (o) => ({ code: 0, stdout: JSON.stringify(o), stderr: "" });
+      const tok = hash(JSON.stringify(om.board["drover.tasks"]));
+      const clock = om.noClock ? {} : { now: Date.now() };
+      if (v === "version") return ok({ cli: "drover-headless", schema: 1, ops: om.ops, ...clock });
+      if (v === "rev") { om.boardReads++; return ok({ gen: 1, tasks: tok, ...clock }); }
+      if (v === "tasks") return ok({ gen: 1, rev: tok, tasks: om.board["drover.tasks"] });
+      if (v === "projects") return ok({ gen: 1, projects: om.board["drover.projects"] });
     }
     return { code: 2, stdout: "", stderr: "" };
   };
   IO.remote.sync([]); IO.resetRemoteWriter();
 });
 const fire = () => { for (const t of timers) t(); };
-// Board read, then the probe on stale -> fresh, answered ok; returns when writes are enabled.
-const FIELDS_TIP = `${M} needs the update for priority, labels, assignee, parent and project`;
-async function ready(level = 2) {
+// Board read; the controls come on once the view is fresh and the remote reported its ops. Returns when writes are enabled.
+const FIELDS_TIP = "The remote machine does not support edit"; // what a machine that did not report the edit op shows on every field row
+const BASIC_OPS = ["add", "archive", "move", "note"]; // no edit: the field rows and the text editor are dead
+async function readyBasic() { om.ops = BASIC_OPS; return ready(); }
+async function ready() {
   const cx = mkCx();
   IO.watchRemote(cx, () => true);
-  await until(() => host.state[CKEY], "first board read");
-  fire();
-  await until(() => om.step1.length >= 1 && IO.remoteWriter().inflight(M) === 0, "probe staged and renamed");
-  om.consume((cmd) => (cmd.op === "protocol" ? `ok: protocol ${level}` : "ok: x"));
+  await until(() => host.state[CKEY]?.ops, "first board read");
   await until(async () => { fire(); await drain(2); return IO.remoteWriteState(LID).enabled; }, "writes enabled");
-  om.sawList = om.remote.some((a) => a[a.indexOf("-c") + 1] === 'ls "$HOME/.config/herdr-app/data/drover-inbox"');
   om.step1.length = 0; om.remote.length = 0;
   return cx;
 }
@@ -80,16 +99,18 @@ const toolTip = (n) => n?.args.tooltip?.[0];
 const clickable = (n) => Boolean(n?.args.on_click);
 const settle = (p) => (async () => { for (;;) { fire(); const r = await Promise.race([p, drain(2).then(() => null)]); if (r) return r; } })();
 
-test("Board: before the probe answers every remote control is off with the reason; start/agent ops always say OFF_TIP", async () => {
+test("Board: while the machine reports no clock every remote control is off with the reason; start/agent ops always say OFF_TIP", async () => {
+  om.noClock = true;
   const cx = cxOf(); const b = new Board(); b.init({}, cx);
   b.scope = `project:${LID}`;
-  let n = view(b, cx, "r-T-R1").node ?? view(b, cx, "l-T-R1").node;
-  await until(() => { fire(); return host.state[CKEY]; }, "board read");
+  view(b, cx, "r-T-R1"); // the first render starts the board's remote timer
+  await until(() => { fire(); return host.state[CKEY]?.ops; }, "board read");
   const l = view(b, cx, "l-T-R1").node, r = view(b, cx, "r-T-R1").node, s = view(b, cx, "s-T-R1").node;
-  assert.ok(r && !clickable(r)); assert.match(toolTip(r), /Checking|unreachable/);
+  assert.ok(r && !clickable(r)); assert.match(toolTip(r), /reports no clock/);
   assert.equal(toolTip(s), U.offTip("box1"));
   assert.ok(!clickable(view(b, cx, "new").node) && toolTip(view(b, cx, "new").node), "New is off with the reason");
-  void l; void n;
+  assert.equal(om.step1.length, 0, "nothing was sent");
+  void l;
 });
 
 test("Board: with writes on the chevron sends a move, New opens the remote card view in new mode, start stays off", async () => {
@@ -119,13 +140,13 @@ test("Board: a drop on another column sends move for a remote card; the same col
   assert.equal(JSON.parse(om.step1.at(-1).args[3]).column, "review");
 });
 
-test("Board: writes frozen turns the controls off with 'writes frozen'", async () => {
+test("Board: writes off turns the controls off with the reason, at once", async () => {
   const cx = await ready();
   IO.setRemoteWrites(LID, false);
   const b = new Board(); b.init({}, cx); b.scope = `project:${LID}`;
   const r = view(b, cx, "r-T-R1").node;
-  assert.ok(!clickable(r)); assert.equal(toolTip(r), "writes frozen");
-  assert.match(view(b, cx, `wstatus-${LID}`).texts.join(" "), /writes frozen/);
+  assert.ok(!clickable(r)); assert.equal(toolTip(r), "writes are off");
+  assert.match(view(b, cx, `wstatus-${LID}`).texts.join(" "), /writes are off/);
 });
 
 test("Board: a remote arrow and a column drop built while writes were on stage nothing after writes freeze; the next render turns the arrow off (T-MWL7FAABO29)", async () => {
@@ -140,13 +161,13 @@ test("Board: a remote arrow and a column drop built while writes were on stage n
   await drain();
   assert.equal(om.step1.length, n0, "nothing staged: the send boundary checks the live gate, not the render's");
   const r = view(b, cx, "r-T-R1").node;
-  assert.ok(!clickable(r)); assert.equal(toolTip(r), "writes frozen");
+  assert.ok(!clickable(r)); assert.equal(toolTip(r), "writes are off");
 });
 
 const NEW = (extra = {}) => ({ new: true, id: "", title: "", desc: "", column: "todo", priority: "P2", tags: [], notes: [], project: LID, remote: { machine: M }, ...extra });
 const openRemote = (rc, edit = null) => { host.props = { overlay: "ov", edit, column: rc.column ?? "todo", remoteCard: rc }; };
 const sends = () => om.step1.map((x) => JSON.parse(x.args[3])).filter((b) => b.op !== "protocol");
-const stage = async (n, label) => { await until(() => sends().length === n && IO.remoteWriter().inflight(M) === 0, label); return sends()[n - 1]; };
+const stage = async (n, label) => { await until(() => sends().length === n, label); return sends()[n - 1]; };
 const saved = async (v, label) => { om.consume((c) => (c.op === "protocol" ? "ok: protocol 2" : "ok: x")); await until(async () => { fire(); await drain(2); return !v.submitting; }, label); };
 
 test("job 10: create on a remote project opens the SAME Editor: breadcrumb, chips, Create another, Switch to Agent; project chip fixed; dead controls say why", async () => {
@@ -157,8 +178,9 @@ test("job 10: create on a remote project opens the SAME Editor: breadcrumb, chip
   for (const re of [/Create manually/, /Create another/, /Switch to Agent/, /Create task/]) assert.match(t, re);
   assert.ok(view(v, cx, "trig-project").node, "the project chip is a picker now");
   assert.match(t, /pairstone/); assert.match(t, /box1/);
-  for (const id of ["ed-mode", "ed-attach", "trig-assignee"]) // dead while a remote project is selected (the assignee says it needs the update at protocol 2)
-    { const n = view(v, cx, id).node; assert.ok(n, id); assert.ok(!clickable(n), `${id} is dead`); assert.equal(toolTip(n), id === "trig-assignee" ? FIELDS_TIP : U.offTip("box1"), `${id} says why`); }
+  for (const id of ["ed-mode", "ed-attach"]) // dead while a remote project is selected
+    { const n = view(v, cx, id).node; assert.ok(n, id); assert.ok(!clickable(n), `${id} is dead`); assert.equal(toolTip(n), U.offTip("box1"), `${id} says why`); }
+  assert.equal(toolTip(view(v, cx, "trig-assignee").node), undefined, "the assignee chip is live: the machine reports the edit op");
   assert.ok(clickable(view(v, cx, "ed-create").node), "writes are on: Create works");
   v.toggleMode(cx); assert.equal(v.mode, "manual", "Switch to Agent does nothing here");
 });
@@ -206,7 +228,7 @@ test("job 10: the status pick moves at once; the text autosaves; Save sends the 
   openRemote(R.normalizeRemoteCard(card("T-R1", RID, { rev: 4, title: "old title" }), LID, M), "T-R1");
   const v = new Editor(cx);
   assert.match(view(v, cx, "editor").texts.join(" "), /T-R1/);
-  assert.equal(toolTip(view(v, cx, "prop-priority").node), FIELDS_TIP, "priority needs protocol 3");
+  assert.equal(toolTip(view(v, cx, "prop-priority").node), undefined, "priority is live: the machine reports the edit op");
   v.setProp("status", "doing", cx);
   assert.deepEqual(await stage(1, "move"), { op: "move", id: "T-R1", column: "doing", ifRev: 4, ttlMs: 120000 });
   om.consume(() => "ok: moved"); await picked(v, "move saved");
@@ -218,7 +240,7 @@ test("job 10: the status pick moves at once; the text autosaves; Save sends the 
   assert.equal(sends()[2].op, "note");
   await saved(v, "saved");
   v.remoteArchive(cx);
-  await until(async () => sends().length === 4 && IO.remoteWriter().inflight(M) === 0, "archive");
+  await until(async () => sends().length === 4, "archive");
   assert.equal(sends()[3].op, "archive");
 });
 
@@ -234,7 +256,7 @@ test("job 10: a stale answer keeps the draft and says the card changed", async (
   assert.equal(v.title.value(), "mine"); assert.deepEqual(host.closed, []);
 });
 
-test("Project editor: the writes toggle flips remote.writes, keeps the binding, and says frozen only when the writer does", async () => {
+test("Project editor: the writes toggle flips remote.writes, keeps the binding, and says off at once", async () => {
   await ready();
   host.props = { overlay: "ov", projectEdit: LID };
   const cx = cxOf();
@@ -243,20 +265,22 @@ test("Project editor: the writes toggle flips remote.writes, keeps the binding, 
   assert.match(before, /Writes to box1: on/);
   ed.toggleWrites(cx);
   assert.equal(host.state["drover.projects"].find((p) => p.id === LID).remote.writes, false);
-  assert.match(view(ed, cx, "writes-note").texts.join(" "), /Writes to box1: frozen/);
+  assert.match(view(ed, cx, "writes-note").texts.join(" "), /Writes to box1: off(?! ,)/);
   ed.toggleWrites(cx);
   assert.equal(host.state["drover.projects"].find((p) => p.id === LID).remote.writes, true);
 });
 
 test("Tasks: the ✓ on a remote Review card is off with the reason until writes are on, then sends move done", async () => {
+  om.noClock = true; // the machine has answered, but reports no clock: writes stay off
   om.board["drover.tasks"].push(card("T-R3", RID, { column: "review", rev: 2 }));
   let cx = cxOf();
   const v = new Tasks(); v.init({}, { ...cx, spawn() {} }); // init starts the inbox and wakeup loops: not under test
   const first = view(v, cx, "ro-done-box1/P-REMOTE1/T-R3");
   await until(() => { fire(); return host.state[CKEY]; }, "board read");
   const off = view(v, cx, "ro-done-box1/P-REMOTE1/T-R3").node;
-  assert.ok(off && !clickable(off) && toolTip(off), "off with the reason before the probe answers");
+  assert.ok(off && !clickable(off) && toolTip(off), "off with the reason before the machine has answered");
   assert.ok(!view(v, cx, "done-box1/P-REMOTE1/T-R3").node, "no live control yet");
+  om.noClock = false; await IO.remote.retry(M, RID);
   cx = await ready();
   fire(); // the 1 s refresh of the needs cache picks up the new write state (render only reads the cache)
   const on = view(v, cx, "done-box1/P-REMOTE1/T-R3").node;
@@ -269,7 +293,7 @@ test("Tasks: the ✓ on a remote Review card is off with the reason until writes
   void first;
 });
 
-test("re-review 2.2 Tasks shows what happened to the ✓: stale, expired, error, refused; pending says may still apply", async () => {
+test("re-review 2.2 Tasks shows what happened to the ✓: stale, expired, refused", async () => {
   om.board["drover.tasks"].push(card("T-R3", RID, { column: "review", rev: 2 }));
   const cx0 = await ready();
   const cx = cxOf();
@@ -277,14 +301,14 @@ test("re-review 2.2 Tasks shows what happened to the ✓: stale, expired, error,
   const press = async (reply) => {
     const n = om.step1.length;
     view(v, cx, "done-box1/P-REMOTE1/T-R3").node.args.on_click[0](null, cx);
-    await until(() => om.step1.length === n + 1 && IO.remoteWriter().inflight(M) === 0, "staged");
+    await until(() => om.step1.length === n + 1, "staged");
     om.consume(() => reply);
     await until(async () => { fire(); await drain(2); return view(v, cx, "remote-msg").texts.join(" "); }, "a message is shown");
     return view(v, cx, "remote-msg").texts.join(" ");
   };
   assert.match(await press("error: stale: card T-R3 is at rev 5, request saw 2"), /card changed on box1/);
   assert.match(await press("error: expired: arrived 300s ago"), /not applied, too old/);
-  assert.match(await press("error: unknown task T-R3"), /error: unknown task T-R3/);
+  assert.match(await press("error: unknown task T-R3"), /the remote machine refused it/);
   void cx0;
 });
 
@@ -296,7 +320,7 @@ test("re-review 2.4 Save A->B, then revert to A, sends the revert; a saved edit 
     const n = om.step1.length;
     v.title.value = () => title; v.desc.value = () => "d"; v.note.value = () => "";
     void v.flushSave(cx);
-    await until(() => om.step1.length === n + 1 && IO.remoteWriter().inflight(M) === 0, "staged");
+    await until(() => om.step1.length === n + 1, "staged");
     om.consume(() => "ok: T-R1 edited");
     await until(async () => { fire(); await drain(2); return !v.inflight(); }, "saved");
     return JSON.parse(om.step1.at(-1).args[3]);
@@ -308,38 +332,16 @@ test("re-review 2.4 Save A->B, then revert to A, sends the revert; a saved edit 
   assert.equal(om.step1.length, n, "an unchanged, saved title is not resent");
 });
 
-test("re-review 2.5 a binding that starts with writes:false stages nothing after its first read", async () => {
+test("re-review 2.5 a binding that starts with writes:false sends nothing; turning writes on needs no probe, only the view", async () => {
   host.state["drover.projects"] = host.state["drover.projects"].map((p) => (p.id === LID ? { ...p, remote: { ...p.remote, writes: false } } : p));
   const cx = mkCx(); IO.watchRemote(cx, () => true);
   await until(() => host.state[CKEY], "first board read");
   fire(); fire(); await drain(); await drain();
-  assert.equal(om.step1.length, 0, "no protocol probe either");
+  assert.equal(om.step1.length, 0, "nothing is sent: writes are off");
+  assert.equal(IO.remoteWriteState(LID).enabled, false);
   IO.setRemoteWrites(LID, true);
-  await until(async () => { fire(); await drain(2); return om.step1.length === 1; }, "a probe once writes are on");
-  assert.equal(JSON.parse(om.step1[0].args[3]).op, "protocol");
-});
-
-test("re-review 3 a LATE saved edit also advances the editor baseline: B arrives after the deadline, then a revert to A is sent", async () => {
-  const cx = await ready();
-  openRemote(R.normalizeRemoteCard(card("T-R1", RID, { rev: 4, title: "A", desc: "d" }), LID, M), "T-R1");
-  const v = new Editor(cx);
-  const realNow = Date.now; let skew = 0; Date.now = () => realNow() + skew;
-  try {
-    v.title.value = () => "B"; v.desc.value = () => "d"; v.note.value = () => "";
-    void v.flushSave(cx);
-    await until(() => om.step1.length === 1 && IO.remoteWriter().inflight(M) === 0, "staged");
-    skew = 11000; fire();
-    await until(() => v.msg === "sent, may still apply", "the caller got 'may still apply'");
-    assert.equal(v.msg, "sent, may still apply");
-    om.consume(() => "ok: T-R1 edited");
-    skew = 60000;
-    await until(async () => { fire(); await drain(2); view(v, cx, "ed-create"); return v.msg === "Saved"; }, "the late Saved is shown");
-    await until(async () => { fire(); om.consume((c) => (c.op === "protocol" ? "ok: protocol 2" : "ok: x")); await drain(2); return IO.remoteWriteState(LID).enabled; }, "writes are on again (the probe aged during the skew)");
-    v.title.value = () => "A"; void v.flushSave(cx);
-    const edits = () => om.step1.map((x) => JSON.parse(x.args[3])).filter((b) => b.op === "edit"); // (a refresh probe may be among the sends)
-    await until(() => edits().length === 2 && IO.remoteWriter().inflight(M) === 0, "the revert is sent");
-    assert.equal(edits()[1].title, "A");
-  } finally { Date.now = realNow; }
+  assert.equal(IO.remoteWriteState(LID).enabled, true, "on at once: no probe to wait for");
+  assert.equal(om.step1.length, 0, "and still nothing was sent by turning them on");
 });
 
 test("job 11: a remote Editor ignores a paste into the description (no local image helper runs)", async () => {
@@ -353,7 +355,7 @@ test("job 11: a remote Editor ignores a paste into the description (no local ima
 });
 
 test("job 11: an existing remote card shows its real labels in the (dead) label chip", async () => {
-  const cx = await ready();
+  const cx = await readyBasic();
   openRemote(R.normalizeRemoteCard(card("T-R1", RID, { rev: 4, tags: ["bug", "ui"] }), LID, M), "T-R1");
   const v = new Editor(cx);
   const r = view(v, cx, "prop-labels");
@@ -365,7 +367,7 @@ test("job 11: an existing remote card shows its real labels in the (dead) label 
 const idsOf = (v, cx) => { globalThis.__rec = { ids: [], texts: [] }; try { v.render(cx); return [...globalThis.__rec.ids]; } finally { globalThis.__rec = undefined; } };
 
 test("job 12: a remote card's edit modal has the right sidebar, in the local order, with a Machine row; dead rows say why; Status stays live", async () => {
-  const cx = await ready();
+  const cx = await readyBasic();
   openRemote(R.normalizeRemoteCard(card("T-R1", RID, { rev: 4, tags: ["bug"], priority: "P1" }), LID, M), "T-R1");
   const v = new Editor(cx);
   const ids = idsOf(v, cx);
@@ -409,7 +411,7 @@ test("job 12: a local card's edit modal shows Machine = Local, after Project", a
 
 // ---- job 13: the project picker lists remote-bound projects; the route is decided from the CURRENT pick ----
 const LID2 = "P-ONREM2";
-const withSecondRemote = () => host.state["drover.projects"].push({ id: LID2, name: "second", repos: [], folders: [], branch: "main", remote: { machine: M, projectId: "P-REMOTE2", id: "B-2" } });
+const withSecondRemote = () => { om.board["drover.projects"].push({ id: "P-REMOTE2", name: "second" }); return host.state["drover.projects"].push({ id: LID2, name: "second", repos: [], folders: [], branch: "main", remote: { machine: M, projectId: "P-REMOTE2", id: "B-2" } }); };
 // A closed menu builds no rows (T-MWL7FAABO29): open the project picker to look at its entries.
 const entry = (v, cx, id) => { v.menu = "project"; return view(v, cx, `project-${id}`); };
 
@@ -433,7 +435,8 @@ test("job 13: picking a remote project routes Create to the writer (add, project
   const v = new Editor(cx);
   v.setProp("project", LID, cx); v.setProp("project", "P-LOCAL", cx); v.setProp("project", LID, cx); // back and forth: only the last counts
   assert.match(view(v, cx, "editor").texts.join(" "), /box1/, "the machine of the pick is shown");
-  for (const id of ["ed-mode", "ed-attach", "trig-assignee"]) assert.equal(toolTip(view(v, cx, id).node), id === "trig-assignee" ? FIELDS_TIP : U.offTip("box1"), `${id} is inert for a remote pick`);
+  for (const id of ["ed-mode", "ed-attach"]) assert.equal(toolTip(view(v, cx, id).node), U.offTip("box1"), `${id} is inert for a remote pick`);
+  assert.equal(toolTip(view(v, cx, "trig-assignee").node), undefined, "the assignee chip is live for a remote pick: the machine reports the edit op");
   v.title.set_value("from the global modal"); v.setProp("priority", "P1", cx);
   v.onCreate(cx);
   const b = await stage(1, "add");
@@ -456,12 +459,12 @@ test("job 13: switching back to a local project creates locally, and the control
 
 test("job 13: the remote edit's project list: current stays, other machines and other projects on the same machine are dead with their reasons", async () => {
   withSecondRemote();
-  const cx = await ready();
+  const cx = await readyBasic();
   openRemote(R.normalizeRemoteCard(card("T-R1", RID, { rev: 4 }), LID, M), "T-R1");
   const v = new Editor(cx);
   assert.equal(toolTip(entry(v, cx, LID).node), undefined, "the current project is not dead");
   assert.equal(toolTip(entry(v, cx, "P-LOCAL").node), "move between machines comes later");
-  assert.equal(toolTip(entry(v, cx, LID2).node), FIELDS_TIP, "at protocol 2 the move says it needs the update");
+  assert.equal(toolTip(entry(v, cx, LID2).node), FIELDS_TIP, "without the edit op the move says so");
   assert.ok(!clickable(entry(v, cx, LID2).node));
 });
 
@@ -653,14 +656,14 @@ const withSecond = () => {
   om.board["drover.tasks"] = [card("T-R1", RID, { rev: 4, tags: ["bug"], priority: "P1" }), card("T-R2", RID, { tags: ["ui", "bug"], parent: "T-R1" }), card("T-R3", RID, { parent: "T-R2" }), card("T-O1", RID2, { title: "other project" })];
 };
 const openCard = (id = "T-R1") => { const m = IO.loadMerged().tasks.find((x) => x.id === id); openRemote(m, id); return m; };
-const answer = async (n, reply, label) => { await until(async () => { fire(); await drain(2); return sends().length === n && IO.remoteWriter().inflight(M) === 0; }, `${label} staged`); om.consume(() => reply); };
-const nth = (n, label) => until(async () => { fire(); await drain(2); return sends().length === n && IO.remoteWriter().inflight(M) === 0; }, label);
+const answer = async (n, reply, label) => { await until(async () => { fire(); await drain(2); return sends().length === n; }, `${label} staged`); om.consume(() => reply); };
+const nth = (n, label) => until(async () => { fire(); await drain(2); return sends().length === n; }, label);
 const picked = (v, label) => until(async () => { fire(); await drain(2); return !v.picking && !v.submitting; }, label);
 const idle = (v, label) => until(async () => { fire(); await drain(2); return !v.submitting; }, label);
 
-test("T3 fields on (protocol 3): the sidebar rows are live pickers; off (protocol 2): dead with the update reason", async () => {
+test("T3 fields on (the machine reports edit): the sidebar rows are live pickers; off (no edit op): dead with the reason", async () => {
   withSecond();
-  let cx = await ready(3);
+  let cx = await ready();
   openCard();
   let v = new Editor(cx);
   for (const id of ["priority", "assignee", "labels", "parent", "project"]) {
@@ -668,20 +671,20 @@ test("T3 fields on (protocol 3): the sidebar rows are live pickers; off (protoco
     assert.ok(view(v, cx, `trig-${id}`).node, `${id} has its picker`);
   }
   IO.remote.sync([]); IO.resetRemoteWriter(); timers = [];
-  cx = await ready(2);
+  om.ops = BASIC_OPS;
+  cx = await ready();
   v = new Editor(cx);
   for (const id of ["priority", "assignee", "labels", "parent"]) assert.equal(toolTip(view(v, cx, `prop-${id}`).node), FIELDS_TIP, `${id} is dead with the reason`);
 });
 
-test("T3 the options come only from box1: its assignees, same-project parents (no self or descendant), bound projects of this machine, remote tags", async () => {
+test("T3 the options come only from box1: no assignee (headless reports none), same-project parents (no self or descendant), bound projects of this machine, remote tags", async () => {
   withSecond();
-  const cx = await ready(3);
+  const cx = await ready();
   host.state["drover.agents"] = { agents: [{ id: "laptop-only", name: "Laptop only" }], squads: [] }; // the laptop's own herd must not leak in
   openCard("T-R1");
   const v = new Editor(cx);
   const c = v.remoteChoices();
-  assert.ok(c.assignees.some((a) => a.kind === "agent" && a.id === "wrangler") && c.assignees.some((a) => a.kind === "squad" && a.id === "cattle-drive"));
-  assert.ok(!c.assignees.some((a) => a.id === "laptop-only"));
+  assert.deepEqual(c.assignees, [], "drover-headless reports no agents: nothing is offered, and the laptop's own herd never leaks in");
   assert.deepEqual(c.parents.map((p) => p.id), [], "T-R2 and T-R3 are descendants of T-R1; T-O1 is another project");
   assert.deepEqual(c.projects.map((p) => p.id).sort(), [LID, LID2].sort(), "this machine's bound projects only (not the other machine's)");
   assert.deepEqual(c.tags, ["bug", "ui"]);
@@ -691,7 +694,7 @@ test("T3 the options come only from box1: its assignees, same-project parents (n
 
 test("T3 every pick is ONE request at once, with ifRev = the rev rebased after the previous save", async () => {
   withSecond();
-  const cx = await ready(3);
+  const cx = await ready();
   openCard("T-R3");
   const v = new Editor(cx);
   v.setProp("priority", "P0", cx);
@@ -715,7 +718,7 @@ test("T3 every pick is ONE request at once, with ifRev = the rev rebased after t
 
 test("E2 one pick in flight: the rows say 'saving…', other picks are refused (no queue), and close, expand, archive and Save wait (close never does)", async () => {
   withSecond();
-  const cx = await ready(3);
+  const cx = await ready();
   openCard("T-R3");
   const v = new Editor(cx);
   const opened = []; host.openOverlay = (spec) => { opened.push(spec); return "ov2"; };
@@ -736,7 +739,7 @@ test("E2 one pick in flight: the rows say 'saving…', other picks are refused (
 
 test("E2 a stale pick reloads box1's card: an UNTOUCHED title/description follows it (no phantom edit), an EDITED one is kept", async () => {
   withSecond();
-  const cx = await ready(3);
+  const cx = await ready();
   openCard("T-R1");
   const v = new Editor(cx);
   let title = "title T-R1", desc = "";
@@ -758,52 +761,10 @@ test("E2 a stale pick reloads box1's card: an UNTOUCHED title/description follow
   assert.equal(title, "my own edit", "an edited input is kept");
 });
 
-test("E2 a LATE Saved project pick sets the rows from the destination card; a Save then sends no project edit", async () => {
-  withSecond();
-  const cx = await ready(3);
-  openCard("T-R1");
-  const v = new Editor(cx);
-  const realNow = Date.now; let skew = 0; Date.now = () => realNow() + skew;
-  try {
-    v.setProp("project", LID2, cx);
-    await stage(1, "project");
-    skew = 11000; fire();
-    await until(() => !v.picking, "pending");
-    om.board["drover.tasks"] = om.board["drover.tasks"].map((t) => (t.id === "T-R1" ? { ...t, project: RID2, rev: 9 } : t));
-    om.consume(() => "ok: moved");
-    skew = 60000;
-    await until(async () => { fire(); await drain(2); view(v, cx, "ed-create"); return v.fixedRemote?.project === LID2 && v.project === LID2 && v.fixedRemote.rev === 9; }, "rows and baseline on the destination");
-    await until(async () => { fire(); om.consume((c) => (c.op === "protocol" ? "ok: protocol 3" : "ok: x")); await drain(2); return IO.remoteWriteState(LID2).enabled; }, "writes on again");
-    v.note.value = () => "n"; v.onCreate(cx);
-    await until(() => sends().length === 2 && IO.remoteWriter().inflight(M) === 0, "the note is sent");
-    assert.equal(sends()[1].op, "note");
-  } finally { Date.now = realNow; }
-});
-
-test("E2 a LATE stale pick reverts the rows to box1's value", async () => {
-  withSecond();
-  const cx = await ready(3);
-  openCard("T-R1");
-  const v = new Editor(cx);
-  const realNow = Date.now; let skew = 0; Date.now = () => realNow() + skew;
-  try {
-    v.setProp("priority", "P0", cx);
-    await stage(1, "priority");
-    skew = 11000; fire();
-    await until(() => !v.picking, "pending");
-    assert.equal(toolTip(view(v, cx, "prop-priority").node), "waiting for box1…", "rows stay off while an outcome is unknown");
-    om.board["drover.tasks"] = om.board["drover.tasks"].map((t) => (t.id === "T-R1" ? { ...t, rev: 6, priority: "P3" } : t));
-    om.consume(() => "error: stale: card T-R1 is at rev 6, request saw 4");
-    skew = 60000;
-    await until(async () => { fire(); await drain(2); view(v, cx, "ed-create"); return v.priority === "P3" && v.fixedRemote.rev === 6; }, "reverted");
-    assert.match(v.msg, /card changed on box1/);
-  } finally { Date.now = realNow; }
-});
-
 test("T3 clearing assignee and parent sends 'none'; clearing the last label sends []", async () => {
   withSecond();
   om.board["drover.tasks"][1] = card("T-R2", RID, { tags: ["ui"], parent: "T-R1", assignee: { kind: "agent", id: "wrangler" }, rev: 3 });
-  const cx = await ready(3);
+  const cx = await ready();
   openCard("T-R2");
   const v = new Editor(cx);
   assert.deepEqual(v.assignee, { kind: "agent", id: "wrangler" }); assert.equal(v.parent, "T-R1");
@@ -817,20 +778,20 @@ test("T3 clearing assignee and parent sends 'none'; clearing the last label send
   assert.deepEqual((await stage(3, "l")).tags, []);
 });
 
-test("T3 fields off: a pick sends nothing and changes nothing; the title flush carries no field", async () => {
+test("T3 fields off (no edit op): a pick sends nothing and changes nothing; the title flush sends nothing either", async () => {
   withSecond();
-  const cx = await ready(2);
+  const cx = await readyBasic();
   openCard("T-R1");
   const v = new Editor(cx);
   v.setProp("priority", "P0", cx); await drain(3);
   assert.equal(sends().length, 0); assert.equal(v.priority, "P1", "the row keeps box1's value");
-  v.title.value = () => "renamed"; void v.flushSave(cx);
-  assert.deepEqual(await stage(1, "edit"), { op: "edit", id: "T-R1", title: "renamed", ifRev: 4, ttlMs: 120000 });
+  v.title.value = () => "renamed"; void v.flushSave(cx); await drain(3);
+  assert.equal(sends().length, 0, "the edit op is off: the text is not sent");
 });
 
 test("T3 a project pick is one request at once, then both boards are reloaded and the editor continues on the destination", async () => {
   withSecond();
-  const cx = await ready(3);
+  const cx = await ready();
   openCard("T-R1");
   const v = new Editor(cx);
   v.setProp("project", LID2, cx);
@@ -845,7 +806,7 @@ test("T3 a project pick is one request at once, then both boards are reloaded an
 
 test("T3 a stale answer shows the banner and the row goes back to box1's value; the next pick carries the reloaded rev", async () => {
   withSecond();
-  const cx = await ready(3);
+  const cx = await ready();
   openCard("T-R1");
   const v = new Editor(cx);
   v.setProp("priority", "P0", cx);
@@ -864,19 +825,19 @@ test("T3 a stale answer shows the banner and the row goes back to box1's value; 
 
 test("T3 a refused pick (error answer) also reverts the row and shows the error", async () => {
   withSecond();
-  const cx = await ready(3);
+  const cx = await ready();
   openCard("T-R1");
   const v = new Editor(cx);
   v.setProp("parent", "T-R2", cx);
   await stage(1, "edit");
   om.consume(() => "error: That would make a parent cycle");
   await picked(v, "answered");
-  assert.match(v.msg, /parent cycle/); assert.equal(v.parent, null);
+  assert.match(v.msg, /the remote machine refused it/); assert.equal(v.parent, null);
 });
 
 test("T3 create: the assignee chip is live at protocol 3 and the add carries it; no launch, no start", async () => {
   withSecond();
-  const cx = await ready(3);
+  const cx = await ready();
   openRemote(NEW());
   const v = new Editor(cx);
   let launched = 0; v.launch = () => { launched++; };
@@ -888,9 +849,9 @@ test("T3 create: the assignee chip is live at protocol 3 and the add carries it;
   assert.equal(launched, 0);
 });
 
-test("T3 create at protocol 2: a drafted assignee is not sent (the add is the basic one)", async () => {
+test("T3 create without the edit op: the assignee chip is dead and a drafted assignee is not sent", async () => {
   withSecond();
-  const cx = await ready(2);
+  const cx = await readyBasic();
   openRemote(NEW());
   const v = new Editor(cx);
   v.setProp("assignee", { kind: "agent", id: "wrangler" }, cx);
@@ -900,7 +861,7 @@ test("T3 create at protocol 2: a drafted assignee is not sent (the add is the ba
 
 test("fix1 a card with no rev is version 0: a poll that advances it after open makes the pick stale, not an overwrite", async () => {
   withSecond();
-  const cx = await ready(3);
+  const cx = await ready();
   openCard("T-R3"); // no rev
   const v = new Editor(cx);
   om.board["drover.tasks"] = om.board["drover.tasks"].map((t) => (t.id === "T-R3" ? { ...t, rev: 1, tags: ["someone-else"] } : t));
@@ -910,33 +871,9 @@ test("fix1 a card with no rev is version 0: a poll that advances it after open m
   assert.equal((await stage(1, "edit")).ifRev, 0, "the opened version, not the polled one");
 });
 
-test("fix2 a project move acknowledged AFTER the wait still rebases the editor onto the destination", async () => {
-  withSecond();
-  const cx = await ready(3);
-  openCard("T-R1");
-  const v = new Editor(cx);
-  const realNow = Date.now; let skew = 0; Date.now = () => realNow() + skew;
-  try {
-    v.setProp("project", LID2, cx);
-    await stage(1, "project move staged");
-    skew = 11000; fire();
-    await until(() => !v.picking, "the caller got 'may still apply'");
-    assert.equal(v.msg, "sent, may still apply");
-    om.board["drover.tasks"] = om.board["drover.tasks"].map((t) => (t.id === "T-R1" ? { ...t, project: RID2, rev: 9 } : t));
-    om.consume(() => "ok: T-R1 project P-DST");
-    skew = 60000;
-    await until(async () => { fire(); await drain(2); view(v, cx, "ed-create"); return v.fixedRemote?.project === LID2 && v.fixedRemote.rev === 9; }, "the late Saved moved the route and the rev");
-    await until(async () => { fire(); om.consume((c) => (c.op === "protocol" ? "ok: protocol 3" : "ok: x")); await drain(2); return IO.remoteWriteState(LID2).enabled; }, "writes are on again");
-    v.setProp("priority", "P0", cx);
-    const edits = () => om.step1.map((x) => JSON.parse(x.args[3])).filter((b) => b.op === "edit");
-    await until(() => edits().length === 2 && IO.remoteWriter().inflight(M) === 0, "the next Save is sent");
-    assert.deepEqual(edits()[1], { op: "edit", id: "T-R1", priority: "P0", ifRev: 9, ttlMs: 120000 });
-  } finally { Date.now = realNow; }
-});
-
 test("fix3 a held OLDER late rebase, released after a newer move, does not change the route or the rev", async () => {
   withSecond();
-  const cx = await ready(3);
+  const cx = await ready();
   openCard("T-R1");
   const v = new Editor(cx);
   const moved = (project) => ({ op: "edit", id: "T-R1", project });
@@ -957,7 +894,7 @@ test("fix3 a held OLDER late rebase, released after a newer move, does not chang
 
 test("fix4 the late rebase notifies through the spawned context, never the render context after an await", async () => {
   withSecond();
-  const cx = await ready(3);
+  const cx = await ready();
   openCard("T-R1");
   const v = new Editor(cx);
   const calls = [];
@@ -973,7 +910,7 @@ test("fix4 the late rebase notifies through the spawned context, never the rende
 // ---- Job E: the live step 4 findings ----
 test("E(a) a remote edit has the expand icon; expand reopens the SAME remote card in the other size with the whole draft", async () => {
   withSecond();
-  const cx = await ready(3);
+  const cx = await ready();
   openCard("T-R1");
   const v = new Editor(cx);
   const ex = view(v, cx, "ed-expand").node;
@@ -997,7 +934,7 @@ test("E(a) a remote edit has the expand icon; expand reopens the SAME remote car
 
 test("E(b) the remote edit's project list RENDERS 'No project' and other machines' projects disabled with their reasons", async () => {
   withSecond();
-  const cx = await ready(3);
+  const cx = await ready();
   openCard("T-R1");
   const v = new Editor(cx);
   for (const [id, tip] of [["none", "a remote card needs a project"], ["P-LOCAL", "move between machines comes later"], ["P-ELSE", "move between machines comes later"]]) {
@@ -1009,7 +946,7 @@ test("E(b) the remote edit's project list RENDERS 'No project' and other machine
 
 test("E(c) a cache entry without picks reads as 'loading box1's lists', triggers a re-read; with picks the project is pickable", async () => {
   withSecond();
-  const cx = await ready(3);
+  const cx = await ready();
   openCard("T-R1");
   const cached = host.state[CKEY];
   IO.remote.sync([]); om.boardFail = true; // a fresh instance whose read cannot refill the cache
@@ -1027,7 +964,7 @@ test("E(c) a cache entry without picks reads as 'loading box1's lists', triggers
 
 test("E(d) closing a remote edit with nothing typed closes at once; picks are already saved, there is no 'press Save' guard", async () => {
   withSecond();
-  const cx = await ready(3);
+  const cx = await ready();
   openCard("T-R1");
   const w = new Editor(cx);
   w.close(cx);
@@ -1038,7 +975,7 @@ test("E(d) closing a remote edit with nothing typed closes at once; picks are al
 
 test("E3 Close is never blocked by a pick in flight; its late outcome after the close is dropped quietly", async () => {
   withSecond();
-  const cx = await ready(3);
+  const cx = await ready();
   openCard("T-R1");
   const v = new Editor(cx);
   v.setProp("priority", "P0", cx);
@@ -1053,7 +990,7 @@ test("E3 Close is never blocked by a pick in flight; its late outcome after the 
 
 test("E3 a hung reload after a stale pick releases the lock after the bound, keeps the rows, says so, and Close works", async () => {
   withSecond();
-  const cx = await ready(3);
+  const cx = await ready();
   const later = []; cx.timer.after = (ms, fn) => later.push(fn);
   openCard("T-R1");
   const v = new Editor(cx);
@@ -1072,7 +1009,7 @@ test("E3 a hung reload after a stale pick releases the lock after the bound, kee
 
 test("E3 a hung reload after a SAVED project pick says 'saved, but could not reload box1' and releases the lock", async () => {
   withSecond();
-  const cx = await ready(3);
+  const cx = await ready();
   const later = []; cx.timer.after = (ms, fn) => later.push(fn);
   openCard("T-R1");
   const v = new Editor(cx);
@@ -1088,7 +1025,7 @@ test("E3 a hung reload after a SAVED project pick says 'saved, but could not rel
 
 test("E4 a late recovery held across a close uses no closed context: nothing is committed or notified after the close", async () => {
   withSecond();
-  const cx = await ready(3);
+  const cx = await ready();
   openCard("T-R1");
   const v = new Editor(cx);
   const calls = [];
@@ -1110,7 +1047,7 @@ const withTimers = (cx) => { const later = []; cx.timer.after = (_ms, fn) => lat
 
 test("F typing then the 500 ms debounce sends ONE edit with only the changed field and ifRev; no keystroke => nothing", async () => {
   withSecond();
-  const cx = await ready(3);
+  const cx = await ready();
   const tick = withTimers(cx);
   openCard("T-R1");
   const v = new Editor(cx);
@@ -1127,7 +1064,7 @@ test("F typing then the 500 ms debounce sends ONE edit with only the changed fie
 
 test("F close flushes a pending title first (bounded, like local)", async () => {
   withSecond();
-  const cx = await ready(3);
+  const cx = await ready();
   openCard("T-R1");
   const v = new Editor(cx);
   typed(v, "closing title", "");
@@ -1140,7 +1077,7 @@ test("F close flushes a pending title first (bounded, like local)", async () => 
 
 test("F a stale flush shows the banner, KEEPS the typed text, rebases rev and rows; the next autosave retries", async () => {
   withSecond();
-  const cx = await ready(3);
+  const cx = await ready();
   const tick = withTimers(cx);
   openCard("T-R1");
   const v = new Editor(cx);
@@ -1158,7 +1095,7 @@ test("F a stale flush shows the banner, KEEPS the typed text, rebases rev and ro
 
 test("F a flush waits for a pick in flight (one request at a time); rows are off while it saves", async () => {
   withSecond();
-  const cx = await ready(3);
+  const cx = await ready();
   const tick = withTimers(cx);
   openCard("T-R1");
   const v = new Editor(cx);
@@ -1178,7 +1115,7 @@ test("F a flush waits for a pick in flight (one request at a time); rows are off
 
 test("F Save belongs to the note composer: it sends only the note op, no title/description", async () => {
   withSecond();
-  const cx = await ready(3);
+  const cx = await ready();
   openCard("T-R1");
   const v = new Editor(cx);
   typed(v, "typed but not flushed", "also typed");
@@ -1197,52 +1134,9 @@ const pendingPick = async (v, cx, field = "priority", val = "P0") => { // leaves
   return true;
 };
 
-test("F2(1) close with text that could not be sent (a pick's outcome unknown) keeps the dialog open; a second close discards", async () => {
-  withSecond();
-  const cx = await ready(3);
-  openCard("T-R1");
-  const v = new Editor(cx);
-  const realNow = Date.now; let skew = 0; Date.now = () => realNow() + skew;
-  try {
-    const t = typed(v, "title T-R1", "");
-    await pendingPick(v, cx);
-    skew = 11000; fire();
-    await until(() => !v.picking, "pending");
-    t.setTitle("never sent text");
-    v.close(cx); await drain(5);
-    assert.deepEqual(host.closed, [], "not closed: the text was not sent");
-    assert.equal(v.msg, NOT_SENT);
-    assert.equal(sends().length, 1, "no overlapping request");
-    v.close(cx);
-    await until(() => host.closed.length === 1, "the second close proceeds (text discarded)");
-  } finally { Date.now = realNow; }
-});
-
-test("F2(1b) the deferred autosave retries by itself when the pick settles", async () => {
-  withSecond();
-  const cx = await ready(3);
-  const tick = withTimers(cx);
-  openCard("T-R1");
-  const v = new Editor(cx);
-  const t = typed(v, "title T-R1", "");
-  const realNow = Date.now; let skew = 0; Date.now = () => realNow() + skew;
-  try {
-    await pendingPick(v, cx);
-    skew = 11000; fire(); tick();
-    await until(() => !v.picking, "pending");
-    t.setTitle("typed while unsure"); v.autosave(cx); tick(); await drain(5);
-    assert.equal(sends().length, 1, "deferred: nothing is sent behind an unknown outcome");
-    om.board["drover.tasks"] = om.board["drover.tasks"].map((x) => (x.id === "T-R1" ? { ...x, rev: 5, priority: "P0" } : x));
-    om.consume(() => "ok: edited");
-    skew = 60000;
-    await until(async () => { fire(); om.consume((c) => (c.op === "protocol" ? "ok: protocol 3" : "ok: x")); await drain(2); view(v, cx, "ed-create"); v.autosave(cx); tick(); return sends().length === 2; }, "the retry is sent once the pick settled");
-    assert.equal(sends()[1].title, "typed while unsure"); assert.equal(sends()[1].ifRev, 5);
-  } finally { Date.now = realNow; }
-});
-
 test("F2(2) text typed while the close flush waits for its reply is flushed too before the close", async () => {
   withSecond();
-  const cx = await ready(3);
+  const cx = await ready();
   openCard("T-R1");
   const v = new Editor(cx);
   const t = typed(v, "title T-R1", "");
@@ -1252,7 +1146,7 @@ test("F2(2) text typed while the close flush waits for its reply is flushed too 
   t.setTitle("B"); // typed while A is in flight
   om.board["drover.tasks"] = om.board["drover.tasks"].map((x) => (x.id === "T-R1" ? { ...x, rev: 5, title: "A" } : x));
   om.consume(() => "ok: edited");
-  await until(async () => { fire(); await drain(2); return sends().length === 2 && IO.remoteWriter().inflight(M) === 0; }, "B is sent");
+  await until(async () => { fire(); await drain(2); return sends().length === 2; }, "B is sent");
   assert.equal(sends()[1].title, "B"); assert.equal(sends()[1].ifRev, 5);
   assert.deepEqual(host.closed, [], "not closed before B was acknowledged");
   om.consume(() => "ok: edited");
@@ -1261,7 +1155,7 @@ test("F2(2) text typed while the close flush waits for its reply is flushed too 
 
 test("F2(3) a text flush never overlaps a Send note in flight: it waits, then uses the rebased rev", async () => {
   withSecond();
-  const cx = await ready(3);
+  const cx = await ready();
   const tick = withTimers(cx);
   openCard("T-R1");
   const v = new Editor(cx);
@@ -1278,7 +1172,7 @@ test("F2(3) a text flush never overlaps a Send note in flight: it waits, then us
 
 test("F2(3b) a flush deferred behind a slow pick does not go out when a timer fires: only after the pick settled", async () => {
   withSecond();
-  const cx = await ready(3);
+  const cx = await ready();
   const tick = withTimers(cx);
   openCard("T-R1");
   const v = new Editor(cx);
@@ -1293,46 +1187,9 @@ test("F2(3b) a flush deferred behind a slow pick does not go out when a timer fi
   assert.equal(sends()[1].ifRev, 5);
 });
 
-test("F2(4) an unchanged text snapshot with an unknown outcome is not sent again", async () => {
-  withSecond();
-  const cx = await ready(3);
-  openCard("T-R1");
-  const v = new Editor(cx);
-  const t = typed(v, "title T-R1", "");
-  const realNow = Date.now; let skew = 0; Date.now = () => realNow() + skew;
-  try {
-    t.setTitle("B");
-    void v.flushSave(cx);
-    await stage(1, "B");
-    skew = 11000; fire();
-    await until(() => !v.inflight() || v.pickPending(), "pending");
-    await v.flushSave(cx); await v.flushSave(cx); await drain(5);
-    assert.equal(sends().length, 1, "the identical snapshot is not staged again");
-  } finally { Date.now = realNow; }
-});
-
-test("F3(1) text typed while the close request goes pending is NOT lost: close stays open (the newer draft is kept)", async () => {
-  withSecond();
-  const cx = await ready(3);
-  openCard("T-R1");
-  const v = new Editor(cx);
-  const t = typed(v, "title T-R1", "");
-  const realNow = Date.now; let skew = 0; Date.now = () => realNow() + skew;
-  try {
-    t.setTitle("A");
-    v.close(cx);
-    await stage(1, "A");
-    t.setTitle("B"); // typed while A is in flight
-    skew = 11000; fire();
-    await until(async () => { fire(); await drain(2); return v.msg === NOT_SENT; }, "the warning");
-    assert.deepEqual(host.closed, [], "B was never sent: not closed");
-    assert.equal(t.title(), "B"); assert.equal(sends().length, 1);
-  } finally { Date.now = realNow; }
-});
-
 test("F3(2) a predecessor that never settles cannot trap Close: the bounded wait defers (no concurrent write), the next Close discards", async () => {
   withSecond();
-  const cx = await ready(3);
+  const cx = await ready();
   const later = []; cx.timer.after = (_ms, fn) => later.push(fn);
   openCard("T-R1");
   const v = new Editor(cx);
@@ -1353,7 +1210,7 @@ test("F3(2) a predecessor that never settles cannot trap Close: the bounded wait
 
 test("F4(1) a note slower than the entry bound: the cancelled text flush is re-enqueued fresh when the note settles", async () => {
   withSecond();
-  const cx = await ready(3);
+  const cx = await ready();
   const later = []; cx.timer.after = (_ms, fn) => later.push(fn);
   openCard("T-R1");
   const v = new Editor(cx);
@@ -1366,13 +1223,13 @@ test("F4(1) a note slower than the entry bound: the cancelled text flush is re-e
   await drain(3); assert.equal(sends().length, 1);
   om.board["drover.tasks"] = om.board["drover.tasks"].map((x) => (x.id === "T-R1" ? { ...x, rev: 5 } : x));
   om.consume(() => "ok: noted");
-  await until(async () => { fire(); await drain(2); for (const f of later.splice(0)) f(cx); return sends().length === 2 && IO.remoteWriter().inflight(M) === 0; }, "the title is flushed after the note");
+  await until(async () => { fire(); await drain(2); for (const f of later.splice(0)) f(cx); return sends().length === 2; }, "the title is flushed after the note");
   assert.deepEqual([sends()[1].op, sends()[1].title, sends()[1].ifRev], ["edit", "typed behind the note", 5]);
 });
 
 test("F4(2) a cancelled flush's cleanup never touches a context after the editor closed", async () => {
   withSecond();
-  const cx = await ready(3);
+  const cx = await ready();
   openCard("T-R1");
   const v = new Editor(cx);
   const t = typed(v, "title T-R1", "");
@@ -1397,67 +1254,12 @@ test("F4(2) a cancelled flush's cleanup never touches a context after the editor
 // ---- Fix F5: a draft whose request came back refused is not retried until the user types again; a stale one retries once ----
 const lateText = async (v, cx, t, text, reply) => { // flush `text`, let it go pending, then answer it late with `reply`
   t.setTitle(text); void v.flushSave(cx);
-  await until(() => sends().length >= 1 && IO.remoteWriter().inflight(M) === 0, "staged");
+  await until(() => sends().length >= 1, "staged");
 };
 
-test("F5 a rejected text is NOT retried forever after late errors; new typing makes a new attempt", async () => {
-  withSecond();
-  const cx = await ready(3);
-  const tick = withTimers(cx);
-  openCard("T-R1");
-  const v = new Editor(cx);
-  const t = typed(v, "title T-R1", "");
-  const realNow = Date.now; let skew = 0; Date.now = () => realNow() + skew;
-  try {
-    await lateText(v, cx, t, "bad title", null);
-    skew = 11000; fire(); tick();
-    await until(() => v.msg === "sent, may still apply", "pending");
-    om.consume(() => "error: Title is longer than 200 characters");
-    skew = 60000;
-    const settle = () => until(async () => { fire(); om.consume((c) => (c.op === "protocol" ? "ok: protocol 3" : "ok: x")); await drain(2); view(v, cx, "ed-create"); tick(); return /longer than 200/.test(v.msg) && !v.inflight(); }, "the late error is shown");
-    await settle();
-    for (let i = 0; i < 6; i++) { fire(); await drain(3); view(v, cx, "ed-create"); tick(); }
-    assert.equal(sends().length, 1, "exactly one request for the rejected snapshot");
-    t.setTitle("another try"); void v.flushSave(cx);
-    await until(async () => { fire(); om.consume((c) => (c.op === "protocol" ? "ok: protocol 3" : "ok: x")); await drain(2); tick(); return sends().length === 2; }, "new typing is a new attempt");
-    assert.equal(sends()[1].title, "another try");
-  } finally { Date.now = realNow; }
-});
-
-test("F5/F7 a LATE stale answer is never auto-resent: the text stays, rev rebases; the next keystroke is the retry, and again after another stale", async () => {
-  withSecond();
-  const cx = await ready(3);
-  const tick = withTimers(cx);
-  openCard("T-R1");
-  const v = new Editor(cx);
-  const t = typed(v, "title T-R1", "");
-  const realNow = Date.now; let skew = 0; Date.now = () => realNow() + skew;
-  const loops = async (n = 8) => { for (let i = 0; i < n; i++) { fire(); om.consume((c) => (c.op === "protocol" ? "ok: protocol 3" : "ok: x")); await drain(3); view(v, cx, "ed-create"); tick(); } };
-  try {
-    await lateText(v, cx, t, "mine", null);
-    skew = 11000; fire(); tick();
-    await until(() => v.msg === "sent, may still apply", "pending");
-    om.board["drover.tasks"] = om.board["drover.tasks"].map((x) => (x.id === "T-R1" ? { ...x, rev: 6 } : x));
-    om.consume(() => "error: stale: card T-R1 is at rev 6, request saw 4");
-    skew = 30000; // the probe is still fresh
-    await until(async () => { fire(); await drain(2); view(v, cx, "ed-create"); tick(); return /card changed on box1/.test(v.msg) && !v.inflight(); }, "the stale answer is shown");
-    await loops();
-    assert.equal(sends().length, 1, "0 automatic retries");
-    assert.equal(t.title(), "mine"); assert.equal(v.fixedRemote.rev, 6);
-    v.autosave(cx); tick(); // the next keystroke is the retry
-    await until(async () => { fire(); await drain(2); tick(); return sends().length === 2; }, "typing retries");
-    assert.equal(sends()[1].ifRev, 6);
-    om.consume(() => "error: stale: card T-R1 is at rev 7, request saw 6");
-    await until(async () => { fire(); await drain(2); tick(); return !v.inflight(); }, "second stale");
-    await loops();
-    assert.equal(sends().length, 2, "still no automatic retry after a second stale");
-    v.autosave(cx); tick();
-    await until(async () => { fire(); await drain(2); tick(); return sends().length === 3; }, "typing again retries again");
-  } finally { Date.now = realNow; }
-});
 test("F6 an old attempt does not suppress a NEW identical draft: saved A, remote B adopted, A typed again and cancelled behind a slow note => fresh flush", async () => {
   withSecond();
-  const cx = await ready(3);
+  const cx = await ready();
   const later = []; cx.timer.after = (_ms, fn) => later.push(fn);
   openCard("T-R1");
   const v = new Editor(cx);
@@ -1478,33 +1280,50 @@ test("F6 an old attempt does not suppress a NEW identical draft: saved A, remote
   await drain(3);
   om.board["drover.tasks"] = om.board["drover.tasks"].map((x) => (x.id === "T-R1" ? { ...x, rev: 7 } : x));
   om.consume(() => "ok: noted");
-  await until(async () => { fire(); await drain(2); for (const f of later.splice(0)) f(cx); return sends().length === 3 && IO.remoteWriter().inflight(M) === 0; }, "a fresh flush of the new A");
+  await until(async () => { fire(); await drain(2); for (const f of later.splice(0)) f(cx); return sends().length === 3; }, "a fresh flush of the new A");
   assert.deepEqual([sends()[2].op, sends()[2].title, sends()[2].ifRev], ["edit", "A", 7]);
 });
 
 // T-MWO2HFFHWRB: a probe that WAS answered but is now older than PROBE_FRESH_MS (60 s). canWrite() re-asks (stages a probe) on expiry:
 // that used to run inside render; now only the 1 s refresh of the needs cache does it, and render only reads the cached control.
-test("Tasks: an expired probe is re-asked by the timer refresh only, never by render", async () => {
-  om.board["drover.tasks"].push(card("T-R3", RID, { column: "review", rev: 2 }));
-  await ready();
-  const cx = cxOf();
-  const v = new Tasks(); v.init({}, { ...cx, spawn() {} });
-  fire();
-  assert.ok(clickable(view(v, cx, "done-box1/P-REMOTE1/T-R3").node), "writes on while the probe is fresh");
-  const real = Date.now;
-  Date.now = () => real() + 61000; // the last `ok: protocol` answer is now 61 s old
+
+test("exec: a write the machine never answers ends as 'unknown' after 10 s with the repeat hint; the draft stays and nothing is marked saved", async () => {
+  withSecond();
+  const cx = await ready();
+  openCard("T-R1");
+  const v = new Editor(cx);
+  const t = typed(v, "title T-R1", "");
+  const realNow = Date.now; let skew = 0; Date.now = () => realNow() + skew;
   try {
-    const sent = () => om.step1.length + om.remote.length;
-    const n0 = sent();
-    for (let i = 0; i < 3; i++) view(v, cx, "done-box1/P-REMOTE1/T-R3");
-    await drain(3);
-    assert.equal(sent(), n0, "render started no probe");
-    assert.ok(clickable(view(v, cx, "done-box1/P-REMOTE1/T-R3").node), "render shows the cached control");
-    fire();
-    await until(() => sent() > n0, "the timer refresh re-asked the probe");
-    const n1 = sent();
-    for (let i = 0; i < 3; i++) view(v, cx, "done-box1/P-REMOTE1/T-R3");
-    await drain(3);
-    assert.equal(sent(), n1, "render after the refresh started nothing either");
-  } finally { Date.now = real; }
+    t.setTitle("B");
+    void v.flushSave(cx);
+    await stage(1, "B");
+    skew = 11000; fire();
+    await until(async () => { fire(); await drain(2); return /no answer: not known whether it was applied/.test(v.msg ?? ""); }, "the unknown text");
+    assert.match(v.msg, /Repeat within 24 h to retry safely/);
+    assert.equal(t.title(), "B", "the typed text is kept");
+    assert.deepEqual(host.closed, []);
+  } finally { Date.now = realNow; }
+});
+
+// Adapted from the retired F3(1): exec has no "pending", the request ends "unknown" after 10 s. The close must not treat that as sent.
+test("F3(1) exec: Close, then newer text typed while the request runs, then the 10 s timeout: close stays open and the newer draft is kept", async () => {
+  withSecond();
+  const cx = await ready();
+  openCard("T-R1");
+  const v = new Editor(cx);
+  const t = typed(v, "title T-R1", "");
+  const realNow = Date.now; let skew = 0; Date.now = () => realNow() + skew;
+  try {
+    t.setTitle("A");
+    v.close(cx);
+    await stage(1, "A");
+    t.setTitle("B"); // typed while A is in flight
+    skew = 11000; fire();
+    await until(async () => { fire(); await drain(2); return /no answer: not known whether it was applied/.test(v.msg ?? ""); }, "the unknown text");
+    await drain(5);
+    assert.deepEqual(host.closed, [], "B was never sent: not closed");
+    assert.equal(t.title(), "B", "the newer draft is kept");
+    assert.equal(sends().length, 1, "nothing else was sent");
+  } finally { Date.now = realNow; }
 });

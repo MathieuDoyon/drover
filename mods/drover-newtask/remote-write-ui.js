@@ -1,6 +1,6 @@
 // Canonical copy lives in mods/_lib; mods/install.sh copies it into each drover-* mod.
 // View-model for the write controls on a remote project's cards (T-MWHVWR8TIJB): pure, so the views stay thin.
-// The state comes from io.js remoteWriteState(); the ops go to io.js remoteSend(), which builds the real request (remote-write.js).
+// The state comes from io.js remoteWriteState(); the ops go to io.js remoteSend(), which builds the real request (remote-write.js builds it, remote-exec.js sends it).
 
 export const OFF_TIP = "not available for projects on the remote machine yet"; // start / wake / next / agent stay off
 export const offTip = (machine) => (machine ? `not available for projects on ${machine} yet` : OFF_TIP);
@@ -8,14 +8,13 @@ const named = (machine) => machine || "the remote machine";
 const COLUMNS = ["backlog", "todo", "doing", "review", "blocked", "done"];
 
 // { on, tip } for any control that writes a card. ws = remoteWriteState(localId).
-// op: the card op this control sends (move, note, edit, add, archive). On the exec transport each op has its own gate (the remote's ops list), applied after the
-// freshness / writes / clock gate; the inbox transport has one gate for all (no ws.controls).
+// op: the card op this control sends (move, note, edit, add, archive). Each op has its own gate (the remote's ops list, ws.controls), applied after the
+// freshness / writes / clock gate.
 export function controlState(ws, op) {
   if (ws?.enabled) {
     if (op && ws.controls && ws.controls[op] === false) return { on: false, tip: ws.opTips?.[op] || `The remote machine does not support ${op}` };
     return { on: true, tip: null };
   }
-  if (ws?.frozen) return { on: false, tip: "writes frozen" };
   return { on: false, tip: ws?.reason || "writes are off" };
 }
 // { on, tip } for the field controls (priority, labels, assignee, parent, project): writes on AND the probe allows fields.
@@ -86,8 +85,7 @@ export function outcomeText(o) {
     case "saved": return "Saved";
     case "stale": return `card changed on ${named(o.machine)}: reloaded, try again`;
     case "expired": return "not applied, too old";
-    case "pending": return "sent, may still apply";
-    case "unknown": return o.transport === "exec" && o.message ? o.message : `outcome unknown: check the card on ${named(o.machine)}`; // exec: "…Repeat the action to retry safely"
+    case "unknown": return o.message || `outcome unknown: check the card on ${named(o.machine)}`; // "…Repeat the action to retry safely"
     case "refused": case "failed": return o.message || "not sent";
     default: {
       const first = String(o.text ?? "").split("\n")[0].trim() || `error: ${o.message ?? "unknown"}`;
@@ -96,20 +94,8 @@ export function outcomeText(o) {
   }
 }
 
-// The "Writes to <machine>" toggle in the project editor. remote = the saved binding; ws = remoteWriteState.
-export function writesToggle(remote, ws) {
+// The "Writes to <machine>" toggle in the project editor. remote = the saved binding.
+export function writesToggle(remote) {
   const on = remote?.writes !== false;
-  return { on, label: `Writes to ${named(remote?.machine)}`, note: on ? "on" : ws?.frozen ? "frozen" : "off, waiting for sends in flight" };
-}
-
-// The "Transport" control next to it: inbox (the default, files in the machine's inbox) or exec (drover-headless over hc exec). Flipping saves the binding only.
-export function transportToggle(remote) {
-  const exec = remote?.transport === "exec";
-  return {
-    value: exec ? "exec" : "inbox",
-    next: exec ? "inbox" : "exec",
-    button: exec ? "Back to inbox" : "Switch to exec",
-    label: `Transport to ${named(remote?.machine)}`,
-    note: exec ? "exec: headless board. Back any time; nothing moves" : "inbox (default). exec needs install + migrate-in; nothing moves",
-  };
+  return { on, label: `Writes to ${named(remote?.machine)}`, note: on ? "on" : "off" };
 }

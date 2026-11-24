@@ -71,21 +71,23 @@ async function ready() {
   return cx;
 }
 
-test("default stays inbox: a binding with no transport reads shared.json and never runs drover-headless", async () => {
+test("exec is the only transport: a binding saved with no transport is read through headless, never through shared.json", async () => {
   const cx = mkCx();
   IO.watchRemote(cx, () => true);
-  await until(() => host.state[CKEY], "first read");
-  assert.equal(hm.sharedReads > 0, true);
-  assert.equal(hm.headlessCalls.length, 0);
-  assert.equal(R.bindings(host.state["drover.projects"])[0].transport, undefined);
+  await until(() => host.state[CKEY]?.ops, "first read over exec");
+  assert.equal(hm.sharedReads, 0);
+  assert.ok(hm.headlessCalls.length > 0);
+  assert.equal(hm.inboxTouched, 0);
+  assert.equal(R.bindings(host.state["drover.projects"])[0].transport, "exec");
 });
 
-test("bindings and withRemote keep exec and drop any other value", () => {
+test("bindings and withRemote always say exec, whatever the saved or asked value", () => {
   assert.equal(R.bindings([binding({ transport: "exec" })])[0].transport, "exec");
-  assert.equal(R.bindings([binding({ transport: "weird" })])[0].transport, undefined);
+  assert.equal(R.bindings([binding({ transport: "weird" })])[0].transport, "exec");
+  assert.equal(R.bindings([binding({ transport: "inbox" })])[0].transport, "exec");
   const w = R.withRemote([binding({ transport: "exec" })], LID, { machine: M, projectId: RID, id: "B-1", transport: "exec" });
   assert.equal(w[0].remote.transport, "exec");
-  assert.equal(R.withRemote([binding()], LID, { machine: M, projectId: RID, transport: "weird" })[0].remote.transport, undefined);
+  assert.equal(R.withRemote([binding()], LID, { machine: M, projectId: RID, transport: "weird" })[0].remote.transport, "exec");
 });
 
 test("exec binding: read through headless, cards shown, controls from the remote's ops, no inbox traffic and no probe", async () => {
@@ -96,7 +98,6 @@ test("exec binding: read through headless, cards shown, controls from the remote
   assert.deepEqual(m.tasks.filter((t) => t.project === LID).map((t) => t.id), ["T-R1", "T-R2"]);
   const st = IO.remoteWriteState(LID);
   assert.equal(st.enabled, true);
-  assert.equal(st.frozen, false);
   assert.deepEqual(st.controls, { move: true, note: true, edit: true, add: true, archive: true });
   assert.equal(st.fields.on, true);
 });
@@ -151,7 +152,6 @@ test("unreachable: the last cache stays marked stale with a banner, and a write 
   assert.equal(o.status, "refused");
   assert.match(o.message, /nothing was sent/);
   assert.equal(hm.sends.length, 0);
-  assert.deepEqual(IO.remoteWriteState(LID).frozen, false, "no freeze, no queue");
 });
 
 test("a hung runner never blocks render or the timer: loadMerged and the tick return at once", async () => {
@@ -168,61 +168,35 @@ test("a hung runner never blocks render or the timer: loadMerged and the tick re
   assert.doesNotThrow(() => IO.remoteWriteState(LID));
 });
 
-test("the writes toggle (writes: false) refuses an exec write and reports frozen without a writer", async () => {
+test("the writes toggle (writes: false) refuses an exec write at once and keeps the binding", async () => {
   const cx = await ready();
   const r = IO.setRemoteWrites(LID, false);
-  assert.equal(r.frozen, true);
+  assert.deepEqual(r, { ok: true, writes: false });
   assert.equal(host.state["drover.projects"].find((p) => p.id === LID).remote.transport, "exec");
+  assert.equal(host.state["drover.projects"].find((p) => p.id === LID).remote.id, "B-1");
+  assert.equal(IO.remoteWriteState(LID).enabled, false);
+  assert.match(IO.remoteWriteState(LID).reason, /writes are off/);
   const o = await IO.remoteSend(LID, { op: "move", id: "T-R1", column: "doing" }, cx);
   assert.equal(o.status, "refused");
   assert.equal(hm.sends.length, 0);
+  assert.equal(IO.setRemoteWrites("P-LOCAL", true).error, "Not a remote project");
 });
 
-test("flip: inbox -> exec -> inbox -> exec keeps the binding id and the card ids; nothing but the binding changes", async () => {
-  const cx = mkCx(); IO.watchRemote(cx, () => true);
-  await until(() => host.state[CKEY], "inbox read");
-  const ids = () => IO.loadMerged().tasks.filter((t) => t.project === LID).map((t) => t.id).sort();
-  assert.deepEqual(ids(), ["T-R1", "T-R2"]);
-  const before = JSON.stringify(host.state["drover.tasks"]);
-  assert.deepEqual(await IO.setRemoteTransport(LID, "exec"), { ok: true, transport: "exec" });
-  const b = () => host.state["drover.projects"].find((p) => p.id === LID).remote;
-  assert.equal(b().transport, "exec"); assert.equal(b().id, "B-1");
-  fire(); await until(() => host.state[CKEY]?.ops, "exec read");
-  assert.deepEqual(ids(), ["T-R1", "T-R2"]);
-  assert.deepEqual(await IO.setRemoteTransport(LID, "inbox"), { ok: true, transport: "inbox" });
-  assert.equal(b().transport, undefined); assert.equal(b().id, "B-1");
-  fire(); await until(() => host.state[CKEY] && !host.state[CKEY].ops, "inbox read again");
-  assert.deepEqual(ids(), ["T-R1", "T-R2"]);
-  assert.equal((await IO.setRemoteTransport(LID, "exec")).ok, true);
-  assert.equal(JSON.stringify(host.state["drover.tasks"]), before, "no local card was created or changed");
+test("there is no way back to the inbox: no transport flip in io.js, no transport control in the project editor", () => {
+  assert.equal(IO.setRemoteTransport, undefined);
+  assert.equal(UI.transportToggle, undefined);
+  assert.equal(IO.remoteWriter, undefined, "no inbox writer");
 });
 
-test("flip to exec is refused (binding unchanged) when the machine does not answer headless or lacks the project; a bad value or a local project is refused", async () => {
-  hm.down = true;
-  const r = await IO.setRemoteTransport(LID, "exec");
-  assert.match(r.error, /did not answer drover-headless/);
-  assert.equal(host.state["drover.projects"].find((p) => p.id === LID).remote.transport, undefined);
-  hm.down = false;
-  assert.match((await IO.setRemoteTransport(LID, "carrier-pigeon")).error, /inbox or exec/);
-  assert.match((await IO.setRemoteTransport("P-LOCAL", "exec")).error, /Not a remote project/);
-});
-
-test("bind with transport exec checks the machine over exec (version, projects), not shared.json", async () => {
+test("bind checks the machine over exec (version, projects), never shared.json, and always saves an exec binding", async () => {
   const project = { id: LID, name: "pairstone", repos: [], folders: [], branch: "main" };
-  const r = await IO.remote.bind(project, { machine: M, projectId: RID, transport: "exec" }, { tasks: [], projects: [project] });
+  const r = await IO.remote.bind(project, { machine: M, projectId: RID }, { tasks: [], projects: [project] });
   assert.equal(r.project.remote.transport, "exec");
   assert.equal(hm.sharedReads, 0);
+  const asked = await IO.remote.bind(project, { machine: M, projectId: RID, transport: "inbox" }, { tasks: [], projects: [project] });
+  assert.equal(asked.project.remote.transport, "exec", "an old caller that still asks for the inbox gets exec");
   hm.down = true;
-  assert.match((await IO.remote.bind(project, { machine: M, projectId: RID, transport: "exec" }, { tasks: [], projects: [project] })).error, /did not answer drover-headless/);
-});
-
-test("the editor's Transport control: a view-model for each side of the flip, with note text", () => {
-  const a = UI.transportToggle({ machine: M, projectId: RID });
-  assert.deepEqual([a.value, a.next, a.button], ["inbox", "exec", "Switch to exec"]);
-  assert.match(a.note, /nothing moves/);
-  const b = UI.transportToggle({ machine: M, projectId: RID, transport: "exec" });
-  assert.deepEqual([b.value, b.next, b.button], ["exec", "inbox", "Back to inbox"]);
-  assert.match(b.label, new RegExp(M));
+  assert.match((await IO.remote.bind(project, { machine: M, projectId: RID }, { tasks: [], projects: [project] })).error, /did not answer drover-headless/);
 });
 
 // ---- fix round 1 ----
