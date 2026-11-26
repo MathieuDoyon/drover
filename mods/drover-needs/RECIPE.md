@@ -8,6 +8,7 @@ A header `Needs you` with the count, then one row per thing that waits on you (a
 
 ## How it behaves
 
+- Dismiss: a row hides while its key and reason match the stored dismissal. The stored map drops entries older than 30 days and keeps the newest 200 (oldest dismissed-at first); it never changes because of what a read returned.
 - Row click: show Room + Tasks (`showPage('room')`), then `agent.focus {terminal}` for a live agent, else open the card editor.
 - The list comes from the Needs-you cache (`_lib/needs.js`): derived in init and by a 1 s timer, never in render. Init also starts the remote board watch.
 

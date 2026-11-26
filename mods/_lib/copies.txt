@@ -37,3 +37,4 @@ accept.js
 loadhold.js
 asks.js
 dockbadge.js
+dismiss.js

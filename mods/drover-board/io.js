@@ -11,7 +11,8 @@ import { cleanAsk, terminalIdOk } from "./asks.js";
 import { createHealth, HEALTH_PY, readResult } from "./health.js";
 import { LOCAL, createLocalRead, judge, limitsFor, sampleOfRow, reservedWarning } from "./loadhold.js";
 import { validate as validateLine, activeFor } from "./runline.js";
-import { WAKE_KEY, reschedule, addWake, decide, setStatus, wakeOp } from "./wake.js";
+import { WAKE_KEY, reschedule, retryWake, addWake, decide, setStatus, wakeOp } from "./wake.js";
+import { DISMISS_KEY, dismiss, restore, prune, helpMessage } from "./dismiss.js";
 import { apply as applyKey } from "./keys.js";
 import * as HE from "./herd-export.js";
 import { resolveWorkFolder, moveOffers, parseMove } from "./workfolder.js";
@@ -246,7 +247,7 @@ async function startGate() {
 // What the Needs-you cache reads, once: every card (local and remote), runs, and the live agents and terminals. Called by a cache refresh only, never by render.
 export function needsWorld() {
   const m = loadMerged();
-  return { tasks: m.tasks, remotes: m.remotes, runs: loadRuns(), agents: agents(), terminals: terminals(), wakes: loadWakes(), asksScan };
+  return { tasks: m.tasks, remotes: m.remotes, runs: loadRuns(), agents: agents(), terminals: terminals(), wakes: loadWakes(), asksScan, dismissed: shared(DISMISS_KEY) };
 }
 // ---- The asks reader (T-MWO3FDT7NKL, B4b): WHY a blocked agent waits. Owned by the Tasks mod (started at its init, not by Runs, not by render). ----
 // A 1 s timer starts one scan of <appHome>/data/drover-asks through the read-only helper (host exec, 2 s deadline, one in flight; a scan older than the
@@ -313,8 +314,16 @@ export function jumpWorld() {
 // gate(): the screen's switch (false: no refresh, no remote read). remote: this screen also keeps the remote boards fresh (a mod copy may be the only one open).
 export function startNeeds(cx, { read = needsWorld, gate = () => true, remote = false } = {}) {
   const cache = createNeedsCache({ read });
-  cx.timer.every(1000, (cx) => { if (gate() && cache.refresh()) cx.notify(); });
+  // The shared Dismiss map is bounded by the clock only (30 days, newest 200), never by what a read returned: a read can be empty or partial for a moment.
+  const sweep = () => {
+    const cur = shared(DISMISS_KEY);
+    if (cur == null) return;
+    const kept = prune(cur, Date.now());
+    if (kept !== cur) setShared(DISMISS_KEY, kept);
+  };
+  cx.timer.every(1000, (cx) => { if (gate() && cache.refresh()) cx.notify(); if (gate()) sweep(); });
   cache.refresh();
+  sweep();
   if (remote) watchRemote(cx, gate);
   return cache;
 }
@@ -1844,6 +1853,18 @@ export function deliverWakes(cx) {
       else put(w.id, "failed", `hc send failed (may have arrived): ${(r.stderr ?? "").trim().split("\n")[0]}`);
     });
   }
+}
+
+// ---- Needs-you actions (T-MWXRH2E0KIS). Handlers call these; render never does. ----
+export const dismissNeed = (a) => setShared(DISMISS_KEY, dismiss(shared(DISMISS_KEY), a, Date.now()));
+export const restoreNeed = (key) => setShared(DISMISS_KEY, restore(shared(DISMISS_KEY), key));
+export const removeWake = (id) => setShared(WAKE_KEY, loadWakes().filter((w) => w.id !== id));
+export const retryWakeNow = (id) => setShared(WAKE_KEY, retryWake(loadWakes(), id));
+// Ask a live agent to help with a blocked card: the fixed template (dismiss.js), through hc argv. A remote card is never sent.
+export async function sendHelp(address, task, reason) {
+  if (task.remote || !terminalIdOk(address)) return false;
+  try { await sendToAgent(address, helpMessage(task, reason)); notify({ title: "Sent", body: `${task.id} to ${address}`, level: "info" }); return true; }
+  catch (e) { notify({ title: "Not sent", body: String(e?.message ?? e), level: "error" }); return false; }
 }
 
 export function watchWakes(cx) {

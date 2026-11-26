@@ -142,6 +142,11 @@ export function reschedule(list, id, reason, now = Date.now()) {
   });
 }
 
+// Retry a failed or expired wakeup (any kind): back to scheduled and due now, so the next delivery tick tries again.
+export function retryWake(list, id, now = Date.now()) {
+  return list.map((w) => (w.id === id ? { ...w, due: now, expires: now + window(w.every), status: "scheduled", reason: null, at: now } : w));
+}
+
 export const setStatus = (list, id, status, reason, now = Date.now()) =>
   list.map((w) => (w.id === id ? { ...w, status, reason, at: now } : w));
 
