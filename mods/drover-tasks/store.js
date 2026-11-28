@@ -185,6 +185,10 @@ export const bySource = (tasks, kind, id, url) => tasks.find((t) => t.source?.ki
 // A card back in backlog or todo has no run: its agent is dead or no longer works on it.
 // A launch in flight (CLAIMING) stays: its run still adopts or expires the claim.
 const unstaffed = (cur, to) => cur.column === "doing" && (to === "backlog" || to === "todo") && cur.agent !== CLAIMING;
+// A run that ended on a Blocked/Review/Done card leaves its agent behind, and `drover next` skips a card that has one.
+// Only a caller that knows who is alive (ctx.alive: Set of live terminal addresses, non-empty = a real snapshot) may free it,
+// and only when that address is gone. No snapshot, or a live agent: nothing is freed (a parked live run keeps its card).
+const deadAgent = (card, ctx) => Boolean(card.agent) && card.agent !== CLAIMING && ctx?.alive instanceof Set && ctx.alive.size > 0 && !ctx.alive.has(card.agent);
 
 // rev: a per-card change counter, never a clock. Every writer of a stored card bumps it by one, so a sender that names the rev it
 // saw (inbox `ifRev`) can tell the card changed. A card with no rev (older data, or just added) counts as 0.
@@ -344,6 +348,14 @@ export const GROUPS = [
 export function applyCommand(tasks, cmd, now, ctx) {
   if (typeof cmd?.id !== "string") return { error: "Unknown drover command" };
   if (cmd.op === "archive") return update(tasks, cmd.id, { archived: true }, now);
+  if (cmd.op === "release") { // `drover release <T-…>`: clear the dead agent a finished run left on a parked card
+    const cur = tasks.find((t) => t.id === cmd.id);
+    if (!cur) return { error: `Task ${cmd.id} not found` };
+    if (cur.column === "doing") return { error: `${cmd.id} is in progress: move it out of In progress first` };
+    if (!cur.agent) return { error: `${cmd.id} has no agent` };
+    if (!deadAgent(cur, ctx)) return { error: `${cmd.id}: agent ${cur.agent} is alive or cannot be checked now; nothing released` };
+    return update(tasks, cmd.id, { agent: null, run: null, claimedAt: null }, now);
+  }
   if (cmd.op === "note") {
     const kind = cmd.kind == null || cmd.kind === "" ? null : cmd.kind;
     if (kind && !NOTE_KINDS.includes(kind)) return { error: `Unknown note kind ${kind}: use ${NOTE_KINDS.join(", ")}` };
@@ -414,7 +426,9 @@ export function applyCommand(tasks, cmd, now, ctx) {
   const column = columnId(cmd.column);
   if (!column) return { error: unknownColumn(cmd.column) };
   if (column === "done" && cmd.from && !cmd.fromDrover) return { error: "Only the owner moves a card to done: tell the owner" }; // from = an agent's terminal; fromDrover = io.js checked it is a live Drover
-  return update(tasks, cmd.id, { column }, now);
+  const cur = tasks.find((t) => t.id === cmd.id);
+  const free = cur && cur.column !== column && (column === "backlog" || column === "todo") && deadAgent(cur, ctx);
+  return update(tasks, cmd.id, { column, ...(free ? { agent: null, run: null, claimedAt: null } : {}) }, now);
 }
 
 // Queue mode: a Drover takes Ready cards (column todo) of its own project.
@@ -480,6 +494,21 @@ export function release(tasks, id, prev, now) {
   return { tasks: next, task: next.find((t) => t.id === id) };
 }
 
+// A run that ended (every terminal gone, `ended` stamped) no longer owns its card: free agent/run/claimedAt of each parked card
+// (not in progress, not a launch in flight) that still names that run and whose agent address is not alive. Same array when nothing changes.
+export function freeEndedRuns(tasks, runs, alive) {
+  const ended = new Set(runs.filter((r) => r.ended != null).map((r) => r.id));
+  if (!ended.size || !(alive instanceof Set) || !alive.size) return tasks;
+  let changed = false;
+  const out = tasks.map((t) => {
+    if (!t.run || !ended.has(t.run) || t.column === "doing" || t.agent === CLAIMING || (t.agent && alive.has(t.agent))) return t;
+    if (!t.agent && !t.claimedAt) return t;
+    changed = true;
+    return { ...t, agent: null, run: null, claimedAt: null, rev: revOf(t) + 1 };
+  });
+  return changed ? out : tasks;
+}
+
 // A pasted image: a unique file name, and the markdown line that points at the saved file.
 export const imageName = (now) => `img-${now}-${Math.random().toString(36).slice(2, 7)}.png`;
 export const appendImage = (desc, path) => `${desc}${desc && !desc.endsWith("\n") ? "\n" : ""}![image](<${path}>)`;
@@ -507,7 +536,7 @@ export function firstSight(seen, name) {
 // An OLD consumer ignores both fields and applies the request unconditionally. A sender must therefore send `{op:"protocol"}` first
 // and use these fields only when the answer is `ok: protocol 2` (an old consumer answers `error: Unknown drover command`).
 export const PROTOCOL = 5; // 5 = 4 + ops config-get and config-set (one setting, drover-runs.max_parallel; #70); every check that wanted 2, 3 or 4 still passes at 5 (they are minimums); 4 = 3 + ops agents-import (dry run + plan token + confirm) and agents-export (T-MWJHXZ6Q72Q); 3 = 2 + edit takes priority/tags/assignee/parent/project and add takes assignee (T-MWIA1D6HO84)
-const REV_OPS = ["move", "edit", "note", "note-edit", "note-rm", "archive", "link", "project"]; // ops that name one card
+const REV_OPS = ["move", "edit", "note", "note-edit", "note-rm", "archive", "release", "link", "project"]; // ops that name one card
 const whole = (v) => typeof v === "number" && Number.isSafeInteger(v) && v >= 0;
 // Pure. { ifRev, ttlMs } (each undefined when absent) or { error: "bad …" }.
 export function protocolFields(cmd) {

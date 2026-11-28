@@ -33,6 +33,7 @@ usage: drover tasks [tag|column] [--project <id|name>]   list tasks (id, column,
        drover add "<title>" [--desc "<text>"] [--tag <t>]… [--column backlog|ready] [--priority P0-P3] [--project <id|name>] [--assignee <agent|squad>:<id>] [--parent <T-…>]   (--parent alone puts the card in the parent's project)
        drover move <T-…> <backlog|ready|in-progress|review|blocked|done>   (an agent cannot move to done: the owner does)
        drover next                                queue mode: free slots + Ready cards of your project (starts nothing)
+       drover release <T-…>                               clear the dead agent a finished run left on a parked card
        drover archive <T-…>                               archive a task (like the editor's Archive button)
        drover start <T-…|-> <squad|agent> [--worktree] [--project <id|name>]   open a squad (or 1 agent) on a task, or none (-);
                                                   its leader reports to you ($HC_TERMINAL_ID);
@@ -515,6 +516,9 @@ case "${1:-}" in
   next)
     [ $# -eq 1 ] || usage
     send "{\"op\":\"next\",\"from\":$(json "${HC_TERMINAL_ID:-}")}" 5 ;;
+  release)
+    [ $# -eq 2 ] && [[ "$2" =~ ^T-[A-Z0-9]+$ ]] || usage
+    send "{\"op\":\"release\",\"id\":\"$2\"}" 5 ;;
   archive)
     [ $# -eq 2 ] && [[ "$2" =~ ^T-[A-Z0-9]+$ ]] || usage
     send "{\"op\":\"archive\",\"id\":\"$2\"}" 5 ;;

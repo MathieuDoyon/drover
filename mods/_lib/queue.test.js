@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { add, addProject, applyCommand, attention, queue, squadFor, nextReport, claim, release } from "./store.js";
+import { freeEndedRuns, add, addProject, applyCommand, attention, queue, squadFor, nextReport, claim, release } from "./store.js";
 import { droverOf, activeFor, waitingFor, slotSnapshot, slotsOf, startGuard, projectOfDrover, resumeGuard, markEnded } from "./runs.js";
 
 const { projects } = addProject(addProject([], { name: "A", repos: "/a" }, 1).projects, { name: "B", repos: "/b" }, 2);
@@ -352,4 +352,53 @@ test("nextReport: the waiting count is shown after the slots, also at 0 slots; a
   assert.equal(r[0], "ok: 1 slots \u00b7 3 waiting");
   assert.match(r[1], /a1/);
   assert.equal(nextReport([], projects, A.id, 2, 0), "ok: 2 slots");
+});
+
+// T-MWV45TGVB9L: a finished run's agent must not keep a card out of the queue; a live parked agent must keep its card.
+const staffed = (tasks, f) => tasks.map((t) => ({ ...t, ...f })); // add() stores no agent; a run puts it there
+const SNAPSHOT = new Set(["t1"]); // a real snapshot that does not list the dead agents below
+test("queue: a card in Blocked with a dead agent, moved to Ready, is listed by drover next", () => {
+  const tasks = staffed(seed(card("stuck", { column: "blocked" })), { agent: "t25s", run: "R-1", claimedAt: 5 });
+  const id = idOf(tasks, "stuck");
+  const moved = applyCommand(tasks, { op: "move", id, column: "ready" }, 2000, { alive: SNAPSHOT }).tasks;
+  assert.match(nextReport(moved, projects, A.id, 1), new RegExp(`${id} .* stuck`));
+  assert.deepEqual(moved.find((t) => t.id === id).agent ?? null, null);
+});
+
+test("queue: Review or Backlog with a dead agent frees it on the way to Ready; staying parked keeps it", () => {
+  for (const column of ["review", "backlog"]) {
+    const tasks = staffed(seed(card("c", { column })), { agent: "t9", run: "R-9" });
+    const t = applyCommand(tasks, { op: "move", id: tasks[0].id, column: "ready" }, 2000, { alive: SNAPSHOT }).task;
+    assert.deepEqual([t.agent, t.run, t.claimedAt], [null, null, null]);
+  }
+  const tasks = staffed(seed(card("c", { column: "review" })), { agent: "t9", run: "R-9" });
+  assert.equal(applyCommand(tasks, { op: "move", id: tasks[0].id, column: "blocked" }, 2000, { alive: SNAPSHOT }).task.agent, "t9");
+});
+
+test("a LIVE parked agent, or no liveness snapshot, keeps the card's agent on move and release", () => {
+  const tasks = staffed(seed(card("p", { column: "blocked" })), { agent: "t9", run: "R-9" });
+  const id = tasks[0].id;
+  for (const ctx of [{ alive: new Set(["t9"]) }, { alive: new Set() }, undefined]) {
+    assert.equal(applyCommand(tasks, { op: "move", id, column: "ready" }, 2000, ctx).task.agent, "t9");
+    assert.match(applyCommand(tasks, { op: "release", id }, 2000, ctx).error, /alive or cannot be checked/);
+  }
+});
+
+test("release op: clears a dead agent on a parked card, refuses a card in progress", () => {
+  const tasks = seed(card("p", { column: "blocked" }), card("d", { column: "doing" })).map((t, i) => ({ ...t, agent: i ? "t3" : "t25s", run: i ? "R-2" : "R-1" }));
+  const r = applyCommand(tasks, { op: "release", id: tasks[0].id }, 2000, { alive: SNAPSHOT });
+  assert.deepEqual([r.task.agent, r.task.run, r.task.column], [null, null, "blocked"]);
+  assert.match(applyCommand(tasks, { op: "release", id: tasks[1].id }, 2000, { alive: SNAPSHOT }).error, /in progress/);
+});
+
+test("freeEndedRuns: a parked card of an ended run is freed and queued; a live, claiming or running card is not", () => {
+  const tasks = staffed(seed(card("a", { column: "blocked" }), card("b", { column: "review" }), card("c", { column: "blocked" }), card("d", { column: "doing" })), {})
+    .map((t, i) => ({ ...t, agent: ["t25s", "t9", "t7", "t8"][i], run: ["R-1", "R-2", "R-3", "R-1"][i] }));
+  const runs = [{ id: "R-1", ended: 5 }, { id: "R-2", ended: 5 }, { id: "R-3" }];
+  const out = freeEndedRuns(tasks, runs, new Set(["t9", "t1"])); // t9 is alive (reused address), R-3 has not ended
+  assert.deepEqual(out.map((t) => [t.agent, t.run]), [[null, null], ["t9", "R-2"], ["t7", "R-3"], ["t8", "R-1"]]);
+  assert.equal(freeEndedRuns(tasks, runs, new Set()), tasks); // no snapshot: nothing freed
+  assert.equal(freeEndedRuns(out, runs, new Set(["t9", "t1"])), out); // idempotent
+  const moved = applyCommand(out, { op: "move", id: out[0].id, column: "ready" }, 2000).tasks;
+  assert.match(nextReport(moved, projects, A.id, 1), /a$/m);
 });

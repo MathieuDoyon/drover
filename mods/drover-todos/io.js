@@ -2,7 +2,7 @@
 // The herdr side of the store: tasks persist in shared state (shared.json, written atomically).
 import { shared, setShared, openOverlay, exec, hc, readTextFile, writeTextFile, notify, focused, appHome, home, watchFolder, spaces, panes, agents, terminals, keys as hostKeys } from "herdr";
 import * as fs from "fs/promises";
-import { KEY, SEEN_KEY, PROJECTS_KEY, firstSight, list, add, update, bySource, addCommand, addProjectKey, applyCommand, columnName, repoOf, projectOf, projectKey, projectAddRequest, projectDiff, PROTOCOL, inboxGate, arrivalOf, addProject, projectNamed, nextReport, claim, release, editSize, CLAIMING, clearClaimToken } from "./store.js";
+import { KEY, SEEN_KEY, PROJECTS_KEY, firstSight, list, add, update, bySource, addCommand, addProjectKey, applyCommand, columnName, repoOf, projectOf, projectKey, projectAddRequest, projectDiff, PROTOCOL, inboxGate, arrivalOf, addProject, projectNamed, nextReport, claim, release, editSize, CLAIMING, clearClaimToken, freeEndedRuns } from "./store.js";
 import { base64, httpProblem, jiraIssue, jiraKey, githubIssue, prItems } from "./sources.js";
 import { ownerError, bindRemote, bindings as remoteBindings, mergeRemote, cacheKey } from "./remote.js";
 import { createExecReader, createExecWriter, probeExec, controls as execControls, opGate, skewReason, UI_OPS } from "./remote-exec.js";
@@ -1680,7 +1680,7 @@ async function drain() {
       const pk = !withProject ? { id: null } : typeof cmd.project === "string" || cmd.op === "project" ? projectKey(loadProjects(), cmd.project) : { error: "bad project: give a project id, name or none" };
       // A retained card of a remote project is not edited here either: stored ownership counts, not only the destination.
       const owned = pk.error ? null : ownerError(loadProjects(), pk.id) ?? ownerError(loadProjects(), typeof cmd?.id === "string" ? tasks.find((x) => x.id === cmd.id)?.project : null);
-      const r = pk.error ? pk : owned ? { error: owned } : applyCommand(tasks, withProject ? { ...cmd, project: pk.id } : cmd, undefined, assigneeCtx());
+      const r = pk.error ? pk : owned ? { error: owned } : applyCommand(tasks, withProject ? { ...cmd, project: pk.id } : cmd, undefined, { ...assigneeCtx(), alive: liveState().alive });
       if (!r.error) setShared(KEY, r.tasks);
       reply = r.error ? `error: ${r.error}` : cmd.op === "archive" ? `ok: ${r.task.id} archived` : cmd.op === "project" ? `ok: ${r.task.id} project ${r.task.project ?? "none"}` : cmd.op === "link" ? `ok: ${r.task.id} source ${r.task.source?.url ?? "none"}` : cmd.op === "note-edit" || cmd.op === "note-rm" ? `ok: ${r.task.id} ${cmd.noteId} ${cmd.op === "note-rm" ? "removed" : "edited"}` : cmd.op === "note" || cmd.op === "edit" ? `ok: ${r.task.id} ${cmd.op === "note" ? `note ${r.task.notes.length}` : "edited"}` : `ok: ${r.task.id} -> ${columnName(r.task.column)}`;
     }
@@ -1743,6 +1743,8 @@ export function observeEnded(now = Date.now()) {
   if (!alive.size) return false;
   const runs = loadRuns(), next = markEnded(runs, live, alive, now);
   if (next !== runs) setShared(RUNS_KEY, next);
+  const cards = load(), freed = freeEndedRuns(cards, next, alive); // a finished run's agent must not keep its card out of the queue
+  if (freed !== cards) setShared(KEY, freed);
   reapOrphans(next, alive); // background: the stamps are written before its first await
   return next !== runs;
 }
