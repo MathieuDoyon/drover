@@ -8,7 +8,7 @@ import { isDismissed } from "./dismiss.js";
 
 export { bannerKey, visibleBanners } from "./dismiss.js"; // a remote banner's Dismiss (T-MWZE693FFB9)
 
-export const GROUP_IDS = ["needs", "review", "working", "todo", "blocked"];
+export const GROUP_IDS = ["needs", "review", "working", "todo", "backlog", "blocked"];
 
 // One card = one key. Cards of different boards can share an id (a local card and a remote one, or two remote boards), so a remote card is
 // qualified by its machine and remote project; a local card keeps its bare id. Actions (focus, edit, done) keep using task.id.

@@ -43,7 +43,7 @@ test("claiming beats the Blocked column", () => {
 test("a gone agent on an In-progress card is counted; on a todo/backlog card it is not", () => {
   assert.deepEqual({ ...row(card({ column: "doing", agent: "t9" })) }.group, "needs");
   assert.equal(row(card({ column: "doing", agent: "t9" })).reason, "Agent t9 is gone");
-  for (const column of ["todo", "backlog"]) assert.equal(row(card({ column, agent: "t9" })).group, "todo", column);
+  for (const column of ["todo", "backlog"]) assert.equal(row(card({ column, agent: "t9" })).group, column, column);
 });
 
 test("a Review card is never in Needs you, even with a gone or stopped agent", () => {
@@ -124,4 +124,13 @@ test("review 3: the signature covers what a wake row shows and sorts by: name, t
     assert.equal(c.get().counts.needs, 1, "count and order unchanged");
     assert.equal(c.refresh(), false);
   }
+});
+
+test("Backlog cards get their own group; Ready holds only column todo, and the counts follow", () => {
+  const r = needsCounts([card({ id: "T-R", column: "todo" }), card({ id: "T-B1", column: "backlog" }), card({ id: "T-B2", column: "backlog" })], none, new Set(), []);
+  assert.deepEqual(r.byGroup.todo, ["T-R"]);
+  assert.deepEqual(r.byGroup.backlog, ["T-B1", "T-B2"]);
+  assert.equal(r.counts.todo, 1);
+  assert.equal(r.counts.backlog, 2);
+  assert.deepEqual(GROUPS.find(([id]) => id === "backlog"), ["backlog", "Backlog"]);
 });

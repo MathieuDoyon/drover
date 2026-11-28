@@ -16,7 +16,7 @@ test("get() never computes: it does not read and returns the stored value", () =
   const c = createNeedsCache({ read: w.read, now: () => 5 });
   assert.equal(w.reads, 0);
   const empty = c.get();
-  assert.deepEqual(empty.counts, { needs: 0, review: 0, working: 0, todo: 0, blocked: 0 });
+  assert.deepEqual(empty.counts, { needs: 0, review: 0, working: 0, todo: 0, backlog: 0, blocked: 0 });
   assert.equal(w.reads, 0);
   c.refresh();
   assert.equal(w.reads, 1, "refresh reads each input once");
@@ -86,10 +86,10 @@ test("a task change (column moved) is picked up by the next refresh", () => {
   assert.equal(c.get().counts.todo, 1);
   w.tasks = [T({ column: "doing", agent: "t9" })]; // its agent is gone
   assert.equal(c.refresh(), true);
-  assert.deepEqual(c.get().counts, { needs: 1, review: 0, working: 0, todo: 0, blocked: 0 });
+  assert.deepEqual(c.get().counts, { needs: 1, review: 0, working: 0, todo: 0, backlog: 0, blocked: 0 });
   w.tasks = [T({ column: "blocked", agent: null })]; // parked: not Needs you
   assert.equal(c.refresh(), true);
-  assert.deepEqual(c.get().counts, { needs: 0, review: 0, working: 0, todo: 0, blocked: 1 });
+  assert.deepEqual(c.get().counts, { needs: 0, review: 0, working: 0, todo: 0, backlog: 0, blocked: 1 });
 });
 
 test("the stored value is replaced, not mutated, so a reader holding the old one is safe", () => {
@@ -113,5 +113,5 @@ test("the cache keys every card by board: byId holds both cards that share an id
   assert.equal(c.get().byId.size, 2);
   assert.equal(c.get().byId.get("T-X").title, "local");
   assert.equal(c.get().byId.get(cardKey(rem)).title, "remote");
-  assert.deepEqual(c.get().counts, { needs: 0, review: 0, working: 0, todo: 1, blocked: 1 });
+  assert.deepEqual(c.get().counts, { needs: 0, review: 0, working: 0, todo: 1, backlog: 0, blocked: 1 });
 });

@@ -13,7 +13,7 @@ test("row 0: archived or done is in no group", () => {
   assert.equal(one(card({ archived: true, column: "blocked" })), null);
   assert.equal(one(card({ column: "done", agent: "t9" }), live("blocked")), null);
   const r = needsCounts([card({ archived: true }), card({ id: "T-2", column: "done" })], none, new Set(), []);
-  assert.deepEqual(r.counts, { needs: 0, review: 0, working: 0, todo: 0, blocked: 0 });
+  assert.deepEqual(r.counts, { needs: 0, review: 0, working: 0, todo: 0, backlog: 0, blocked: 0 });
 });
 
 test("row 2: a claiming card is working (agent is starting)", () => {
@@ -45,7 +45,7 @@ test("row 9: anything else is todo with no reason", () => {
   const r = one(card({ column: "todo" }));
   assert.equal(r.group, "todo");
   assert.equal(r.reason, null);
-  assert.equal(one(card({ column: "backlog" })).group, "todo");
+  assert.equal(one(card({ column: "backlog" })).group, "backlog", "a Backlog card is not Ready");
 });
 
 test("attention() is the same table for one card", () => {
@@ -138,7 +138,7 @@ test("same id: a local blocked card and a remote Done card: Done does not show a
   for (const tasks of [[local, done], [done, local]]) {
     const r = needsCounts(tasks, none, new Set(), []);
     assert.deepEqual(r.byGroup.needs, ["T-X"]);
-    assert.deepEqual(r.counts, { needs: 1, review: 0, working: 0, todo: 0, blocked: 0 });
+    assert.deepEqual(r.counts, { needs: 1, review: 0, working: 0, todo: 0, backlog: 0, blocked: 0 });
     assert.equal(r.rows.size, 1);
     assert.equal(r.rows.get("T-X").reason, "Agent t9 is gone");
     assert.equal(r.rows.has(cardKey(done)), false, "the Done remote card is in no group");
@@ -151,7 +151,7 @@ test("same id: a local Ready card and a remote Blocked card are two rows in two 
   const r = needsCounts([local, rem], none, new Set(), []);
   assert.deepEqual(r.byGroup.blocked, [cardKey(rem)]);
   assert.deepEqual(r.byGroup.todo, ["T-1"]);
-  assert.deepEqual(r.counts, { needs: 0, review: 0, working: 0, todo: 1, blocked: 1 });
+  assert.deepEqual(r.counts, { needs: 0, review: 0, working: 0, todo: 1, backlog: 0, blocked: 1 });
   assert.equal(r.rows.get("T-1").group, "todo", "the local card stays Ready");
 });
 

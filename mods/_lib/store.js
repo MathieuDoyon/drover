@@ -333,6 +333,7 @@ export function attention(task, agentsByAddress, alive = new Set(agentsByAddress
   if (a?.status === "working") return { group: "working", reason: "Agent is working" };
   if (isAlive) return { group: "working", reason: "Agent stopped or idle" };
   if (task.column === "doing") return { group: "working", reason: "In progress" };
+  if (task.column === "backlog") return { group: "backlog", reason: null };
   return { group: "todo", reason: null };
 }
 
@@ -341,6 +342,7 @@ export const GROUPS = [
   ["review", "Ready for review"],
   ["working", "Working"],
   ["todo", "Ready"],
+  ["backlog", "Backlog"],
   ["blocked", "Blocked"],
 ];
 

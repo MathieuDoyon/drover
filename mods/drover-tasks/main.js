@@ -22,7 +22,7 @@ const I = (name) => `mods/drover-tasks/icons/${name}.svg`;
 const FIELD_ICON = { status: "circle-dot", agentStatus: "bot", priority: "signal", date: "calendar", assignee: "user", project: "folder", label: "tag", source: "arrow-up-right" };
 // Project first, as the sidebar is mostly used to follow one project; Agent status is the Board's and stays out of this compact menu.
 const FIELDS = ["project", "status", "priority", "label", "assignee", "date", "source"].map((id) => FILTER_FIELDS.find(([f]) => f === id));
-const DOT = (t) => ({ needs: t.blocked, review: t.done, working: t.working, todo: t.idle, blocked: t.dim });
+const DOT = (t) => ({ needs: t.blocked, review: t.done, working: t.working, todo: t.idle, backlog: t.dim, blocked: t.dim });
 
 export default class Tasks extends View {
   init(_props, cx) {
@@ -156,15 +156,16 @@ export default class Tasks extends View {
       .when(at.group === "review", (el) => el.child(task.remote ? off(`ro-proof-${cardKey(task)}`, "▤", "Proof reads this machine only") : icon(`proof-${cardKey(task)}`, "▤", "Proof", () => openProof(task))))
       .when(at.group === "review", (el) => el.child(task.remote ? this.remoteDone(task, off, icon) : icon(`done-${cardKey(task)}`, "✓", "Accept: opens the proof and the Accept steps", () => this.acceptRow(task))));
 
+    const folded = (id) => fold[id] ?? id === "backlog"; // Backlog starts folded
     const group = ([id, name]) => {
       const items = rows.filter((r) => r.at.group === id);
       if (!items.length) return null;
       return v_flex().gap(1)
         .child(h_flex().id(`g-${id}`).h(24).px(8).gap(6).items_center().cursor_pointer()
-          .on_click(() => setShared(FOLD, { ...fold, [id]: !fold[id] }))
-          .child(div().text_size(11).text_color(t.muted).font_medium().child(`${fold[id] ? "▸" : "▾"} ${name}`))
+          .on_click(() => setShared(FOLD, { ...fold, [id]: !folded(id) }))
+          .child(div().text_size(11).text_color(t.muted).font_medium().child(`${folded(id) ? "▸" : "▾"} ${name}`))
           .child(div().text_size(11).text_color(t.dim).child(String(items.length))))
-        .when(!fold[id], (el) => el.children(items.map(row)));
+        .when(!folded(id), (el) => el.children(items.map(row)));
     };
 
     const mrow = (id, iconName, text, { right, chevron, check, action }) => h_flex().id(id).h(30).px(8).gap(8).items_center().rounded(6).cursor_pointer()
