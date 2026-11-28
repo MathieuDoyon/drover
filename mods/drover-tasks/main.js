@@ -5,8 +5,8 @@ import { v_flex, h_flex, InputState, Input, Popover } from "gpui-base";
 import { agents, terminals, run, theme, shared, setShared } from "herdr";
 import { bind, isEnabled, whenLoaded, ready as cfgReady } from "./config.js";
 import { GROUPS, projectOf, add, update, matches, menuChange, FILTER_FIELDS, toggleFilter, clearFilters, matchesFilter, filterValues, searchFilters, filterChips } from "./store.js";
-import { load, loadRuns, loadProjects, loadConfig, spaceProject, sidebarSpace, save, edit, pick, openProof, openBoard, watchInbox, watchWakes, modSettings, needsWorld, startNeeds, retryRemote, remoteSend, remoteWriteState, takeRemoteOutcomes, watchMachines, machineView, startAsks } from "./io.js";
-import { cardKey } from "./needs.js";
+import { dismissNeed, load, loadRuns, loadProjects, loadConfig, spaceProject, sidebarSpace, save, edit, pick, openProof, openBoard, watchInbox, watchWakes, modSettings, needsWorld, startNeeds, retryRemote, remoteSend, remoteWriteState, takeRemoteOutcomes, watchMachines, machineView, startAsks } from "./io.js";
+import { cardKey, bannerKey, visibleBanners } from "./needs.js";
 import { lineLabel } from "./runline.js";
 import { queryResetKey } from "./jump.js";
 import { offTip, controlState, moveOp, outcomeText } from "./remote-write-ui.js";
@@ -221,9 +221,11 @@ export default class Tasks extends View {
       .content(open ? filterMenu() : div());
 
     for (const o of takeRemoteOutcomes()) this.remoteMsg = outcomeText(o); // a result that arrived after the wait
-    const banners = v.remotes.filter((r) => r.banner).map((r) => h_flex().id(`banner-${r.localId}`).mx(8).mb(6).px(8).min_h(28).gap(6).items_center().rounded(7).bg(t.hover).text_size(11.5)
+    const banners = visibleBanners(v.remotes, v.dismissed).map((r) => h_flex().id(`banner-${r.localId}`).mx(8).mb(6).px(8).min_h(28).gap(6).items_center().rounded(7).bg(t.hover).text_size(11.5)
       .text_color(r.state === "never" ? t.muted : t.blocked)
       .child(div().flex_1().min_w(0).child(`${r.name}: ${r.banner}`))
+      .child(div().id(`dismiss-${r.localId}`).h(22).px(8).flex().items_center().flex_none().rounded(6).text_color(t.muted).cursor_pointer().hover((s) => s.bg(t.raised).text_color(t.foreground))
+        .on_click((_e, cx) => { cx.stop_propagation(); dismissNeed({ key: bannerKey(r), reason: r.state }); this.refreshNow(cx); cx.notify(); }).child("Dismiss"))
       .child(div().id(`retry-${r.localId}`).h(22).px(8).flex().items_center().flex_none().rounded(6).bg(t.solid).text_color(t.solid_foreground).cursor_pointer()
         .on_click((_e, cx) => { cx.stop_propagation(); retryRemote(r.machine, r.projectId, cx); }).child("Retry")));
     const machines = () => {

@@ -6,8 +6,9 @@ import { v_flex, h_flex, InputState, Input, Popover } from "gpui-base";
 import { agents, terminals, theme, shared } from "herdr";
 import { liveAgents, liveStatuses, slotSnapshot, slotLine } from "./runs.js";
 import { COLUMNS, STATUS_ICON, projectOf, shiftVisible, reorder, matches, sorted, updatedAgo, clampText, sortCards, archiveDone, SORT_MODES, SCOPES, inScope, checklistProgress, ringGlyph, menuChange, FILTER_FIELDS, toggleFilter, clearFilters, matchesFilter, filterValues, searchFilters, filterChips, assigneeText } from "./store.js";
-import { load, loadProjects, loadRuns, loadConfig, save, edit, pick, openUrl, watchInbox, modSettings, loadMerged, watchRemote, retryRemote, remoteSend, remoteWriteState, takeRemoteOutcomes } from "./io.js";
+import { load, loadProjects, loadRuns, loadConfig, save, edit, pick, openUrl, watchInbox, modSettings, loadMerged, watchRemote, retryRemote, dismissNeed, remoteSend, remoteWriteState, takeRemoteOutcomes } from "./io.js";
 import { offTip, controlState, statusLine, moveOp, shiftOp, outcomeText } from "./remote-write-ui.js";
+import { DISMISS_KEY, bannerKey, visibleBanners, statusHidden } from "./dismiss.js";
 import { READONLY_TIP } from "./remote.js";
 import { bind, cfg, isEnabled, whenLoaded } from "./config.js";
 import { gated } from "./ui.js";
@@ -187,6 +188,7 @@ export default class Board extends View {
     const off = (id, name, tip = READONLY_TIP) => div().id(id).w(22).h(22).flex().items_center().justify_center().rounded(5).text_color(t.dim).opacity(0.5).tooltip(tip).child(svg(I(name)).size(13));
     for (const o of takeRemoteOutcomes()) this.msg = outcomeText(o); // a result that arrived after the wait
     const merged = loadMerged();
+    const dismissedMap = shared(DISMISS_KEY) ?? {};
     const staleNow = (x) => merged.remotes.some((r) => r.localId === x.project && r.state !== "fresh");
     const projects = loadProjects();
     // One snapshot per render (T-MWL7FAABO29): every shared read the render needs happens here, once; nothing inside a card or column closure reads shared state.
@@ -347,12 +349,14 @@ export default class Board extends View {
       .on_hover((hovered, cx) => { if (!hovered && this.drag) { this.drag = null; this.over = null; cx.notify(); } }).on_key_down((e, cx) => this.key(e, cx))
       .child(topBar())
       .when(filterCount > 0, (el) => el.child(chipsRow()))
-      .children(merged.remotes.filter((r) => r.banner).map((r) => h_flex().id(`banner-${r.localId}`).mx(12).mb(8).px(12).h(32).gap(10).items_center().rounded(8).bg(t.hover).text_size(12.5)
+      .children(visibleBanners(merged.remotes, dismissedMap).map((r) => h_flex().id(`banner-${r.localId}`).mx(12).mb(8).px(12).h(32).gap(10).items_center().rounded(8).bg(t.hover).text_size(12.5)
         .text_color(r.state === "never" ? t.muted : t.blocked)
         .child(div().flex_1().min_w(0).truncate().child(`${r.name}: ${r.banner}`))
+        .child(div().id(`dismiss-${r.localId}`).h(24).px(10).flex().items_center().rounded(6).text_color(t.muted).cursor_pointer().hover((s) => s.bg(t.raised).text_color(t.foreground))
+          .on_click((_e, cx) => { cx.stop_propagation(); dismissNeed({ key: bannerKey(r), reason: r.state }); cx.notify(); }).child("Dismiss"))
         .child(div().id(`retry-${r.localId}`).h(24).px(10).flex().items_center().rounded(6).bg(t.solid).text_color(t.solid_foreground).cursor_pointer()
           .on_click((_e, cx) => { cx.stop_propagation(); retryRemote(r.machine, r.projectId, cx); }).child("Retry"))))
-      .children(merged.remotes.map((r) => div().id(`wstatus-${r.localId}`).mx(12).mb(6).text_size(11.5).text_color(t.dim)
+      .children(merged.remotes.filter((r) => !statusHidden(r, dismissedMap)).map((r) => div().id(`wstatus-${r.localId}`).mx(12).mb(6).text_size(11.5).text_color(t.dim)
         .child(`${r.name}: ${statusLine(remoteWriteState(r.localId))}${this.msg ? ` · ${this.msg}` : ""}`)))
       .child(this.view === "list" ? list() : h_flex().id("cols").flex_1().min_h(0).px(12).pb(12).gap(12).overflow_x_scrollbar()
         .children(cols.map((col, ci) => {

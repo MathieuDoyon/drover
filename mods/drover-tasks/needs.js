@@ -6,6 +6,8 @@ import { lineOf } from "./runline.js";
 import { createAsksState, askReason } from "./asks.js";
 import { isDismissed } from "./dismiss.js";
 
+export { bannerKey, visibleBanners } from "./dismiss.js"; // a remote banner's Dismiss (T-MWZE693FFB9)
+
 export const GROUP_IDS = ["needs", "review", "working", "todo", "blocked"];
 
 // One card = one key. Cards of different boards can share an id (a local card and a remote one, or two remote boards), so a remote card is
@@ -80,7 +82,7 @@ function lineViews(tasks, runs, statuses, alive, now) {
   return lines;
 }
 
-const EXTRA = { tasks: [], byId: new Map(), remotes: [], controls: {}, agentAddrs: new Set(), live: new Map() };
+const EXTRA = { tasks: [], byId: new Map(), remotes: [], dismissed: {}, controls: {}, agentAddrs: new Set(), live: new Map() };
 const EMPTY = Object.freeze({ ...needsCounts([], new Map(), new Set(), []), ...EXTRA });
 // Structural (JSON), never delimiter-joined: a valid line text may contain any delimiter and must not collide with another set of lines.
 const linesSig = (v) => JSON.stringify([...v.lines].map(([k, l]) => [k, l.text, l.progress, l.ageMin, l.stale]));
@@ -90,6 +92,7 @@ const signatureOf = (v) => linesSig(v) + "##" + v.hidden.map((a) => `${a.key}|${
 const fingerprintOf = (v) => [
   v.tasks.map((t) => `${cardKey(t)}|${t.rev ?? ""}|${t.updated ?? ""}|${t.title}|${t.priority}|${(t.tags ?? []).join(",")}|${t.project ?? ""}|${t.column}`).join("\n"),
   v.remotes.map((r) => `${r.localId}|${r.state}|${r.banner ?? ""}`).join("\n"),
+  Object.entries(v.dismissed).filter(([k]) => k.startsWith("remote-banner:")).map(([k, e]) => `${k}|${e?.reason}`).sort().join("\n"),
   Object.keys(v.controls).sort().map((k) => `${k}|${v.controls[k]?.on}|${v.controls[k]?.tip ?? ""}`).join("\n"),
   [...v.agentAddrs].sort().join(","),
 ].join("\u0001");
@@ -110,7 +113,7 @@ export function createNeedsCache({ read, now = () => Date.now() }) {
       const alive = new Set(terminals.map((x) => x.address));
       const live = liveAgents(agents, terminals);
       const asks = asksState.update({ scan: asksScan, statuses: new Map([...live].map(([k, v]) => [k, v?.status])), alive, now: now() });
-      const next = { ...needsCounts(tasks, live, alive, runs, wakes, now(), asks, dismissed), tasks, byId: new Map(tasks.map((t) => [cardKey(t), t])), remotes, controls, agentAddrs: new Set(agents.map((a) => a.address)), live };
+      const next = { ...needsCounts(tasks, live, alive, runs, wakes, now(), asks, dismissed), tasks, byId: new Map(tasks.map((t) => [cardKey(t), t])), remotes, dismissed: dismissed && typeof dismissed === "object" ? dismissed : {}, controls, agentAddrs: new Set(agents.map((a) => a.address)), live };
       const nextSig = signatureOf(next) + fingerprintOf(next);
       const changed = nextSig !== sig;
       value = { ...next, at: now() };

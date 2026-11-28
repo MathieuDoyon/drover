@@ -9,6 +9,18 @@ export function restore(map, key) {
   const { [key]: _gone, ...rest } = clean(map);
   return rest;
 }
+// A remote banner's Dismiss (T-MWZE693FFB9): same shared map as the Needs-you rows, key remote-banner:<localId>, reason = the remote's state,
+// so a state change (stale -> never, ...) brings the banner back.
+export const bannerKey = (r) => `remote-banner:${r.localId}`;
+export const visibleBanners = (remotes, dismissed) => remotes.filter((r) => r.banner && !isDismissed(dismissed, { key: bannerKey(r), reason: r.state }));
+// The grey "<project>: <machine> unreachable ..." line under the banners follows its banner: hidden while that banner is dismissed.
+export const statusHidden = (r, dismissed) => Boolean(r.banner) && isDismissed(dismissed, { key: bannerKey(r), reason: r.state });
+// A remote that answers again (state fresh) forgets its dismissal, so fixed-then-broken shows again. Same object back when nothing drops.
+export function clearFresh(map, remotes) {
+  const m = clean(map), gone = remotes.filter((r) => r.state === "fresh" && bannerKey(r) in m).map(bannerKey);
+  return gone.length ? Object.fromEntries(Object.entries(m).filter(([k]) => !gone.includes(k))) : m;
+}
+
 // Bound the map by the clock alone, never by what a read returned (a read can be empty or partial for a moment, and a missing key must stay dismissed):
 // an entry older than 30 days (by its `at`, or with no valid `at`) goes, then only the newest 200 stay (a tie keeps the smaller key).
 // Same object back when nothing drops.

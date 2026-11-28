@@ -204,7 +204,7 @@ test("d. requests with no ifRev/ttlMs behave as before, for every op of the tabl
     [{ op: "wake-rm", id: "W-NONE" }, /^error: no wakeup W-NONE/],
     [{ op: "next", from: "t0" }, /^error: you are not bound to a project/],
     [{ op: "start", task: id, runner: "no-such-squad" }, /^error: no squad or agent no-such-squad/],
-    [{ op: "archive", id: other }, /^ok: T-\S+ -> /],
+    [{ op: "archive", id: other }, /^ok: T-\S+ archived$/],
     [{ op: "nonsense", id }, /^error: Unknown drover command$/],
   ];
   for (const [cmd, re] of table) {

@@ -12,7 +12,7 @@ import { createHealth, HEALTH_PY, readResult } from "./health.js";
 import { LOCAL, createLocalRead, judge, limitsFor, sampleOfRow, reservedWarning } from "./loadhold.js";
 import { validate as validateLine, activeFor } from "./runline.js";
 import { WAKE_KEY, reschedule, retryWake, addWake, decide, setStatus, wakeOp } from "./wake.js";
-import { DISMISS_KEY, dismiss, restore, prune, helpMessage } from "./dismiss.js";
+import { DISMISS_KEY, dismiss, restore, prune, clearFresh, helpMessage } from "./dismiss.js";
 import { apply as applyKey } from "./keys.js";
 import * as HE from "./herd-export.js";
 import { resolveWorkFolder, moveOffers, parseMove } from "./workfolder.js";
@@ -172,7 +172,11 @@ export function watchRemote(cx, enabled = () => true) {
     if (!enabled()) { remote.suspend(); return; }
     const list = remoteBindings(loadProjects());
     remote.sync(list); // the whole binding, id included: the commit-time check compares it
-    if (list.length && cx.spawn) cx.spawn(async (cx) => { if ((await remote.tick()).length) cx.notify(); });
+    if (list.length && cx.spawn) cx.spawn(async (cx) => {
+      if ((await remote.tick()).length) cx.notify();
+      const cur = shared(DISMISS_KEY), kept = cur == null ? cur : clearFresh(cur, loadMerged().remotes); // a fresh remote forgets its banner dismissal
+      if (kept !== cur) { setShared(DISMISS_KEY, kept); cx.notify(); }
+    });
     execWriter?.tick(); // ends a write wait past its deadline and drops an old held envelope
   };
   cx.timer?.every?.(1000, tick);
@@ -1678,7 +1682,7 @@ async function drain() {
       const owned = pk.error ? null : ownerError(loadProjects(), pk.id) ?? ownerError(loadProjects(), typeof cmd?.id === "string" ? tasks.find((x) => x.id === cmd.id)?.project : null);
       const r = pk.error ? pk : owned ? { error: owned } : applyCommand(tasks, withProject ? { ...cmd, project: pk.id } : cmd, undefined, assigneeCtx());
       if (!r.error) setShared(KEY, r.tasks);
-      reply = r.error ? `error: ${r.error}` : cmd.op === "project" ? `ok: ${r.task.id} project ${r.task.project ?? "none"}` : cmd.op === "link" ? `ok: ${r.task.id} source ${r.task.source?.url ?? "none"}` : cmd.op === "note-edit" || cmd.op === "note-rm" ? `ok: ${r.task.id} ${cmd.noteId} ${cmd.op === "note-rm" ? "removed" : "edited"}` : cmd.op === "note" || cmd.op === "edit" ? `ok: ${r.task.id} ${cmd.op === "note" ? `note ${r.task.notes.length}` : "edited"}` : `ok: ${r.task.id} -> ${columnName(r.task.column)}`;
+      reply = r.error ? `error: ${r.error}` : cmd.op === "archive" ? `ok: ${r.task.id} archived` : cmd.op === "project" ? `ok: ${r.task.id} project ${r.task.project ?? "none"}` : cmd.op === "link" ? `ok: ${r.task.id} source ${r.task.source?.url ?? "none"}` : cmd.op === "note-edit" || cmd.op === "note-rm" ? `ok: ${r.task.id} ${cmd.noteId} ${cmd.op === "note-rm" ? "removed" : "edited"}` : cmd.op === "note" || cmd.op === "edit" ? `ok: ${r.task.id} ${cmd.op === "note" ? `note ${r.task.notes.length}` : "edited"}` : `ok: ${r.task.id} -> ${columnName(r.task.column)}`;
     }
     await writeReply(path.replace(/\.json$/, ".result"), reply);
   }
