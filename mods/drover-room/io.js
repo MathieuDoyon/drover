@@ -1819,6 +1819,15 @@ export async function startFromAgent(cmd) {
     (r.warning ? ` · warning: ${r.warning}` : "");
 }
 
+// What a card looks like on screen: a change to any of these moves or re-sorts it.
+const tasksSig = () => load().map((x) => `${x.id}:${x.rev ?? 0}:${x.column}:${x.updated ?? 0}:${x.order ?? ""}`).join("|");
+// Every open mod copy races to drain a CLI request; a copy that finds the inbox already emptied notifies before the winner's write and never again.
+// The Board calls this while its screen is on: it repaints when the shared tasks change under it, so a CLI move shows in its sorted place with no click.
+export function watchTasks(cx, enabled = () => true) {
+  let seen = tasksSig();
+  cx.timer?.every?.(1000, (tcx) => { if (!enabled()) return; const now = tasksSig(); if (now !== seen) { seen = now; (tcx ?? cx).notify(); } });
+}
+
 export function watchInbox(cx) {
   cx.timer?.every?.(30000, () => { observeEnded(); }); // reaps parked workers of a closed space even with no Room or Runs view open
   cx.spawn(async (cx) => {

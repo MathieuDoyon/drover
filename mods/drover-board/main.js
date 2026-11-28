@@ -6,7 +6,7 @@ import { v_flex, h_flex, InputState, Input, Popover } from "gpui-base";
 import { agents, terminals, theme, shared } from "herdr";
 import { liveAgents, liveStatuses, slotSnapshot, slotLine } from "./runs.js";
 import { COLUMNS, STATUS_ICON, projectOf, shiftVisible, reorder, matches, sorted, updatedAgo, clampText, sortCards, archiveDone, SORT_MODES, SCOPES, inScope, checklistProgress, ringGlyph, menuChange, FILTER_FIELDS, toggleFilter, clearFilters, matchesFilter, filterValues, searchFilters, filterChips, assigneeText } from "./store.js";
-import { load, loadProjects, loadRuns, loadConfig, save, edit, pick, openUrl, watchInbox, modSettings, loadMerged, watchRemote, retryRemote, dismissNeed, remoteSend, remoteWriteState, takeRemoteOutcomes } from "./io.js";
+import { load, loadProjects, loadRuns, loadConfig, save, edit, pick, openUrl, watchInbox, modSettings, loadMerged, watchRemote, watchTasks, retryRemote, dismissNeed, remoteSend, remoteWriteState, takeRemoteOutcomes } from "./io.js";
 import { offTip, controlState, statusLine, moveOp, shiftOp, outcomeText } from "./remote-write-ui.js";
 import { DISMISS_KEY, bannerKey, visibleBanners, statusHidden } from "./dismiss.js";
 import { READONLY_TIP } from "./remote.js";
@@ -178,7 +178,7 @@ export default class Board extends View {
   render(cx) {
     const t = theme();
     { const g = gated("drover-board"); if (g) return g; } // the board has no work of its own: no timer, no fetch
-    if (!this.remoteOn) { this.remoteOn = true; watchRemote(cx, () => isEnabled("drover-board")); } // only while the screen is on: reads each remote-bound project every 15 s
+    if (!this.remoteOn) { this.remoteOn = true; watchRemote(cx, () => isEnabled("drover-board")); watchTasks(cx, () => isEnabled("drover-board")); } // only while the screen is on: reads each remote-bound project every 15 s
     const live = liveAgents(agents(), terminals());
     const icon = (id, name, action, size = 13) => div().id(id).w(22).h(22).flex().items_center().justify_center().rounded(5)
       .text_color(t.muted).cursor_pointer().hover((s) => s.bg(t.hover).text_color(t.foreground))
