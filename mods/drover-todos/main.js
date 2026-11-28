@@ -13,7 +13,7 @@ import { routeSend, liveAgent, subIssues, foldNotes, ago, initialOf, mix, noteRe
 import { age } from "./sources.js";
 import { bind, cfg, isEnabled, whenLoaded, load as loadCfg, ready as cfgReady } from "./config.js";
 import { gated } from "./ui.js";
-import { load, save, edit, loadProjects, loadConfig, launch, sendToAgent, loadRuns, loadWakes, loadContext, jiraSite, mergeContext, openUrl, HEARTBEAT_MS, startOptions, beatCreateGuard, clearCreateGuard, modSettings, loadMerged, watchRemote, retryRemote, remoteSend, remoteReload, remoteWriteState, takeRemoteOutcomes } from "./io.js";
+import { load, save, edit, loadProjects, loadConfig, launch, sendToAgent, loadRuns, loadWakes, loadContext, jiraSite, mergeContext, openUrl, HEARTBEAT_MS, startOptions, beatCreateGuard, clearCreateGuard, modSettings, loadMerged, watchRemote, retryRemote, remoteSend, remoteReload, remoteWriteState } from "./io.js";
 import { controlState, fieldState, statusLine, editOps, addOp, archiveOp, moveOp, outcomeText, applied, offTip } from "./remote-write-ui.js";
 import { remoteCardRows, machineOf } from "./remote.js";
 import { Proof } from "./proof.js";
@@ -49,8 +49,6 @@ export class Editor {
     this.fixedRemote = p.remoteCard && !p.remoteCard.new ? p.remoteCard : null;
     const rc = p.remoteCard ?? null;
     this.picking = false; // the remote card: a property pick saves at once, ONE in flight; it counts as submitting (close, expand, Save, archive wait)
-    this.rebaseGen = 0; // bumped by every Save, route change and rebase: an async rebase commits only while its number is current
-    this.sent = new Map(); // nonce -> the op that is still "may still apply": a late Saved moves the baseline, any other late outcome keeps the draft
     this.msg = "";
     this.task = p.edit && !this.remote ? load().find((x) => x.id === p.edit) : null;
     const t = rc ? { title: rc.title ?? "", desc: rc.desc ?? "", priority: rc.priority ?? "P2", tags: [...(rc.tags ?? [])], column: rc.column ?? p.column, project: rc.project } : this.task ?? { title: "", desc: "", priority: "P2", tags: [], column: p.column };
@@ -340,30 +338,18 @@ export class Editor {
       if (!base) return true;
       const op = editOps(base, { title: this.title.value(), desc: this.desc.value() })[0];
       if (!op) { this.textDeferred = false; this.closeForced = false; this.error = null; return true; }
-      const snap = { title: this.title.value().trim(), desc: this.desc.value() };
-      const pend = [...this.sent.values()].find((x) => x.pick || x.text);
-      if (pend) { // an outcome is unknown: the rev is uncertain. The same text is already on its way; a different one waits for it.
-        if (pend.text && pend.text.title === snap.title && pend.text.desc === snap.desc) { this.textDeferred = false; return true; }
-        this.textDeferred = true; return false;
-      }
       this.textDeferred = false;
       const w = this.wstate(op.op);
       if (!w.on) { this.msg = w.tip; this.textDeferred = true; return false; } // never sent: a later op retries it
       const last = await this.remoteSender(base.project, op, cx);
-      if (last.status === "pending" && last.nonce) this.sent.set(last.nonce, { op, destLocal: base.project, text: snap });
       if (last.status === "saved") {
         this.reloadFailed = false;
         const next = await this.settleSaved(base, op, base.project, cx);
-        ++this.rebaseGen;
         this.adopt(next);
         this.msg = this.reloadFailed ? `saved, but could not reload ${this.rname()}: reopen the card` : ""; this.error = null;
         continue; // the input may have changed while the request was in flight
       }
       this.msg = outcomeText(last);
-      if (last.status === "pending") { // sent, outcome unknown. Only the exact submitted text counts as on its way; newer typing stays a deferred draft
-        if (this.title.value().trim() === snap.title && this.desc.value() === snap.desc) { this.closeForced = false; return true; }
-        this.textDeferred = true; return false;
-      }
       this.reloadFailed = false;
       await this.reloadBounded(base.project, cx); // stale or refused: the remote's card gives the rev and the rows; the typed text stays
       const fresh = loadMerged().tasks.find((x) => x.id === base.id && x.project === base.project);
@@ -515,7 +501,7 @@ export class Editor {
 
   // One close action only: a second click during the close does nothing. Edit: flush first; a failed save stays open with the error.
   close(cx) {
-    if (this.closing || this.submitting) return; // never blocked by a pick in flight: the writer keeps reconciling it, a late outcome after the close is dropped
+    if (this.closing || this.submitting) return; // never blocked by a pick in flight: the writer keeps reconciling it
     this.closing = true;
     cx.spawn(async (acx) => {
       this.leaving = true;
@@ -582,7 +568,6 @@ export class Editor {
   // editor's baseline rev. One pick in flight at a time: the rows are disabled ("saving…") until it settles, and close, Escape, expand, archive and Save
   // wait like for a Save. After every outcome the rows come from the remote's card (reloaded), so a stale or refused pick shows the remote's value.
   // Title, description and notes keep the Save button (the local editor autosaves its text; a request per pause is not worth it here).
-  pickPending() { return [...(this.sent?.values() ?? [])].some((x) => x.pick || x.text); } // a pick or a text edit whose outcome is not known yet (the baseline rev is uncertain)
   // ONE remote operation in flight per editor: a text flush, a pick and a note/archive all run through this chain. An op builds its request (rev, changed
   // fields) only when its turn starts, after its predecessor settled and the baseline was rebased; a wait never lets two overlap.
   runExclusive(fn) {
@@ -590,9 +575,9 @@ export class Editor {
     this.opTail = p.then(() => {}, () => {});
     return p;
   }
-  inflight() { return this.picking || this.submitting || this.textOps > 0 || this.pickPending(); }
-  pickBusy() { return this.picking || this.submitting || this.pickPending(); } // a pick or a Save is in flight (a text flush is queued behind it, not refused)
-  inflightTip() { return this.pickPending() && !this.picking && !this.submitting ? `waiting for ${this.rname()}…` : "saving…"; }
+  inflight() { return this.picking || this.submitting || this.textOps > 0; }
+  pickBusy() { return this.picking || this.submitting; } // a pick or a Save is in flight (a text flush is queued behind it, not refused)
+  inflightTip() { return "saving…"; }
   remotePick(field, value, cx) {
     const key = { status: "column", priority: "priority", assignee: "assignee", project: "project", tags: "labels", parent: "parent" }[field];
     if (!key || this.closing || this.inflight()) return false;
@@ -612,7 +597,7 @@ export class Editor {
   // next keystroke (or the blur/close flush after one) is the retry.
   retryDeferredText(cx) {
     const card = this.fixedRemote;
-    if (!card || this.closing || this.pickPending() || this.textOps > 0 || !this.textDeferred) return; // ONLY a draft that was deferred or cancelled before it was ever sent
+    if (!card || this.closing || this.textOps > 0 || !this.textDeferred) return; // ONLY a draft that was deferred or cancelled before it was ever sent
     if (!editOps(card, { title: this.title.value(), desc: this.desc.value() }).length) return;
     void this.flushSave(cx);
   }
@@ -654,25 +639,21 @@ export class Editor {
       if (dest && dest.machine === card.remote?.machine && value !== card.project) { op = editOps(card, { project: dest.projectId })[0]; destLocal = value; }
     } else op = editOps(card, { [field]: value })[0];
     if (!op) { this.rowsFrom(card); return; }
-    ++this.rebaseGen;
     const last = await this.remoteSender(card.project, op, acx);
-    if (last.status === "pending" && last.nonce) this.sent.set(last.nonce, { op, destLocal, pick: true });
     if (this.closing) return; // closed while it was in flight: the writer reconciles it, nothing is shown
     this.msg = outcomeText(last);
     if (last.status === "saved") {
       this.reloadFailed = false;
       const next = await this.settleSaved(card, op, destLocal, acx);
-      ++this.rebaseGen;
-      if (this.closing) return; // closed meanwhile: the late outcome is dropped
+      if (this.closing) return; // closed meanwhile
       if (this.reloadFailed) this.msg = `saved, but could not reload ${this.rname()}: reopen the card`;
       this.adopt(next);
       this.rowsFrom(next);
       return;
     }
-    if (last.status === "pending") { this.rowsFrom(applied(card, op)); if (field === "project") this.project = destLocal; return; } // shown as asked; the late outcome sets it right
     await this.revertTo(card, acx);
   }
-  // Not saved (stale, refused, error, or a late failure): reload and show the remote's card.
+  // Not saved (stale, refused or error): reload and show the remote's card.
   async revertTo(card, acx) {
     this.reloadFailed = false;
     await this.reloadBounded(card.project, acx);
@@ -707,17 +688,14 @@ export class Editor {
     const stay = this.another;
     const sub = { title: this.title.value(), desc: this.desc.value() }; // what was submitted: Create another clears the draft only if it is still this
     const destLocal = this.project; // where a project change in this Save lands (a local binding id)
-    ++this.rebaseGen; // a Save supersedes every late rebase still waiting on a read
     cx.spawn((acx) => this.runExclusive(async () => {
       let last = null, card = target, failed = null;
       if (!target.new && this.fixedRemote && ops[0]?.op === "note") { card = this.fixedRemote; ops = this.remoteOps(); } // a note is built when its turn starts: the rev after any earlier request
       try {
         for (const op of ops) {
           last = await this.remoteSender(card.project, op, acx);
-          if (last.status === "pending" && last.nonce) this.sent.set(last.nonce, { op, destLocal });
           if (last.status !== "saved") break;
           card = await this.settleSaved(card, op, destLocal, acx); // a saved edit becomes the baseline (a move: the card on the destination board)
-          ++this.rebaseGen;
           if (this.fixedRemote) this.adopt(card);
         }
       } catch (e) { failed = e; } finally { this.submitting = false; } // the frozen picker always unfreezes
@@ -735,44 +713,9 @@ export class Editor {
       acx.notify();
     }).finally(() => this.retryDeferredText(acx)));
   }
-  // A result that arrived after the wait: shown, and a Saved edit moves the baseline.
-  takeLate(cx) {
-    for (const o of takeRemoteOutcomes()) {
-      this.msg = outcomeText(o);
-      const sent = this.sent.get(o.nonce);
-      if (!sent) continue;
-      this.sent.delete(o.nonce);
-      if (!this.fixedRemote) continue;
-      if (o.status === "saved") void this.lateRebase(this.fixedRemote, sent.op, sent.destLocal, cx, Boolean(sent.pick));
-      else if (sent.pick || sent.text) { // a pick or text edit that did not apply: the rows go back to the remote's card (the rows stay off until they do)
-        this.startPick();
-        const run = async (acx) => { try { await this.revertTo(this.fixedRemote, acx); } finally { this.endPick(); this.retryDeferredText(acx); if (!this.closing) acx?.notify?.(); } };
-        void (typeof cx?.spawn === "function" ? cx.spawn(run) : run(cx));
-      }
-    }
-  }
-  // A late Saved: the route follows at once; the reload and rev rebase then commit only if nothing newer (a Save, another move, another rebase) happened meanwhile.
-  // The route is set before the first await (so the next render already sits on the destination); the awaits run in a spawn with its OWN live
-  // context, because the event/render cx dies at the first await.
-  lateRebase(before, op, destLocal, cx, pick = false) {
-    const gen = ++this.rebaseGen;
-    if (pick) this.startPick(); // the rows stay off until the card is reloaded
-    this.fixedRemote = applied(before, op);
-    if (op.op === "edit" && op.project !== undefined) this.fixedRemote = { ...this.fixedRemote, project: destLocal };
-    const rest = async (acx) => {
-      try {
-        const card = await this.settleSaved(before, op, destLocal, acx, true);
-        if (this.closing || gen !== this.rebaseGen || !this.fixedRemote || this.fixedRemote.id !== card.id) return; // an older result never undoes a newer route
-        this.adopt({ ...card, notes: this.fixedRemote.notes });
-        this.rowsFrom(this.fixedRemote); // the pickers show the remote's card (a moved card: the destination)
-      } finally { if (pick) this.endPick(); this.retryDeferredText(acx); if (!this.closing) acx?.notify?.(); } // a closed view's context is not used
-    };
-    return typeof cx?.spawn === "function" ? cx.spawn(rest) : rest(cx);
-  }
-
   // An op of this editor was saved on the remote: the card as it is now. A project move reads the destination board and sits on the card there; any other
   // op takes the new rev from the re-read board (our own save moved it).
-  async settleSaved(card, op, destLocal, acx, reloadSource = false) { // reloadSource: a LATE result (nobody re-read the board after it)
+  async settleSaved(card, op, destLocal, acx) {
     let next = applied(card, op);
     const same = (x, project) => x.id === next.id && x.project === project;
     if (op.op === "edit" && op.project !== undefined) {
@@ -782,7 +725,6 @@ export class Editor {
       const there = loadMerged().tasks.find((x) => same(x, destLocal));
       if (there) next = there;
     } else if (!next.new) {
-      if (reloadSource) await this.reloadBounded(card.project, acx);
       const fresh = loadMerged().tasks.find((x) => same(x, next.project));
       if (fresh) next = { ...next, rev: fresh.rev };
     }
@@ -1114,7 +1056,6 @@ export class Editor {
 
   render(cx) {
     const t = theme();
-    if (this.remote) this.takeLate(cx);
     this.adoptAssignee();
     const field = (el) => el.px(10).rounded(8).border_1().border_color(t.input).bg(t.background).text_size(13).text_color(t.foreground);
     const projects = loadProjects(); // remote-bound ones too: a create there goes to the machine's inbox, never into a local card

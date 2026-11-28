@@ -871,42 +871,6 @@ test("fix1 a card with no rev is version 0: a poll that advances it after open m
   assert.equal((await stage(1, "edit")).ifRev, 0, "the opened version, not the polled one");
 });
 
-test("fix3 a held OLDER late rebase, released after a newer move, does not change the route or the rev", async () => {
-  withSecond();
-  const cx = await ready();
-  openCard("T-R1");
-  const v = new Editor(cx);
-  const moved = (project) => ({ op: "edit", id: "T-R1", project });
-  let release; const held = new Promise((r) => (release = r));
-  const before = v.fixedRemote;
-  v.remoteReload = () => held; // the older rebase waits on its reload
-  const older = v.lateRebase(before, moved(RID2), LID2, cx);
-  assert.equal(v.fixedRemote.project, LID2, "the route follows at once");
-  v.remoteReload = async () => {}; // a newer move B -> C finishes first
-  await v.lateRebase({ ...v.fixedRemote, rev: 5 }, moved("P-C"), "P-LOCALC", cx);
-  assert.equal(v.fixedRemote.project, "P-LOCALC");
-  const now = v.fixedRemote;
-  release(); await older;
-  assert.equal(v.fixedRemote.project, "P-LOCALC", "the older result is dropped");
-  assert.equal(v.fixedRemote.rev, now.rev);
-  assert.equal(v.fixedRemote, now);
-});
-
-test("fix4 the late rebase notifies through the spawned context, never the render context after an await", async () => {
-  withSecond();
-  const cx = await ready();
-  openCard("T-R1");
-  const v = new Editor(cx);
-  const calls = [];
-  const render = { notify: () => calls.push("render"), spawn: (fn) => { const acx = { notify: () => calls.push("spawned") }; return Promise.resolve().then(() => fn(acx)); } };
-  let release, n = 0; v.remoteReload = () => (n++ ? Promise.resolve() : new Promise((r) => (release = r))); // the first read is held
-  const p = v.lateRebase(v.fixedRemote, { op: "edit", id: "T-R1", project: RID2 }, LID2, render);
-  assert.equal(v.fixedRemote.project, LID2, "the route is set before any await");
-  await until(() => release, "reload started"); release();
-  await p;
-  assert.deepEqual(calls, ["spawned"]);
-});
-
 // ---- Job E: the live step 4 findings ----
 test("E(a) a remote edit has the expand icon; expand reopens the SAME remote card in the other size with the whole draft", async () => {
   withSecond();
@@ -1023,24 +987,6 @@ test("E3 a hung reload after a SAVED project pick says 'saved, but could not rel
   assert.equal(v.project, LID2);
 });
 
-test("E4 a late recovery held across a close uses no closed context: nothing is committed or notified after the close", async () => {
-  withSecond();
-  const cx = await ready();
-  openCard("T-R1");
-  const v = new Editor(cx);
-  const calls = [];
-  const render = { spawn: (fn) => { const acx = { notify: () => calls.push(v.closing ? "notify-after-close" : "notify"), timer: {} }; return Promise.resolve().then(() => fn(acx)); } };
-  let release, n = 0; v.remoteReload = () => (n++ ? Promise.resolve() : new Promise((r) => (release = r)));
-  const before = v.fixedRemote;
-  const p = v.lateRebase(before, { op: "edit", id: "T-R1", project: RID2 }, LID2, render, true);
-  await until(() => release, "reload held");
-  v.close(cx); await until(() => host.closed.length === 1, "closed");
-  const mid = v.fixedRemote;
-  release(); await p;
-  assert.deepEqual(calls, [], "no notify through the closed context");
-  assert.equal(v.fixedRemote, mid, "nothing committed after the close");
-});
-
 // ---- Job F: title and description of a remote card autosave like the local editor ----
 const typed = (v, t, d) => { let title = t, desc = d; v.title = { value: () => title, set_value: (x) => { title = x; }, focus() {}, on() {} }; v.desc = { value: () => desc, set_value: (x) => { desc = x; }, focus() {}, on() {} }; return { title: () => title, setTitle: (x) => { title = x; } }; };
 const withTimers = (cx) => { const later = []; cx.timer.after = (_ms, fn) => later.push(fn); return () => { for (const f of later.splice(0)) f(cx); }; };
@@ -1128,11 +1074,6 @@ test("F Save belongs to the note composer: it sends only the note op, no title/d
 
 // ---- Fix F2: ONE remote operation in flight per editor (flush, pick, note go through one serializer) ----
 const NOT_SENT = "Not sent yet: waiting for box1. Close again to discard your last edit.";
-const pendingPick = async (v, cx, field = "priority", val = "P0") => { // leaves a pick with an unknown outcome
-  v.setProp(field, val, cx);
-  await stage(1, "pick");
-  return true;
-};
 
 test("F2(2) text typed while the close flush waits for its reply is flushed too before the close", async () => {
   withSecond();
@@ -1252,10 +1193,6 @@ test("F4(2) a cancelled flush's cleanup never touches a context after the editor
 });
 
 // ---- Fix F5: a draft whose request came back refused is not retried until the user types again; a stale one retries once ----
-const lateText = async (v, cx, t, text, reply) => { // flush `text`, let it go pending, then answer it late with `reply`
-  t.setTitle(text); void v.flushSave(cx);
-  await until(() => sends().length >= 1, "staged");
-};
 
 test("F6 an old attempt does not suppress a NEW identical draft: saved A, remote B adopted, A typed again and cancelled behind a slow note => fresh flush", async () => {
   withSecond();
